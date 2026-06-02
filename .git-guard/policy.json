@@ -1,0 +1,155 @@
+{
+  "branch_from": [
+    {
+      "source": "main",
+      "source_ref": "refs/heads/main",
+      "target": "dev",
+      "target_ref": "refs/heads/dev",
+      "target_ref_regex": "^refs/heads/dev$"
+    },
+    {
+      "source": "dev",
+      "source_ref": "refs/heads/dev",
+      "target": "feat/*",
+      "target_ref": "refs/heads/feat/*",
+      "target_ref_regex": "^refs/heads/feat/.+$"
+    },
+    {
+      "source": "main",
+      "source_ref": "refs/heads/main",
+      "target": "case/*/*",
+      "target_ref": "refs/heads/case/*/*",
+      "target_ref_regex": "^refs/heads/case/.+/.+$"
+    }
+  ],
+  "branches": {
+    "families": [
+      "feat/*",
+      "case/*/*"
+    ],
+    "long_lived": [
+      "main",
+      "dev"
+    ]
+  },
+  "direct_commit_refs": [
+    {
+      "name": "case/*/*",
+      "ref": "refs/heads/case/*/*",
+      "ref_regex": "^refs/heads/case/.+/.+$"
+    },
+    {
+      "name": "feat/*",
+      "ref": "refs/heads/feat/*",
+      "ref_regex": "^refs/heads/feat/.+$"
+    }
+  ],
+  "merge_rules": [
+    {
+      "id": "case/*/* to feat/*",
+      "source": "case/*/*",
+      "source_ref": "refs/heads/case/*/*",
+      "source_ref_regex": "^refs/heads/case/.+/.+$",
+      "target": "feat/*",
+      "target_ref": "refs/heads/feat/*",
+      "target_ref_regex": "^refs/heads/feat/.+$"
+    },
+    {
+      "id": "dev to feat/*",
+      "source": "dev",
+      "source_ref": "refs/heads/dev",
+      "source_ref_regex": "^refs/heads/dev$",
+      "sync": true,
+      "target": "feat/*",
+      "target_ref": "refs/heads/feat/*",
+      "target_ref_regex": "^refs/heads/feat/.+$"
+    },
+    {
+      "id": "feat/* to dev",
+      "source": "feat/*",
+      "source_ref": "refs/heads/feat/*",
+      "source_ref_regex": "^refs/heads/feat/.+$",
+      "sync_merge_required": true,
+      "target": "dev",
+      "target_ref": "refs/heads/dev",
+      "target_ref_regex": "^refs/heads/dev$"
+    },
+    {
+      "id": "dev to main",
+      "source": "dev",
+      "source_ref": "refs/heads/dev",
+      "source_ref_regex": "^refs/heads/dev$",
+      "tag_pattern": "V#.#",
+      "tag_ref": "refs/tags/V#.#",
+      "tag_ref_regex": "^refs/tags/V[0-9]+\\.[0-9]+$",
+      "tag_required": true,
+      "tag_tokens": [
+        "#",
+        "#"
+      ],
+      "target": "main",
+      "target_ref": "refs/heads/main",
+      "target_ref_regex": "^refs/heads/main$"
+    }
+  ],
+  "protected_refs": [
+    "refs/heads/dev",
+    "refs/heads/main"
+  ],
+  "required_targets": [
+    {
+      "source": "case/*/*",
+      "source_ref": "refs/heads/case/*/*",
+      "source_ref_regex": "^refs/heads/case/.+/.+$",
+      "target_refs": [
+        "refs/heads/feat/*"
+      ],
+      "targets": [
+        "feat/*"
+      ]
+    },
+    {
+      "source": "feat/*",
+      "source_ref": "refs/heads/feat/*",
+      "source_ref_regex": "^refs/heads/feat/.+$",
+      "target_refs": [
+        "refs/heads/dev"
+      ],
+      "targets": [
+        "dev"
+      ]
+    },
+    {
+      "source": "dev",
+      "source_ref": "refs/heads/dev",
+      "source_ref_regex": "^refs/heads/dev$",
+      "target_refs": [
+        "refs/heads/main"
+      ],
+      "targets": [
+        "main"
+      ]
+    }
+  ],
+  "source": {
+    "file": "contribution.md",
+    "format": "mermaid.gitGraph",
+    "path": ".git-guard/contribution.md"
+  },
+  "tag_rules": [
+    {
+      "source": "dev",
+      "tag_pattern": "V#.#",
+      "tag_ref": "refs/tags/V#.#",
+      "tag_ref_regex": "^refs/tags/V[0-9]+\\.[0-9]+$",
+      "tag_required": true,
+      "tag_tokens": [
+        "#",
+        "#"
+      ],
+      "target": "main",
+      "target_ref": "refs/heads/main"
+    }
+  ],
+  "version": 1
+}

@@ -1,0 +1,23 @@
+[project]
+name = "portmap"
+version = "0.1.0"
+description = "Branch-scoped port and Traefik label generator for docker-compose projects."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+portmap = "portmap.cli:main"
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
