@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -eu
+hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$hook_dir/common.sh"
+git_guard_runtime_sync
+git_guard_exec_runtime pre-commit

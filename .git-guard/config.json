@@ -1,0 +1,25 @@
+{
+  "branch_logs": {
+    "force_required": true,
+    "path": ".branch_logs/"
+  },
+  "pre_push": {
+    "auto_push_missing_tags": true
+  },
+  "protected_branches": {
+    "enabled": true
+  },
+  "runtime": {
+    "auto_sync": true
+  },
+  "submodules": {
+    "allowed_branches": [
+      "main",
+      "case/*/*"
+    ],
+    "main_guard": true
+  },
+  "worktree": {
+    "reject_branch_creation_in_linked_worktree": true
+  }
+}
