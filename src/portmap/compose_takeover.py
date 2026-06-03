@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -19,25 +20,42 @@ PASSTHROUGH_COMMANDS = {
 }
 
 
-def build_docker_compose_command(args: list[str], *, cwd: Path) -> list[str]:
+@dataclass(frozen=True)
+class ComposeBrokerPlan:
+    command: list[str]
+    injected: bool
+    compose_file: Path | None = None
+    override_file: Path | None = None
+
+
+def plan_docker_compose_command(args: list[str], *, cwd: Path) -> ComposeBrokerPlan:
     clean_args = strip_remainder_separator(args)
     if should_passthrough(clean_args):
-        return ["docker", "compose", *clean_args]
+        return ComposeBrokerPlan(command=["docker", "compose", *clean_args], injected=False)
 
     compose_file = find_compose_file(cwd)
     override_file = cwd / GENERATED_OVERRIDE
     if compose_file is None or not override_file.exists():
-        return ["docker", "compose", *clean_args]
+        return ComposeBrokerPlan(command=["docker", "compose", *clean_args], injected=False)
 
-    return [
-        "docker",
-        "compose",
-        "-f",
-        str(compose_file),
-        "-f",
-        str(override_file),
-        *clean_args,
-    ]
+    return ComposeBrokerPlan(
+        command=[
+            "docker",
+            "compose",
+            "-f",
+            str(compose_file),
+            "-f",
+            str(override_file),
+            *clean_args,
+        ],
+        injected=True,
+        compose_file=compose_file,
+        override_file=override_file,
+    )
+
+
+def build_docker_compose_command(args: list[str], *, cwd: Path) -> list[str]:
+    return plan_docker_compose_command(args, cwd=cwd).command
 
 
 def strip_remainder_separator(args: list[str]) -> list[str]:

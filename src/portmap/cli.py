@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .compose_takeover import build_docker_compose_command, shell_hook
+from .compose_takeover import plan_docker_compose_command, shell_hook
 from .errors import PortmapError
 from .model import GenerateRequest
 from .planner import generate_plan
@@ -119,8 +119,14 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_docker_compose(args: argparse.Namespace) -> int:
-    command = build_docker_compose_command(args.compose_args, cwd=Path.cwd())
-    return subprocess.run(command, check=False).returncode
+    plan = plan_docker_compose_command(args.compose_args, cwd=Path.cwd())
+    if plan.injected:
+        print(
+            "portmap: docker compose takeover active; using "
+            f"-f {plan.compose_file} -f {plan.override_file}",
+            file=sys.stderr,
+        )
+    return subprocess.run(plan.command, check=False).returncode
 
 
 def cmd_shell_hook(args: argparse.Namespace) -> int:

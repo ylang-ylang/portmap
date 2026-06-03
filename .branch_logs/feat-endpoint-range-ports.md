@@ -6,5 +6,6 @@
 - Generate direct Docker port mappings and `PORTMAP_<ENDPOINT>_*` variables for range endpoints.
 - Add `portmap init` to create `.portmap/endpoints.toml`, `.portmap/README.md`, and `.portmap/.gitignore` for managed compose repos.
 - Add optional host `docker compose` takeover through `portmap shell-hook` and explicit `portmap docker-compose -- ...`.
+- Print a broker hint when `docker compose` takeover injects the generated override, so the hidden `-f` files are visible during debugging.
 - Document the managed compose repo shape, generated artifacts, range endpoint model, and shell wrapper switch.
 - Verify with `uv run --with pytest pytest`.
