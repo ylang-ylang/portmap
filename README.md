@@ -134,6 +134,29 @@ http://192.168.201.52/registry.json
 Generate files for an external compose project:
 
 ```bash
+cd /path/to/project
+portmap init
+```
+
+This creates:
+
+```text
+.portmap/
+  endpoints.toml
+  README.md
+  .gitignore
+```
+
+`.portmap/README.md` explains how to make a docker-compose repo portmap-managed:
+use Docker bridge networking for managed services, declare endpoint kinds in
+`endpoints.toml`, generate a branch-specific compose override, start compose
+with that override, and query the shared catalog for the assigned URLs and raw
+ports.
+
+After editing `.portmap/endpoints.toml`, generate files for the current
+branch/worktree:
+
+```bash
 portmap generate \
   --project-dir /path/to/project \
   --compose-file /path/to/project/docker-compose.yml \
@@ -153,6 +176,34 @@ docker compose \
   -f docker-compose.yml \
   -f .portmap/docker-compose.override.generated.yml \
   up -d
+```
+
+Optionally, let portmap broker host `docker compose` calls in the current
+shell:
+
+```bash
+source <(portmap shell-hook --compose-takeover)
+docker compose up -d
+docker compose ps
+```
+
+The hook only intercepts `docker compose` when `PORTMAP_COMPOSE_TAKEOVER=1`.
+It does not affect `docker ps`, `docker run`, or compose commands that already
+specify `-f/--file`. Disable it in the current shell with:
+
+```bash
+portmap_compose_takeover_off
+```
+
+The main repo `.env.example` includes `PORTMAP_COMPOSE_TAKEOVER=0` as the
+default switch. When `portmap shell-hook` is run from the portmap repo, it reads
+the local `.env` and uses that value. The gateway containers do not consume it;
+it is for the optional shell hook only.
+
+Without a shell hook, the same broker can be called explicitly:
+
+```bash
+portmap docker-compose -- up -d
 ```
 
 The generated override adds managed services to `portmap_gateway` and writes

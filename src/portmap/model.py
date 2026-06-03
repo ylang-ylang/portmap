@@ -10,6 +10,7 @@ class EndpointKind(StrEnum):
     HTTP = "http"
     TCP = "tcp"
     UDP = "udp"
+    RANGE = "range"
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,8 @@ class EndpointDeclaration:
     protocol: str | None = None
     host: str | None = None
     host_port: int | None = None
+    range_size: int | None = None
+    range_start: int | None = None
     preserve_host: bool = False
     upstream_host: str | None = None
 
@@ -65,6 +68,7 @@ class GenerateRequest:
     http_port: int = 8080
     tcp_port_start: int = 18000
     udp_port_start: int = 19000
+    range_port_start: int = 49160
     host_ip: str = "127.0.0.1"
     domain_suffix: str = "debug.local"
     gateway_network: str = "portmap_gateway"
