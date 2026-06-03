@@ -4,18 +4,26 @@ import json
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
+from typing import Self
+
+import fcntl
 
 from .errors import PortAllocationError
 
 
 @dataclass
 class PortAllocator:
-    state_file: Path
+    state_file: Path | None
     host_ip: str = "127.0.0.1"
     state: dict = field(default_factory=dict)
+    _lock_file: object | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.state_file.exists():
+        self.load()
+
+    def load(self) -> None:
+        if self.state_file is not None and self.state_file.exists():
             self.state = json.loads(self.state_file.read_text(encoding="utf-8"))
         else:
             self.state = {}
@@ -23,6 +31,38 @@ class PortAllocator:
         self.state.setdefault("allocations", {}).setdefault("udp", {})
         self.state.setdefault("ranges", {}).setdefault("tcp", {})
         self.state.setdefault("ranges", {}).setdefault("udp", {})
+
+    def __enter__(self) -> Self:
+        self.acquire_lock()
+        self.load()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.release_lock()
+
+    def acquire_lock(self) -> None:
+        if self._lock_file is not None:
+            return
+        if self.state_file is None:
+            return
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_file.with_suffix(self.state_file.suffix + ".lock")
+        lock_file = lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        self._lock_file = lock_file
+
+    def release_lock(self) -> None:
+        lock_file = self._lock_file
+        if lock_file is None:
+            return
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+        self._lock_file = None
 
     def allocate(self, *, protocol: str, key: str, preferred: int | None, start: int) -> int:
         protocol = protocol.lower()
@@ -76,6 +116,8 @@ class PortAllocator:
                 )
 
     def save(self) -> None:
+        if self.state_file is None:
+            return
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state_file.write_text(json.dumps(self.state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -85,7 +127,7 @@ class PortAllocator:
         return any(bool(allocations.get(protocol)) or bool(ranges.get(protocol)) for protocol in ("tcp", "udp"))
 
     def delete_if_empty(self) -> None:
-        if not self.has_allocations():
+        if self.state_file is not None and not self.has_allocations():
             self.state_file.unlink(missing_ok=True)
 
     def used_ports(self, protocol: str) -> set[int]:

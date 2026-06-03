@@ -6,7 +6,8 @@ The tool is a control plane, not a traffic proxy. Its default data plane is
 Traefik.
 
 It maps branch/worktree instances to generated Docker Compose overlays,
-Traefik labels, Traefik entrypoints, and a CLI-queryable endpoint registry.
+Traefik HTTP labels, Docker direct port mappings, and a CLI-queryable endpoint
+registry.
 
 It deliberately does not manage project runtime capability such as GPU,
 browser image contents, Playwright workflows, MCP business tools, frontend
@@ -19,9 +20,11 @@ Those belong to the project or the agent workflow.
 
 - inspect rendered Docker Compose services, ports, expose entries, and labels
 - generate branch-scoped Docker Compose override files
-- generate Traefik labels for HTTP/TCP/UDP endpoints
-- generate Traefik entrypoints for raw TCP/UDP endpoints
+- generate Traefik labels for HTTP endpoints
+- generate Docker direct port mappings for raw TCP/UDP and range endpoints
 - allocate non-conflicting raw TCP/UDP host ports
+- keep per-worktree generated state in `.portmap/state.json`
+- keep host-wide raw/range port allocation state in an allocation pool
 - write a local endpoint registry for CLI queries
 - clean up generated routes, ports, and instance state
 
@@ -68,8 +71,8 @@ container_port = 3478
 From that declaration the tool can generate:
 
 - `docker-compose.override.generated.yml`
+- `state.json` for this branch/worktree's generated compose project and endpoints
 - raw TCP/UDP allocation state only when raw endpoints need host ports
-- extra Traefik static data only when raw TCP/UDP entrypoints are needed
 
 For HTTP-only projects, `.portmap/` can stay minimal:
 
@@ -77,6 +80,7 @@ For HTTP-only projects, `.portmap/` can stay minimal:
 .portmap/
   endpoints.toml
   docker-compose.override.generated.yml
+  state.json
 ```
 
 The running service catalog is derived from Docker labels at the shared
@@ -219,6 +223,21 @@ PORTMAP_COMPOSE_TAKEOVER=0  # disable takeover, forward to real compose
 PORTMAP_BROKER_BYPASS=1     # internal bypass to avoid recursive shim calls
 ```
 
+The broker auto-generates `.portmap/docker-compose.override.generated.yml` and
+`.portmap/state.json` when `.portmap/endpoints.toml` exists. It also injects a
+branch/worktree-scoped compose project name unless the command already provides
+`-p/--project-name`.
+
+`state.json` is local to this worktree. The host-wide raw/range port pool is a
+separate file, defaulting to:
+
+```text
+~/.local/state/portmap/allocations.json
+```
+
+That allocation pool is shared so two branches cannot automatically pick the
+same host port before either container has bound it.
+
 The generated override adds managed services to `portmap_gateway` and writes
 Traefik Docker labels. The shared Traefik container discovers those labels
 through the Docker socket.
@@ -231,3 +250,41 @@ portmap list
 portmap status
 portmap endpoints my-repo dev
 ```
+
+## Integration Test Repo
+
+The repo includes a Python-managed integration fixture that creates a real Git
+worktree-style compose repo under the ignored `test_repo/` directory:
+
+```text
+test_repo/
+  mock-compose-app@wt/
+    mock-compose-app@main
+    mock-compose-app@dev
+    mock-compose-app@feat-all-endpoints
+  gateway/
+```
+
+The generated mock app has separate branches/worktrees and endpoint kinds:
+
+```text
+dev                -> HTTP endpoint
+feat/all-endpoints -> HTTP, TCP, UDP, and range endpoints
+```
+
+Run ordinary unit tests:
+
+```bash
+uv run --with pytest pytest
+```
+
+Run the real Docker response test:
+
+```bash
+PORTMAP_RUN_INTEGRATION=1 uv run --with pytest pytest tests/test_integration_test_repo.py -q
+```
+
+That integration test starts a temporary Traefik gateway and both worktree
+instances, then verifies actual HTTP, TCP, UDP, and range UDP responses with
+Python clients. The generated `test_repo/` directory is ignored by git and can
+be deleted at any time; the test will recreate it.
