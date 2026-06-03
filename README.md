@@ -129,7 +129,10 @@ curl -I "http://portmap.$DNS_DOMAIN/"
 ```
 
 The catalog page lists currently visible `portmap`/Traefik-managed services and
-their generated endpoints. The JSON form is available at:
+their generated endpoints. Each visible compose project also has a `Down`
+button that removes its portmap-managed Docker Compose containers and networks
+by compose project label, which is useful when a worktree/repo path has moved.
+The JSON form is available at:
 
 ```text
 http://192.168.201.52/registry.json

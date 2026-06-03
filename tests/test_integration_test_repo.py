@@ -12,6 +12,7 @@ from typing import Callable
 
 import pytest
 
+from portmap.catalog import compose_down_project
 from tests.fixtures.test_repo_manager import RepoLayout, build_test_repo
 
 
@@ -69,6 +70,11 @@ def test_generated_worktree_repo_serves_http_tcp_udp_and_range() -> None:
         assert wait_for(lambda: udp_roundtrip("127.0.0.1", relay_port, b"relay")).startswith(
             f"portmap-range-ok-{relay_port}:relay".encode()
         )
+
+        down_result = compose_down_project(feat_state["compose_project"])
+        assert down_result["ok"] is True, down_result
+        assert down_result["containers_removed"] >= 1
+        assert docker_containers_by_compose_project(feat_state["compose_project"]) == []
     finally:
         run_no_fail_docker_compose(layout.feat, env, "down", "-v", "--remove-orphans")
         run_no_fail_docker_compose(layout.dev, env, "down", "-v", "--remove-orphans")
@@ -192,6 +198,27 @@ def docker_compose_projects_by_label(label: str) -> list[str]:
     if result.returncode != 0:
         return []
     return sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
+
+
+def docker_containers_by_compose_project(compose_project: str) -> list[str]:
+    result = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            f"label=com.docker.compose.project={compose_project}",
+            "--format",
+            "{{.Names}}",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
 
 
 def read_state(worktree: Path) -> dict:
