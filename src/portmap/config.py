@@ -41,8 +41,17 @@ def parse_endpoint(name: str, raw: Any) -> EndpointDeclaration:
     host = raw.get("host")
     host_port = raw.get("host_port")
     protocol = raw.get("protocol")
+    range_size = raw.get("range_size")
+    range_start = raw.get("range_start")
     preserve_host = raw.get("preserve_host", False)
     upstream_host = raw.get("upstream_host")
+    if protocol is not None and str(protocol).lower() not in {"tcp", "udp"}:
+        raise ConfigError(f"endpoint {name!r} protocol must be tcp or udp")
+    if kind == EndpointKind.RANGE:
+        if not isinstance(range_size, int) or range_size <= 0:
+            raise ConfigError(f"endpoint {name!r} range_size must be a positive integer")
+        if range_start is not None and (not isinstance(range_start, int) or range_start <= 0):
+            raise ConfigError(f"endpoint {name!r} range_start must be a positive integer")
     if not isinstance(preserve_host, bool):
         raise ConfigError(f"endpoint {name!r} preserve_host must be a boolean")
     if upstream_host is not None and not isinstance(upstream_host, str):
@@ -52,9 +61,11 @@ def parse_endpoint(name: str, raw: Any) -> EndpointDeclaration:
         kind=kind,
         service=service,
         container_port=container_port,
-        protocol=str(protocol) if protocol is not None else None,
+        protocol=str(protocol).lower() if protocol is not None else None,
         host=str(host) if host is not None else None,
         host_port=host_port if isinstance(host_port, int) else None,
+        range_size=range_size if isinstance(range_size, int) else None,
+        range_start=range_start if isinstance(range_start, int) else None,
         preserve_host=preserve_host,
         upstream_host=upstream_host.strip() if isinstance(upstream_host, str) and upstream_host.strip() else None,
     )

@@ -130,7 +130,7 @@ def parse_portmap_endpoints(labels: dict[str, str]) -> list[dict[str, Any]]:
 
 
 def normalize_label_value(field: str, value: str) -> Any:
-    if field in {"container_port", "host_port"}:
+    if field in {"container_port", "host_port", "range_start", "range_end", "range_size"}:
         try:
             return int(value)
         except ValueError:
@@ -684,6 +684,11 @@ def endpoint_external(endpoint: dict[str, Any]) -> str | None:
         return str(endpoint["url"])
     if endpoint.get("kind") in {"tcp", "udp"} and endpoint.get("host") and endpoint.get("host_port"):
         return f"{endpoint['host']}:{endpoint['host_port']}"
+    if endpoint.get("kind") == "range" and endpoint.get("host") and endpoint.get("host_port"):
+        range_text = ""
+        if endpoint.get("range_start") and endpoint.get("range_end"):
+            range_text = f" relay {endpoint['range_start']}-{endpoint['range_end']}"
+        return f"{endpoint['host']}:{endpoint['host_port']}{range_text}"
     return None
 
 

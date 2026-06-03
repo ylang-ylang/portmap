@@ -12,3 +12,6 @@ class ConfigError(PortmapError):
 class ComposeError(PortmapError):
     """Invalid or unsupported Docker Compose configuration."""
 
+
+class PortAllocationError(PortmapError):
+    """Unable to allocate requested host ports."""

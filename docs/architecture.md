@@ -24,9 +24,9 @@ raw TCP / raw UDP
   -> Traefik TCP/UDP entrypoints or Docker port mappings
   -> branch service:container_port
 
-TURN / coturn
-  -> project-owned TCP/UDP service
-  -> exposed like any other raw TCP/UDP endpoint
+dynamic port-range protocols
+  -> project-owned service
+  -> one entry host port plus one branch-scoped host port range
 ```
 
 `portmap` owns only the control-plane pieces:
@@ -38,7 +38,9 @@ TURN / coturn
 - endpoint discovery or declaration
 - generated compose overlays
 - generated Traefik labels and entrypoints
+- generated direct Docker port mappings for range endpoints
 - raw TCP/UDP host-port allocation
+- range endpoint host-port allocation
 - local endpoint registry
 - status and cleanup metadata
 
@@ -145,8 +147,7 @@ sudo resolvectl domain "$DNS_IFACE" "~$DNS_DOMAIN"
 
 ## Endpoint Classes
 
-`portmap` should classify exposed services into three endpoint
-classes.
+`portmap` should classify exposed services into four endpoint classes.
 
 ### `http`
 
@@ -217,6 +218,57 @@ browser
 ```
 
 The browser needs the URL, not the container port.
+
+### `range`
+
+Examples:
+
+- TURN/coturn
+- SIP plus RTP
+- RTSP plus RTP/RTCP
+- FTP passive mode
+
+Range endpoints model protocols with one entry/control port and a later
+runtime-selected data/media port range. `portmap` does not understand the
+protocol; it only allocates the external entry port and the contiguous host port
+range, then writes both into the generated compose override.
+
+Example declaration:
+
+```toml
+[endpoints.turn]
+kind = "range"
+service = "coturn"
+container_port = 3478
+protocol = "udp"
+range_size = 40
+```
+
+Example generated compose shape:
+
+```yaml
+services:
+  coturn:
+    ports:
+      - "34781:3478/udp"
+      - "49160-49199:49160-49199/udp"
+    environment:
+      PORTMAP_TURN_HOST: "192.168.201.52"
+      PORTMAP_TURN_PORT: "34781"
+      PORTMAP_TURN_PROTOCOL: "udp"
+      PORTMAP_TURN_RANGE_MIN_PORT: "49160"
+      PORTMAP_TURN_RANGE_MAX_PORT: "49199"
+      PORTMAP_TURN_RANGE_SIZE: "40"
+```
+
+The range uses same-number host/container mapping. This is deliberate because
+protocols such as TURN advertise selected relay ports to external clients; the
+project service must be configured to listen on the injected range.
+
+All services referenced by `endpoints.toml` receive the generated
+`PORTMAP_<ENDPOINT>_*` variables. This stays generic while allowing one service
+to consume another endpoint's externally assigned address, for example a browser
+service reading `PORTMAP_TURN_*` to publish TURN details.
 
 ### `tcp`
 
@@ -406,12 +458,22 @@ Generated files should live under:
 ```text
 .portmap/
   endpoints.toml
+  README.md
+  .gitignore
   docker-compose.override.generated.yml
 ```
 
 `endpoints.toml` is the project-local source of truth. The generated compose
 override is the only project-local artifact required for HTTP endpoints because
 Traefik and the catalog both read Docker labels from running containers.
+
+`portmap init` creates `.portmap/endpoints.toml`, `.portmap/README.md`, and
+`.portmap/.gitignore`. The README is deliberately project-local: it documents
+how this compose repo should be shaped for portmap to manage it, how endpoint
+kinds map to HTTP/raw/range routing, how to generate the branch-specific
+override, and how to query the shared catalog. `portmap generate` should also
+add the README and `.gitignore` when they are missing, but it should not
+overwrite existing project-local docs.
 
 Raw TCP/UDP endpoints may need additional generated state because they consume
 host ports:

@@ -27,8 +27,11 @@ class PlannedEndpoint:
     url: str | None = None
     host_ip: str | None = None
     host_port: int | None = None
+    range_start: int | None = None
+    range_end: int | None = None
     entrypoint: str | None = None
-    protocol: str = "tcp"
+    protocol: str | None = None
+    ports: tuple[str, ...] = ()
     labels: tuple[str, ...] = ()
 
 
@@ -160,6 +163,55 @@ def plan_endpoint(
             service_name=traefik_service,
             host=host,
             url=url,
+            host_port=request.http_port,
+            labels=labels,
+        )
+
+    if endpoint.kind == EndpointKind.RANGE:
+        labels = portmap_service_labels(identity, branch, request)
+        protocol = endpoint.protocol or "udp"
+        entry_host_port = allocator.allocate(
+            protocol=protocol,
+            key=f"{identity.repo_id}:{branch}:{endpoint.name}:{protocol}:entry",
+            preferred=endpoint.host_port,
+            start=request.udp_port_start if protocol == "udp" else request.tcp_port_start,
+        )
+        range_size = endpoint.range_size or 1
+        range_start, range_end = allocator.allocate_range(
+            protocol=protocol,
+            key=f"{identity.repo_id}:{branch}:{endpoint.name}:{protocol}:range",
+            preferred_start=endpoint.range_start,
+            start=request.range_port_start,
+            size=range_size,
+        )
+        labels += portmap_endpoint_labels(
+            router=router,
+            endpoint=endpoint,
+            fields={
+                "host": request.host_ip,
+                "host_port": str(entry_host_port),
+                "protocol": protocol,
+                "range_start": str(range_start),
+                "range_end": str(range_end),
+                "range_size": str(range_size),
+            },
+        )
+        return PlannedEndpoint(
+            name=endpoint.name,
+            kind=endpoint.kind,
+            service=endpoint.service,
+            container_port=endpoint.container_port,
+            router_name=router,
+            service_name=traefik_service,
+            host_ip=request.host_ip,
+            host_port=entry_host_port,
+            range_start=range_start,
+            range_end=range_end,
+            protocol=protocol,
+            ports=(
+                f"{entry_host_port}:{endpoint.container_port}/{protocol}",
+                f"{range_start}-{range_end}:{range_start}-{range_end}/{protocol}",
+            ),
             labels=labels,
         )
 
@@ -276,17 +328,28 @@ def build_compose_override(
     gateway_network: str,
 ) -> dict[str, Any]:
     services: dict[str, Any] = {}
+    managed_service_names = tuple(dict.fromkeys(endpoint.service for endpoint in planned))
+    environment = portmap_environment(planned)
     for endpoint in planned:
         service_config = services.setdefault(endpoint.service, {})
         labels = service_config.setdefault("labels", [])
         for label in endpoint.labels:
             if label not in labels:
                 labels.append(label)
+        if endpoint.ports:
+            ports = service_config.setdefault("ports", [])
+            for port in endpoint.ports:
+                if port not in ports:
+                    ports.append(port)
         service_config["networks"] = service_networks_with_gateway(
             compose=compose,
             service_name=endpoint.service,
             gateway_network=gateway_network,
         )
+    for service_name in managed_service_names:
+        service_config = services.setdefault(service_name, {})
+        service_environment = service_config.setdefault("environment", {})
+        service_environment.update(environment)
     return {
         "services": services,
         "networks": {
@@ -296,6 +359,36 @@ def build_compose_override(
             }
         },
     }
+
+
+def portmap_environment(planned: tuple[PlannedEndpoint, ...]) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    for endpoint in planned:
+        prefix = f"PORTMAP_{env_name(endpoint.name)}"
+        environment[f"{prefix}_KIND"] = endpoint.kind.value
+        environment[f"{prefix}_SERVICE"] = endpoint.service
+        environment[f"{prefix}_CONTAINER_PORT"] = str(endpoint.container_port)
+        if endpoint.url:
+            environment[f"{prefix}_URL"] = endpoint.url
+        if endpoint.host:
+            environment[f"{prefix}_HOST"] = endpoint.host
+        if endpoint.host_ip:
+            environment[f"{prefix}_HOST"] = endpoint.host_ip
+        if endpoint.host_port is not None:
+            environment[f"{prefix}_PORT"] = str(endpoint.host_port)
+        if endpoint.protocol:
+            environment[f"{prefix}_PROTOCOL"] = endpoint.protocol
+        if endpoint.range_start is not None:
+            environment[f"{prefix}_RANGE_MIN_PORT"] = str(endpoint.range_start)
+        if endpoint.range_end is not None:
+            environment[f"{prefix}_RANGE_MAX_PORT"] = str(endpoint.range_end)
+        if endpoint.range_start is not None and endpoint.range_end is not None:
+            environment[f"{prefix}_RANGE_SIZE"] = str(endpoint.range_end - endpoint.range_start + 1)
+    return environment
+
+
+def env_name(value: str) -> str:
+    return slugify(value).replace("-", "_").upper()
 
 
 def service_networks_with_gateway(
@@ -314,7 +407,7 @@ def service_networks_with_gateway(
 def build_traefik_static(planned: tuple[PlannedEndpoint, ...]) -> dict[str, Any]:
     entrypoints: dict[str, Any] = {}
     for endpoint in planned:
-        if endpoint.kind == EndpointKind.HTTP or endpoint.entrypoint is None or endpoint.host_port is None:
+        if endpoint.kind in {EndpointKind.HTTP, EndpointKind.RANGE} or endpoint.entrypoint is None or endpoint.host_port is None:
             continue
         suffix = "/udp" if endpoint.kind == EndpointKind.UDP else "/tcp"
         entrypoints[endpoint.entrypoint] = {"address": f":{endpoint.host_port}{suffix}"}
@@ -346,8 +439,14 @@ def build_registry(
                 "container_port": endpoint.container_port,
                 "host": endpoint.host_ip,
                 "port": endpoint.host_port,
-                "entrypoint": endpoint.entrypoint,
             }
+            if endpoint.entrypoint is not None:
+                endpoint_entries[endpoint.name]["entrypoint"] = endpoint.entrypoint
+            if endpoint.range_start is not None and endpoint.range_end is not None:
+                endpoint_entries[endpoint.name]["range"] = {
+                    "min_port": endpoint.range_start,
+                    "max_port": endpoint.range_end,
+                }
 
     return {
         "repos": {
