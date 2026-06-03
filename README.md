@@ -98,27 +98,36 @@ that endpoint. If a service needs a specific upstream Host, set
 Start the shared gateway once:
 
 ```bash
-cp .env.example .env
-docker compose -f docker-compose.gateway.yml up -d
+portmap gateway up -d
 ```
 
 This creates the `portmap_gateway` Docker network and exposes:
 
 ```text
-Catalog: http://192.168.201.52
-Traefik: http://192.168.201.52:8080
-DNS:     192.168.201.52:53
+Catalog: http://<detected-host-ip>
+Traefik: http://<detected-host-ip>:8080
+DNS:     <detected-host-ip>:53
 ```
 
-CoreDNS answers every `*.debug.lan` A record with `192.168.201.52`.
+CoreDNS answers every `*.debug.lan` A record with the detected host LAN IP.
 Configure development machines with split DNS so only `debug.lan` queries go
 to this DNS server.
+
+Gateway runtime settings are tracked in the portmap repo root:
+
+```text
+portmap.toml
+```
+
+`portmap gateway` reads that file directly and detects the current host LAN IP
+at runtime. The detected IP is used for DNS answers and raw/range endpoint
+advertisement, so the LAN IP does not need to be stored in config.
 
 Configure split DNS on a Linux development machine without manually looking up
 the network interface:
 
 ```bash
-DNS_SERVER=192.168.201.52
+DNS_SERVER=<detected-host-ip>
 DNS_DOMAIN=debug.lan
 DNS_IFACE="$(ip route get "$DNS_SERVER" | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
 
@@ -135,7 +144,7 @@ by compose project label, which is useful when a worktree/repo path has moved.
 The JSON form is available at:
 
 ```text
-http://192.168.201.52/registry.json
+http://<detected-host-ip>/registry.json
 ```
 
 Generate files for an external compose project:
@@ -171,9 +180,7 @@ portmap generate \
   --out-dir /path/to/project/.portmap \
   --branch dev \
   --repo-id my-repo \
-  --repo-name my-repo \
-  --domain-suffix debug.lan \
-  --gateway-network portmap_gateway
+  --repo-name my-repo
 ```
 
 Then start the project with the generated override:
@@ -248,7 +255,7 @@ through the Docker socket.
 Query the shared catalog:
 
 ```bash
-curl http://192.168.201.52/registry.json
+curl http://<detected-host-ip>/registry.json
 portmap list
 portmap status
 portmap endpoints my-repo dev

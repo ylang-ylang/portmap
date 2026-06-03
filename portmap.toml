@@ -1,0 +1,17 @@
+[gateway]
+http_bind = "0.0.0.0"
+http_port = 8080
+catalog_bind = "0.0.0.0"
+catalog_port = 80
+dns_bind = "0.0.0.0"
+dns_port = 53
+dns_domain = "debug.lan"
+network = "portmap_gateway"
+
+[ports]
+tcp_start = 18000
+udp_start = 19000
+range_start = 49160
+
+[state]
+dir = "~/.local/state/portmap"

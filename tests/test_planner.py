@@ -207,7 +207,7 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert "traefik.http.routers.sample-feat-example-frontend.entrypoints=web" in frontend_labels
     assert (
         "traefik.http.routers.sample-feat-example-frontend.rule="
-        "Host(`frontend.feat-example.sample.debug.local`)"
+        "Host(`frontend.feat-example.sample.debug.lan`)"
     ) in frontend_labels
     assert (
         "traefik.http.services.sample-feat-example-frontend.loadbalancer.server.port=5173"
@@ -225,7 +225,7 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert "portmap.endpoints.sample-feat-example-frontend.upstream_host=127.0.0.1:5173" in frontend_labels
     assert (
         "portmap.endpoints.sample-feat-example-frontend.url="
-        "http://frontend.feat-example.sample.debug.local:28081"
+        "http://frontend.feat-example.sample.debug.lan:28081"
     ) in frontend_labels
 
     mqtt_labels = plan.compose_override["services"]["mqtt"]["labels"]
@@ -267,7 +267,7 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert plan.compose_override["services"]["frontend"]["environment"]["PORTMAP_TURN_RANGE_MIN_PORT"] == "49160"
     assert plan.compose_override["services"]["frontend"]["environment"]["PORTMAP_TURN_RANGE_MAX_PORT"] == "49199"
     assert plan.compose_override["services"]["turn"]["environment"]["PORTMAP_FRONTEND_URL"] == (
-        "http://frontend.feat-example.sample.debug.local:28081"
+        "http://frontend.feat-example.sample.debug.lan:28081"
     )
     assert plan.compose_override["networks"]["portmap_gateway"] == {
         "external": True,
@@ -280,7 +280,7 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert instance["compose_project"] == plan.compose_project
     assert plan.compose_project is not None
     assert plan.compose_project.startswith("sample_feat_example_")
-    assert instance["endpoints"]["frontend"]["url"] == "http://frontend.feat-example.sample.debug.local:28081"
+    assert instance["endpoints"]["frontend"]["url"] == "http://frontend.feat-example.sample.debug.lan:28081"
     assert instance["endpoints"]["mqtt"]["port"] == 28831
     assert instance["endpoints"]["udp_echo"]["port"] == 29991
     assert instance["endpoints"]["turn"]["port"] == 34781

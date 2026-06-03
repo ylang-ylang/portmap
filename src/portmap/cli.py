@@ -24,6 +24,7 @@ from .model import GenerateRequest
 from .planner import generate_plan
 from .registry import get_instance, list_repos, read_catalog, read_registry
 from .scaffold import ensure_portmap_support_files, init_portmap
+from .settings import load_portmap_settings
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,6 +64,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     docker_compose.add_argument("compose_args", nargs=argparse.REMAINDER)
     docker_compose.set_defaults(func=cmd_docker_compose)
+
+    gateway = subparsers.add_parser(
+        "gateway",
+        help="run the shared gateway compose from portmap.toml settings",
+    )
+    gateway.add_argument(
+        "compose_args",
+        nargs=argparse.REMAINDER,
+        help="docker compose arguments; defaults to 'up -d'",
+    )
+    gateway.set_defaults(func=cmd_gateway)
 
     broker = subparsers.add_parser("broker", help="manage non-shell docker compose broker integration")
     broker_subparsers = broker.add_subparsers(dest="broker_command", required=True)
@@ -176,6 +188,23 @@ def cmd_docker_compose(args: argparse.Namespace) -> int:
     env = os.environ.copy()
     env["PORTMAP_BROKER_BYPASS"] = "1"
     return subprocess.run(plan.command, check=False, env=env).returncode
+
+
+def cmd_gateway(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    compose_args = strip_remainder(args.compose_args) or ["up", "-d"]
+    env = os.environ.copy()
+    env.update(settings.gateway_env())
+    env["PORTMAP_ROOT"] = str(settings.root)
+    env["PORTMAP_BROKER_BYPASS"] = "1"
+    command = [
+        "docker",
+        "compose",
+        "-f",
+        str(settings.root / "docker-compose.gateway.yml"),
+        *compose_args,
+    ]
+    return subprocess.run(command, check=False, env=env).returncode
 
 
 def cmd_broker_install(args: argparse.Namespace) -> int:
@@ -298,16 +327,23 @@ def resolve_compose_file(project_dir: Path, compose_file: Path | None) -> Path:
 
 
 def env_generate_defaults() -> dict[str, Any]:
+    settings = load_portmap_settings(environ=os.environ)
     return {
-        "http_port": int_env(os.environ, "PORTMAP_HTTP_PORT", 8080),
-        "tcp_port_start": int_env(os.environ, "PORTMAP_TCP_PORT_START", 18000),
-        "udp_port_start": int_env(os.environ, "PORTMAP_UDP_PORT_START", 19000),
-        "range_port_start": int_env(os.environ, "PORTMAP_RANGE_PORT_START", 49160),
+        "http_port": int_env(os.environ, "PORTMAP_HTTP_PORT", settings.http_port),
+        "tcp_port_start": int_env(os.environ, "PORTMAP_TCP_PORT_START", settings.tcp_port_start),
+        "udp_port_start": int_env(os.environ, "PORTMAP_UDP_PORT_START", settings.udp_port_start),
+        "range_port_start": int_env(os.environ, "PORTMAP_RANGE_PORT_START", settings.range_port_start),
         "host_ip": env_host_ip(os.environ),
         "domain_suffix": env_domain_suffix(os.environ),
-        "gateway_network": os.environ.get("PORTMAP_GATEWAY_NETWORK", "portmap_gateway"),
+        "gateway_network": settings.gateway_network,
         "allocation_state_file": env_allocation_state_file(os.environ),
     }
+
+
+def strip_remainder(args: list[str]) -> list[str]:
+    if args and args[0] == "--":
+        return args[1:]
+    return args
 
 
 if __name__ == "__main__":

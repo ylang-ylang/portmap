@@ -106,7 +106,7 @@ if [ "${{PORTMAP_COMPOSE_TAKEOVER:-1}}" != "1" ]; then
 fi
 
 if [ -f ".portmap/endpoints.toml" ]; then
-  exec env -u VIRTUAL_ENV PORTMAP_BROKER_BYPASS=1 uv run --project "$PORTMAP_ROOT" portmap docker-compose -- "$@"
+  exec env -u VIRTUAL_ENV PORTMAP_ROOT="$PORTMAP_ROOT" PORTMAP_BROKER_BYPASS=1 uv run --project "$PORTMAP_ROOT" portmap docker-compose -- "$@"
 fi
 
 exec "$REAL_COMPOSE" "$@"
