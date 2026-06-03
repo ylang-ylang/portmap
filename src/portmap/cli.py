@@ -8,7 +8,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .compose_takeover import plan_docker_compose_command, shell_hook
+from .broker_shim import (
+    broker_shim_status,
+    docker_config_dir,
+    install_compose_plugin_shim,
+    uninstall_compose_plugin_shim,
+)
+from .compose_takeover import plan_docker_compose_command
 from .errors import PortmapError
 from .model import GenerateRequest
 from .planner import generate_plan
@@ -54,13 +60,39 @@ def build_parser() -> argparse.ArgumentParser:
     docker_compose.add_argument("compose_args", nargs=argparse.REMAINDER)
     docker_compose.set_defaults(func=cmd_docker_compose)
 
-    hook = subparsers.add_parser("shell-hook", help="print shell functions for optional host docker compose takeover")
-    hook.add_argument(
-        "--compose-takeover",
-        action="store_true",
-        help="enable docker compose takeover by default in the emitted shell hook",
+    broker = subparsers.add_parser("broker", help="manage non-shell docker compose broker integration")
+    broker_subparsers = broker.add_subparsers(dest="broker_command", required=True)
+
+    broker_install = broker_subparsers.add_parser("install", help="install docker compose plugin shim")
+    broker_install.add_argument(
+        "--method",
+        choices=("docker-plugin",),
+        default="docker-plugin",
+        help="broker integration method",
     )
-    hook.set_defaults(func=cmd_shell_hook)
+    broker_install.add_argument("--docker-config", type=Path, default=docker_config_dir())
+    broker_install.add_argument("--real-compose", type=Path)
+    broker_install.add_argument("--portmap-root", type=Path)
+    broker_install.add_argument("--force", action="store_true", help="overwrite an existing non-portmap plugin shim")
+    broker_install.set_defaults(func=cmd_broker_install)
+
+    broker_uninstall = broker_subparsers.add_parser("uninstall", help="remove docker compose plugin shim")
+    broker_uninstall.add_argument(
+        "--method",
+        choices=("docker-plugin",),
+        default="docker-plugin",
+        help="broker integration method",
+    )
+    broker_uninstall.add_argument("--docker-config", type=Path, default=docker_config_dir())
+    broker_uninstall.set_defaults(func=cmd_broker_uninstall)
+
+    broker_status = broker_subparsers.add_parser("status", help="print docker compose plugin shim status")
+    broker_status.add_argument("--docker-config", type=Path, default=docker_config_dir())
+    broker_status.set_defaults(func=cmd_broker_status)
+
+    broker_doctor = broker_subparsers.add_parser("doctor", help="print broker diagnostic status")
+    broker_doctor.add_argument("--docker-config", type=Path, default=docker_config_dir())
+    broker_doctor.set_defaults(func=cmd_broker_status)
 
     generate = subparsers.add_parser("generate", help="generate compose override and registry files")
     generate.add_argument("--compose-file", type=Path, default=Path("docker-compose.yml"))
@@ -126,13 +158,32 @@ def cmd_docker_compose(args: argparse.Namespace) -> int:
             f"-f {plan.compose_file} -f {plan.override_file}",
             file=sys.stderr,
         )
-    return subprocess.run(plan.command, check=False).returncode
+    env = os.environ.copy()
+    env["PORTMAP_BROKER_BYPASS"] = "1"
+    return subprocess.run(plan.command, check=False, env=env).returncode
 
 
-def cmd_shell_hook(args: argparse.Namespace) -> int:
-    print(shell_hook(compose_takeover=args.compose_takeover, env_file=Path.cwd() / ".env"), end="")
+def cmd_broker_install(args: argparse.Namespace) -> int:
+    status = install_compose_plugin_shim(
+        docker_config=args.docker_config.expanduser(),
+        real_compose=args.real_compose.expanduser() if args.real_compose else None,
+        portmap_root=args.portmap_root.expanduser() if args.portmap_root else None,
+        force=args.force,
+    )
+    print_json(status.as_dict())
     return 0
 
+
+def cmd_broker_uninstall(args: argparse.Namespace) -> int:
+    status = uninstall_compose_plugin_shim(docker_config=args.docker_config.expanduser())
+    print_json(status.as_dict())
+    return 0
+
+
+def cmd_broker_status(args: argparse.Namespace) -> int:
+    status = broker_shim_status(docker_config=args.docker_config.expanduser())
+    print_json(status.as_dict())
+    return 0
 
 def cmd_generate(args: argparse.Namespace) -> int:
     compose_file = None if args.compose_json else args.compose_file

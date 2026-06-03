@@ -178,32 +178,45 @@ docker compose \
   up -d
 ```
 
-Optionally, let portmap broker host `docker compose` calls in the current
-shell:
+The broker can be called explicitly without any shell integration:
 
 ```bash
-source <(portmap shell-hook --compose-takeover)
+portmap docker-compose -- up -d
+```
+
+For transparent `docker compose ...` takeover, install the Docker Compose
+plugin shim. This works for interactive shells, scripts, and non-interactive
+agents such as Codex because it does not rely on `.zshrc` or shell functions:
+
+```bash
+portmap broker install --method docker-plugin
 docker compose up -d
 docker compose ps
 ```
 
-The hook only intercepts `docker compose` when `PORTMAP_COMPOSE_TAKEOVER=1`.
-It does not affect `docker ps`, `docker run`, or compose commands that already
-specify `-f/--file`. Disable it in the current shell with:
+The shim is installed at:
 
-```bash
-portmap_compose_takeover_off
+```text
+~/.docker/cli-plugins/docker-compose
 ```
 
-The main repo `.env.example` includes `PORTMAP_COMPOSE_TAKEOVER=0` as the
-default switch. When `portmap shell-hook` is run from the portmap repo, it reads
-the local `.env` and uses that value. The gateway containers do not consume it;
-it is for the optional shell hook only.
+Docker CLI will call that plugin for `docker compose ...`. The shim forwards
+Docker plugin metadata to the real Compose plugin, strips Docker's plugin
+environment before forwarding, and calls `portmap docker-compose -- ...` only
+when takeover is enabled and the current directory contains `.portmap`.
 
-Without a shell hook, the same broker can be called explicitly:
+Inspect or remove the shim:
 
 ```bash
-portmap docker-compose -- up -d
+portmap broker status
+portmap broker uninstall
+```
+
+Safety switches:
+
+```text
+PORTMAP_COMPOSE_TAKEOVER=0  # disable takeover, forward to real compose
+PORTMAP_BROKER_BYPASS=1     # internal bypass to avoid recursive shim calls
 ```
 
 The generated override adds managed services to `portmap_gateway` and writes
