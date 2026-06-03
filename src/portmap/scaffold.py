@@ -239,23 +239,24 @@ Each worktree/branch runs the same source compose file plus its own generated
 override. Portmap uses the repo identity and branch/worktree instance to assign
 different Host names and raw/range ports.
 
-Optional host `docker compose` takeover for the current shell:
+For transparent `docker compose ...` takeover, install the Docker Compose
+plugin shim from the portmap repo:
 
 ```bash
-source <(portmap shell-hook --compose-takeover)
+portmap broker install --method docker-plugin
 docker compose up -d
 docker compose ps
 ```
 
-The shell hook intercepts only `docker compose` while
-`PORTMAP_COMPOSE_TAKEOVER=1`. It leaves `docker ps`, `docker run`, and compose
-commands that already specify `-f/--file` untouched. Disable it with:
+The shim does not rely on shell functions, so it also works for non-interactive
+agents and scripts. It intercepts only `docker compose` while
+`PORTMAP_COMPOSE_TAKEOVER` is enabled. Disable takeover with:
 
 ```bash
-portmap_compose_takeover_off
+PORTMAP_COMPOSE_TAKEOVER=0 docker compose up -d
 ```
 
-Without the shell hook, call the broker explicitly:
+Without the plugin shim, call the broker explicitly:
 
 ```bash
 portmap docker-compose -- up -d
