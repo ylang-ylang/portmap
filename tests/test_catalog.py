@@ -1,13 +1,11 @@
 import pytest
 
 from portmap.catalog import (
-    build_catalog_tree,
     compose_down_project,
     container_to_service,
     parse_host_rule,
-    render_html,
+    read_static_asset,
     select_dns_server,
-    split_dns_test_command,
 )
 
 
@@ -85,112 +83,37 @@ def test_select_dns_server_prefers_external_bind_ip() -> None:
     assert select_dns_server("127.0.0.1", "10.0.0.5") == "10.0.0.5"
 
 
-def test_split_dns_test_command_uses_portmap_itself() -> None:
-    command = split_dns_test_command(
-        {
-            "dns_domain": "debug.lan",
-            "services": [
-                {
-                    "endpoints": [
-                        {
-                            "kind": "http",
-                            "url": "http://external-project.debug.lan:8080",
-                        }
-                    ]
-                }
-            ],
-        }
-    )
+def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
+    index = read_static_asset("index.html")
+    script = read_static_asset("catalog.js")
+    dns_check = read_static_asset("dns-check.svg")
 
-    assert 'resolvectl query "portmap.debug.lan"' in command
-    assert 'curl -I "http://portmap.debug.lan/"' in command
-    assert "external-project" not in command
+    assert index is not None
+    assert script is not None
+    assert dns_check is not None
 
+    index_body, index_type = index
+    script_body, script_type = script
+    dns_body, dns_type = dns_check
 
-def test_build_catalog_tree_groups_by_directory_repo_and_branch() -> None:
-    tree = build_catalog_tree(
-        {
-            "services": [
-                {
-                    "worktree": "/repo-a/worktree-dev",
-                    "repo_id": "repo-a-id",
-                    "repo_name": "repo-a",
-                    "branch": "dev",
-                    "compose_service": "frontend",
-                    "container": "repo-a-frontend-1",
-                    "endpoints": [{"name": "frontend", "kind": "http"}],
-                },
-                {
-                    "worktree": "/repo-a/worktree-dev",
-                    "repo_id": "repo-a-id",
-                    "repo_name": "repo-a",
-                    "branch": "feat-a",
-                    "compose_service": "backend",
-                    "container": "repo-a-backend-1",
-                    "endpoints": [{"name": "backend", "kind": "http"}],
-                },
-                {
-                    "worktree": "/repo-b/worktree-main",
-                    "repo_id": "repo-b-id",
-                    "repo_name": "repo-b",
-                    "branch": "main",
-                    "compose_service": "api",
-                    "container": "repo-b-api-1",
-                    "endpoints": [{"name": "api", "kind": "http"}],
-                },
-            ]
-        }
-    )
-
-    assert [directory["worktree"] for directory in tree] == [
-        "/repo-a/worktree-dev",
-        "/repo-b/worktree-main",
-    ]
-    repo_a = tree[0]["repos"][0]
-    assert repo_a["repo_id"] == "repo-a-id"
-    assert [branch["branch"] for branch in repo_a["branches"]] == ["dev", "feat-a"]
+    assert index_type == "text/html; charset=utf-8"
+    assert script_type == "application/javascript; charset=utf-8"
+    assert dns_type == "image/svg+xml"
+    assert b'data-catalog-tree' in index_body
+    assert b'/assets/catalog.js' in index_body
+    assert b'split-dns-unset' in index_body
+    assert b'Test command' not in index_body
+    assert b'fetch("/registry.json")' in script_body
+    assert b'/assets/dns-check.svg' in script_body
+    assert b'buildCatalogTree' in script_body
+    assert b'resolvectl revert "$DNS_IFACE"' in script_body
+    assert b'split-dns-test' not in script_body
+    assert b'<svg ' in dns_body
 
 
-def test_render_html_uses_work_tree_repo_branch_hierarchy() -> None:
-    html = render_html(
-        {
-            "generated_at": "2026-06-02T00:00:00+00:00",
-            "http_port": 8080,
-            "dns_domain": "debug.lan",
-            "dns_server": "192.168.201.52",
-            "services": [
-                {
-                    "worktree": "/repo/sample",
-                    "repo_id": "sample-id",
-                    "repo_name": "sample",
-                    "branch": "feat-a",
-                    "compose_project": "sample_feat_a",
-                    "compose_service": "frontend",
-                    "container": "sample-frontend-1",
-                    "image": "sample:latest",
-                    "endpoints": [
-                        {
-                            "name": "frontend",
-                            "kind": "http",
-                            "container_port": 5173,
-                            "url": "http://frontend.feat-a.sample.debug.lan:8080",
-                        }
-                    ],
-                }
-            ],
-        }
-    )
-
-    assert "<h2>Work Tree</h2>" in html
-    assert "/repo/sample" in html
-    assert "repo_id: <code>sample-id</code>" in html
-    assert "Branch: <code>feat-a</code>" in html
-    assert "<th>Repo</th>" not in html
-    assert html.index("<h2>Work Tree</h2>") < html.index("<summary>Split DNS quick setup</summary>")
-    assert '<details class="quick-setup">' in html
-    assert 'action="/actions/compose-down"' in html
-    assert 'name="compose_project" value="sample_feat_a"' in html
-    assert "docker compose -p sample_feat_a down" in html
+def test_catalog_static_asset_rejects_unknown_paths() -> None:
+    assert read_static_asset("../catalog.py") is None
+    assert read_static_asset("missing.js") is None
 
 
 def test_compose_down_project_removes_portmap_managed_project(monkeypatch) -> None:

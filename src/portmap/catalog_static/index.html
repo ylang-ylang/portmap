@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>portmap catalog</title>
+  <link rel="stylesheet" href="/assets/catalog.css">
+  <script src="/assets/catalog.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>portmap catalog</h1>
+    <p class="meta" data-catalog-meta>Loading catalog...</p>
+    <section class="catalog-tree" data-catalog-tree>
+      <div class="empty">Loading catalog...</div>
+    </section>
+    <section class="utility-panel" aria-label="Setup commands">
+      <details class="quick-setup">
+        <summary>Split DNS quick setup</summary>
+        <div class="quick-setup-body">
+          <div class="quick-setup-actions">
+            <p>Run this on the client machine that opens the generated debug URLs.</p>
+            <button class="copy-button" type="button" data-copy-target="split-dns-command">Copy</button>
+          </div>
+          <pre><code id="split-dns-command">Loading...</code></pre>
+        </div>
+      </details>
+      <details class="quick-setup">
+        <summary>Split DNS unset</summary>
+        <div class="quick-setup-body">
+          <div class="quick-setup-actions">
+            <p>Run this on the client machine to remove the temporary split DNS override.</p>
+            <button class="copy-button" type="button" data-copy-target="split-dns-unset">Copy</button>
+          </div>
+          <pre><code id="split-dns-unset">Loading...</code></pre>
+        </div>
+      </details>
+    </section>
+    <section class="dns-probe" data-dns-probe aria-label="Client DNS check">
+      <div class="dns-probe-header">
+        <div>
+          <h2>Client DNS check</h2>
+          <p>This browser must load the embedded URL below through split DNS.</p>
+        </div>
+        <span class="dns-probe-status dns-probe-status-checking" data-dns-probe-status>checking</span>
+      </div>
+      <div class="dns-probe-body">
+        <div class="dns-probe-image-frame">
+          <img class="dns-probe-image" data-dns-probe-image alt="DNS check image">
+        </div>
+        <div class="dns-probe-details">
+          <div class="dns-probe-label">Embedded URL</div>
+          <a data-dns-probe-url href="#"><code>building probe URL...</code></a>
+          <p data-dns-probe-message>Waiting for catalog data.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

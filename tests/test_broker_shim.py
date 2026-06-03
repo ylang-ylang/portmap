@@ -31,7 +31,10 @@ def test_render_compose_plugin_shim_contains_required_guards(tmp_path: Path) -> 
     assert "unset DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND" in shim
     assert "unset DOCKER_CLI_PLUGIN_SOCKET" in shim
     assert 'PORTMAP_BROKER_BYPASS=1' in shim
-    assert 'env -u VIRTUAL_ENV PORTMAP_BROKER_BYPASS=1 uv run --project "$PORTMAP_ROOT" portmap docker-compose -- "$@"' in shim
+    assert (
+        'env -u VIRTUAL_ENV PORTMAP_ROOT="$PORTMAP_ROOT" PORTMAP_BROKER_BYPASS=1 '
+        'uv run --project "$PORTMAP_ROOT" portmap docker-compose -- "$@"'
+    ) in shim
 
 
 def test_install_compose_plugin_shim_writes_executable_plugin(tmp_path: Path) -> None:

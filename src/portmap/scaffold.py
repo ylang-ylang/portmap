@@ -212,8 +212,12 @@ variables and configure itself to advertise the assigned host and port range.
 Start the shared portmap gateway once from the portmap repo:
 
 ```bash
-docker compose -f /path/to/portmap/docker-compose.gateway.yml up -d
+portmap gateway up -d
 ```
+
+Gateway/domain/port defaults are read directly from the tracked
+`portmap.toml` in the portmap repo root. They are not copied into this
+project's `.portmap` directory.
 
 Then, from this repo/worktree:
 
@@ -225,9 +229,7 @@ portmap generate \\
   --compose-file {compose_display} \\
   --config {endpoint_config} \\
   --out-dir {out_display} \\
-  --branch "$BRANCH" \\
-  --domain-suffix debug.lan \\
-  --gateway-network portmap_gateway
+  --branch "$BRANCH"
 
 docker compose \\
   -f {compose_display} \\

@@ -1,0 +1,452 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 24px;
+  background: #f5f7fa;
+  color: #18202a;
+}
+
+main {
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.action-main {
+  max-width: 760px;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.meta {
+  margin: 0 0 20px;
+  color: #52606d;
+  font-size: 14px;
+}
+
+.dns-probe {
+  margin-top: 16px;
+  border: 1px solid #d9e0e8;
+  background: #ffffff;
+}
+
+.dns-probe-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #eef2f6;
+  border-bottom: 1px solid #d9e0e8;
+}
+
+.dns-probe-header h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.dns-probe-header p {
+  margin: 0;
+  color: #52606d;
+  font-size: 14px;
+}
+
+.dns-probe-status {
+  border: 1px solid #9aa7b4;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.dns-probe-status-ok {
+  border-color: #16a34a;
+  background: #dcfce7;
+  color: #14532d;
+}
+
+.dns-probe-status-failed {
+  border-color: #dc2626;
+  background: #fee2e2;
+  color: #7f1d1d;
+}
+
+.dns-probe-status-checking {
+  border-color: #9aa7b4;
+  background: #f8fafc;
+  color: #283544;
+}
+
+.dns-probe-body {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px;
+}
+
+.dns-probe-image-frame {
+  min-height: 64px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed #cbd5e1;
+  background: #f8fafc;
+}
+
+.dns-probe-image {
+  max-width: 180px;
+  min-height: 48px;
+}
+
+.is-hidden {
+  display: none;
+}
+
+.dns-probe-image[src=""] {
+  display: none;
+}
+
+.dns-probe-details {
+  min-width: 0;
+}
+
+.dns-probe-label {
+  margin-bottom: 4px;
+  color: #52606d;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.dns-probe-details p {
+  margin: 8px 0 0;
+  color: #52606d;
+  font-size: 14px;
+}
+
+.utility-panel {
+  margin-top: 20px;
+  display: grid;
+  gap: 12px;
+}
+
+.quick-setup {
+  border: 1px solid #d9e0e8;
+  background: #ffffff;
+}
+
+.quick-setup summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  background: #eef2f6;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.quick-setup-body {
+  padding: 14px;
+  border-top: 1px solid #e6ebf1;
+}
+
+.quick-setup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.quick-setup p {
+  margin: 0;
+  color: #52606d;
+  font-size: 14px;
+}
+
+.copy-button {
+  border: 1px solid #9aa7b4;
+  background: #f8fafc;
+  color: #18202a;
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.copy-button:focus {
+  outline: 2px solid #0ea5e9;
+  outline-offset: 2px;
+}
+
+.action-message {
+  margin: 0 0 16px;
+  border: 1px solid #16a34a;
+  background: #dcfce7;
+  color: #14532d;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.action-message-error {
+  border-color: #dc2626;
+  background: #fee2e2;
+  color: #7f1d1d;
+}
+
+pre {
+  margin: 0;
+  overflow-x: auto;
+  background: #111827;
+  color: #e5e7eb;
+  padding: 12px;
+  border: 1px solid #1f2937;
+}
+
+.catalog-tree {
+  display: grid;
+  gap: 16px;
+}
+
+.directory-group {
+  border: 1px solid #d9e0e8;
+  background: #ffffff;
+}
+
+.directory-header {
+  padding: 12px 14px;
+  background: #eef2f6;
+  border-bottom: 1px solid #d9e0e8;
+}
+
+.directory-header h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.repo-group {
+  padding: 14px;
+  border-top: 1px solid #e6ebf1;
+}
+
+.repo-group:first-of-type {
+  border-top: 0;
+}
+
+.repo-header {
+  margin-bottom: 10px;
+}
+
+.repo-header h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.branch-group {
+  margin-top: 12px;
+  border: 1px solid #e6ebf1;
+}
+
+.branch-header {
+  padding: 9px 10px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e6ebf1;
+  font-size: 14px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.branch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-weight: 500;
+}
+
+.down-form {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.down-button {
+  border: 1px solid #b42318;
+  background: #fff5f5;
+  color: #9f1d16;
+  padding: 6px 9px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.down-button:focus {
+  outline: 2px solid #ef4444;
+  outline-offset: 2px;
+}
+
+.action-result {
+  border: 1px solid #d9e0e8;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.action-result h1 {
+  margin: 0 0 8px;
+  font-size: 22px;
+}
+
+.action-result p {
+  margin: 8px 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #ffffff;
+}
+
+th,
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #e6ebf1;
+  text-align: left;
+  vertical-align: top;
+  font-size: 14px;
+}
+
+th {
+  background: #eef2f6;
+  color: #283544;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+a {
+  color: #075985;
+}
+
+.empty {
+  color: #697586;
+  padding: 24px;
+  text-align: center;
+  border: 1px solid #d9e0e8;
+  background: #ffffff;
+}
+
+.load-error {
+  color: #9f1d16;
+}
+
+@media (max-width: 760px) {
+  body {
+    padding: 14px;
+  }
+
+  .dns-probe-body {
+    grid-template-columns: 1fr;
+  }
+
+  .dns-probe-header {
+    flex-direction: column;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #101418;
+    color: #eef2f6;
+  }
+
+  .meta,
+  .dns-probe-header p,
+  .dns-probe-details p,
+  .dns-probe-label {
+    color: #a7b2bf;
+  }
+
+  .dns-probe,
+  .quick-setup,
+  .directory-group,
+  .action-result {
+    background: #171d23;
+    border-color: #2b3540;
+  }
+
+  .dns-probe-header,
+  .quick-setup summary,
+  .directory-header,
+  .branch-header,
+  th {
+    background: #202832;
+  }
+
+  .dns-probe-header,
+  .quick-setup-body,
+  .directory-header,
+  .repo-group,
+  .branch-header,
+  th,
+  td {
+    border-color: #2b3540;
+  }
+
+  .dns-probe-image-frame,
+  .dns-probe-status-checking,
+  .copy-button {
+    background: #202832;
+    color: #eef2f6;
+    border-color: #52606d;
+  }
+
+  .action-message {
+    background: #12331f;
+    color: #bbf7d0;
+    border-color: #16a34a;
+  }
+
+  .action-message-error {
+    background: #3b1717;
+    color: #fecaca;
+    border-color: #b42318;
+  }
+
+  .branch-group {
+    border-color: #2b3540;
+  }
+
+  .down-button {
+    background: #3b1717;
+    color: #fecaca;
+    border-color: #b42318;
+  }
+
+  table {
+    background: #171d23;
+  }
+
+  th {
+    color: #cbd5e1;
+  }
+
+  a {
+    color: #7dd3fc;
+  }
+}

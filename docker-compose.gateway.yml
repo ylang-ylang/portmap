@@ -9,7 +9,7 @@ services:
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
     ports:
-      - "${PORTMAP_HTTP_BIND:-127.0.0.1}:${PORTMAP_HTTP_PORT:-8080}:80"
+      - "${PORTMAP_HTTP_BIND:?run portmap gateway up}:${PORTMAP_HTTP_PORT:?run portmap gateway up}:80"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
@@ -26,12 +26,12 @@ services:
       PYTHONPATH: /workspace/src
       PORTMAP_CATALOG_LISTEN_HOST: 0.0.0.0
       PORTMAP_CATALOG_LISTEN_PORT: "8081"
-      PORTMAP_HTTP_PORT: "${PORTMAP_HTTP_PORT:-8080}"
-      PORTMAP_DNS_BIND: "${PORTMAP_DNS_BIND:-127.0.0.1}"
-      PORTMAP_DNS_DOMAIN: "${PORTMAP_DNS_DOMAIN:-portmap.test}"
-      PORTMAP_DNS_TARGET_IP: "${PORTMAP_DNS_TARGET_IP:-127.0.0.1}"
+      PORTMAP_HTTP_PORT: "${PORTMAP_HTTP_PORT:?run portmap gateway up}"
+      PORTMAP_DNS_BIND: "${PORTMAP_DNS_BIND:?run portmap gateway up}"
+      PORTMAP_DNS_DOMAIN: "${PORTMAP_DNS_DOMAIN:?run portmap gateway up}"
+      PORTMAP_DNS_TARGET_IP: "${PORTMAP_DNS_TARGET_IP:?run portmap gateway up}"
     ports:
-      - "${PORTMAP_CATALOG_BIND:-127.0.0.1}:${PORTMAP_CATALOG_PORT:-80}:8081"
+      - "${PORTMAP_CATALOG_BIND:?run portmap gateway up}:${PORTMAP_CATALOG_PORT:?run portmap gateway up}:8081"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src:/workspace/src:ro
@@ -45,11 +45,11 @@ services:
       - "-conf"
       - "/etc/coredns/Corefile"
     environment:
-      PORTMAP_DNS_DOMAIN: "${PORTMAP_DNS_DOMAIN:-portmap.test}"
-      PORTMAP_DNS_TARGET_IP: "${PORTMAP_DNS_TARGET_IP:?set PORTMAP_DNS_TARGET_IP to the host LAN IP}"
+      PORTMAP_DNS_DOMAIN: "${PORTMAP_DNS_DOMAIN:?run portmap gateway up}"
+      PORTMAP_DNS_TARGET_IP: "${PORTMAP_DNS_TARGET_IP:?run portmap gateway up}"
     ports:
-      - "${PORTMAP_DNS_BIND:-127.0.0.1}:${PORTMAP_DNS_PORT:-53}:53/udp"
-      - "${PORTMAP_DNS_BIND:-127.0.0.1}:${PORTMAP_DNS_PORT:-53}:53/tcp"
+      - "${PORTMAP_DNS_BIND:?run portmap gateway up}:${PORTMAP_DNS_PORT:?run portmap gateway up}:53/udp"
+      - "${PORTMAP_DNS_BIND:?run portmap gateway up}:${PORTMAP_DNS_PORT:?run portmap gateway up}:53/tcp"
     volumes:
       - ./gateway/Corefile:/etc/coredns/Corefile:ro
     networks:
@@ -57,4 +57,4 @@ services:
 
 networks:
   portmap_gateway:
-    name: "${PORTMAP_GATEWAY_NETWORK:-portmap_gateway}"
+    name: "${PORTMAP_GATEWAY_NETWORK:?run portmap gateway up}"

@@ -70,7 +70,7 @@ class GenerateRequest:
     udp_port_start: int = 19000
     range_port_start: int = 49160
     host_ip: str = "127.0.0.1"
-    domain_suffix: str = "debug.local"
+    domain_suffix: str = "debug.lan"
     gateway_network: str = "portmap_gateway"
     allocation_state_file: Path | None = None
     compose_project: str | None = None

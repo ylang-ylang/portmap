@@ -76,9 +76,12 @@ Caddy when Traefik is the default.
 Start the gateway from the `portmap` repository:
 
 ```bash
-cp .env.example .env
-docker compose -f docker-compose.gateway.yml up -d
+portmap gateway up -d
 ```
+
+The gateway reads the tracked root-level `portmap.toml` directly. Runtime-only
+values such as the host LAN IP are detected when the command runs instead of
+being stored in config.
 
 Default shape:
 
@@ -95,7 +98,7 @@ host:8080 HTTP
 
 host:53 DNS
   -> portmap-dns
-  -> *.debug.lan A 192.168.201.52
+  -> *.debug.lan A <detected-host-ip>
 ```
 
 The gateway compose creates the named Docker network:
@@ -129,7 +132,7 @@ Traefik to reach Docker bridge services without per-service host port mappings.
 Development machines should use split DNS:
 
 ```text
-*.debug.lan -> portmap host DNS, for example 192.168.201.52
+*.debug.lan -> portmap host DNS, for example <detected-host-ip>
 all other names -> normal DNS
 ```
 
@@ -139,7 +142,7 @@ per-endpoint entries to `/etc/hosts`.
 Linux setup command shape:
 
 ```bash
-DNS_SERVER=192.168.201.52
+DNS_SERVER=<detected-host-ip>
 DNS_DOMAIN=debug.lan
 DNS_IFACE="$(ip route get "$DNS_SERVER" | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
 
@@ -201,7 +204,7 @@ services:
   frontend:
     labels:
       - traefik.enable=true
-      - traefik.http.routers.comap-feat-a-frontend.rule=Host(`frontend.feat-a.comap.debug.local`)
+      - traefik.http.routers.comap-feat-a-frontend.rule=Host(`frontend.feat-a.comap.debug.lan`)
       - traefik.http.routers.comap-feat-a-frontend.entrypoints=web
       - traefik.http.services.comap-feat-a-frontend.loadbalancer.server.port=5173
       - traefik.http.routers.comap-feat-a-frontend.middlewares=comap-feat-a-frontend-host
@@ -213,7 +216,7 @@ Request path:
 
 ```text
 browser
-  -> http://frontend.feat-a.comap.debug.local:8080
+  -> http://frontend.feat-a.comap.debug.lan:8080
   -> Traefik web entrypoint
   -> portmap_gateway
   -> frontend container:5173
@@ -255,7 +258,7 @@ services:
       - "34781:3478/udp"
       - "49160-49199:49160-49199/udp"
     environment:
-      PORTMAP_TURN_HOST: "192.168.201.52"
+      PORTMAP_TURN_HOST: "<detected-host-ip>"
       PORTMAP_TURN_PORT: "34781"
       PORTMAP_TURN_PROTOCOL: "udp"
       PORTMAP_TURN_RANGE_MIN_PORT: "49160"
@@ -296,13 +299,13 @@ services:
     ports:
       - "18831:1883/tcp"
     environment:
-      PORTMAP_MQTT_HOST: "192.168.201.52"
+      PORTMAP_MQTT_HOST: "<detected-host-ip>"
       PORTMAP_MQTT_PORT: "18831"
       PORTMAP_MQTT_PROTOCOL: "tcp"
     labels:
       - portmap.managed=true
       - portmap.endpoints.comap-feat-a-mqtt.kind=tcp
-      - portmap.endpoints.comap-feat-a-mqtt.host=192.168.201.52
+      - portmap.endpoints.comap-feat-a-mqtt.host=<detected-host-ip>
       - portmap.endpoints.comap-feat-a-mqtt.host_port=18831
 ```
 
@@ -335,13 +338,13 @@ services:
     ports:
       - "19991:9999/udp"
     environment:
-      PORTMAP_UDP_HOST: "192.168.201.52"
+      PORTMAP_UDP_HOST: "<detected-host-ip>"
       PORTMAP_UDP_PORT: "19991"
       PORTMAP_UDP_PROTOCOL: "udp"
     labels:
       - portmap.managed=true
       - portmap.endpoints.comap-feat-a-udp.kind=udp
-      - portmap.endpoints.comap-feat-a-udp.host=192.168.201.52
+      - portmap.endpoints.comap-feat-a-udp.host=<detected-host-ip>
       - portmap.endpoints.comap-feat-a-udp.host_port=19991
 ```
 

@@ -9,6 +9,7 @@ from .compose_takeover import find_compose_file, first_compose_command, should_p
 from .model import GenerateRequest
 from .planner import generate_plan
 from .scaffold import ensure_portmap_support_files
+from .settings import load_portmap_settings
 
 
 ENDPOINT_CONFIG = ".portmap/endpoints.toml"
@@ -51,6 +52,7 @@ def ensure_generated_override(
         return EnsureGenerateResult(generated=False)
 
     env = os.environ if environ is None else environ
+    settings = load_portmap_settings(environ=env)
     out_dir = cwd / ".portmap"
     request = GenerateRequest(
         compose_file=compose_file,
@@ -58,13 +60,13 @@ def ensure_generated_override(
         project_directory=cwd,
         out_dir=out_dir,
         config_file=config_file,
-        http_port=int_env(env, "PORTMAP_HTTP_PORT", 8080),
-        tcp_port_start=int_env(env, "PORTMAP_TCP_PORT_START", 18000),
-        udp_port_start=int_env(env, "PORTMAP_UDP_PORT_START", 19000),
-        range_port_start=int_env(env, "PORTMAP_RANGE_PORT_START", 49160),
-        host_ip=host_ip(env),
-        domain_suffix=domain_suffix(env),
-        gateway_network=env.get("PORTMAP_GATEWAY_NETWORK", "portmap_gateway"),
+        http_port=settings.http_port,
+        tcp_port_start=settings.tcp_port_start,
+        udp_port_start=settings.udp_port_start,
+        range_port_start=settings.range_port_start,
+        host_ip=settings.host_ip,
+        domain_suffix=settings.dns_domain,
+        gateway_network=settings.gateway_network,
         allocation_state_file=allocation_state_file(env),
     )
     plan = generate_plan(request)
@@ -98,21 +100,15 @@ def int_env(env: Mapping[str, str], key: str, default: int) -> int:
 
 
 def host_ip(env: Mapping[str, str]) -> str:
-    return (
-        env.get("PORTMAP_HOST_IP")
-        or env.get("PORTMAP_DNS_TARGET_IP")
-        or env.get("PORTMAP_DNS_BIND")
-        or "127.0.0.1"
-    )
+    return load_portmap_settings(environ=env).host_ip
 
 
 def domain_suffix(env: Mapping[str, str]) -> str:
-    return env.get("PORTMAP_DOMAIN_SUFFIX") or env.get("PORTMAP_DNS_DOMAIN") or "debug.local"
+    return load_portmap_settings(environ=env).dns_domain
 
 
 def allocation_state_file(env: Mapping[str, str]) -> Path:
     explicit = env.get("PORTMAP_ALLOCATION_STATE_FILE") or env.get("PORTMAP_STATE_FILE")
     if explicit:
         return Path(explicit).expanduser()
-    state_dir = Path(env.get("PORTMAP_STATE_DIR", "~/.local/state/portmap")).expanduser()
-    return state_dir / "allocations.json"
+    return load_portmap_settings(environ=env).allocation_state_file
