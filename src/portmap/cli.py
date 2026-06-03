@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .broker import allocation_state_file as env_allocation_state_file
+from .broker import domain_suffix as env_domain_suffix
+from .broker import ensure_generated_override, host_ip as env_host_ip
+from .broker import int_env
 from .broker_shim import (
     broker_shim_status,
     docker_config_dir,
@@ -104,13 +108,16 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--repo-root", type=Path)
     generate.add_argument("--repo-id")
     generate.add_argument("--repo-name")
-    generate.add_argument("--http-port", type=int, default=8080)
-    generate.add_argument("--tcp-port-start", type=int, default=18000)
-    generate.add_argument("--udp-port-start", type=int, default=19000)
-    generate.add_argument("--range-port-start", type=int, default=49160)
-    generate.add_argument("--host-ip", default="127.0.0.1")
-    generate.add_argument("--domain-suffix", default="debug.local")
-    generate.add_argument("--gateway-network", default="portmap_gateway")
+    generate_defaults = env_generate_defaults()
+    generate.add_argument("--http-port", type=int, default=generate_defaults["http_port"])
+    generate.add_argument("--tcp-port-start", type=int, default=generate_defaults["tcp_port_start"])
+    generate.add_argument("--udp-port-start", type=int, default=generate_defaults["udp_port_start"])
+    generate.add_argument("--range-port-start", type=int, default=generate_defaults["range_port_start"])
+    generate.add_argument("--host-ip", default=generate_defaults["host_ip"])
+    generate.add_argument("--domain-suffix", default=generate_defaults["domain_suffix"])
+    generate.add_argument("--gateway-network", default=generate_defaults["gateway_network"])
+    generate.add_argument("--allocation-state-file", type=Path, default=generate_defaults["allocation_state_file"])
+    generate.add_argument("--compose-project")
     generate.set_defaults(func=cmd_generate)
 
     list_cmd = subparsers.add_parser("list", help="list repos in a registry")
@@ -151,11 +158,19 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_docker_compose(args: argparse.Namespace) -> int:
+    ensure_result = ensure_generated_override(args.compose_args, cwd=Path.cwd(), environ=os.environ)
+    if ensure_result.generated:
+        print(
+            "portmap: generated compose override "
+            f"out_dir={ensure_result.out_dir} compose_project={ensure_result.compose_project}",
+            file=sys.stderr,
+        )
     plan = plan_docker_compose_command(args.compose_args, cwd=Path.cwd())
     if plan.injected:
+        project_hint = f" -p {plan.compose_project}" if plan.compose_project else ""
         print(
-            "portmap: docker compose takeover active; using "
-            f"-f {plan.compose_file} -f {plan.override_file}",
+            "portmap: docker compose takeover active; using"
+            f"{project_hint} -f {plan.compose_file} -f {plan.override_file}",
             file=sys.stderr,
         )
     env = os.environ.copy()
@@ -185,6 +200,7 @@ def cmd_broker_status(args: argparse.Namespace) -> int:
     print_json(status.as_dict())
     return 0
 
+
 def cmd_generate(args: argparse.Namespace) -> int:
     compose_file = None if args.compose_json else args.compose_file
     project_dir = args.project_dir.resolve()
@@ -210,6 +226,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
         host_ip=args.host_ip,
         domain_suffix=args.domain_suffix,
         gateway_network=args.gateway_network,
+        allocation_state_file=args.allocation_state_file,
+        compose_project=args.compose_project,
     )
     plan = generate_plan(request)
     plan.write(out_dir)
@@ -277,6 +295,19 @@ def resolve_compose_file(project_dir: Path, compose_file: Path | None) -> Path:
         if candidate.exists():
             return candidate
     return project_dir / "docker-compose.yml"
+
+
+def env_generate_defaults() -> dict[str, Any]:
+    return {
+        "http_port": int_env(os.environ, "PORTMAP_HTTP_PORT", 8080),
+        "tcp_port_start": int_env(os.environ, "PORTMAP_TCP_PORT_START", 18000),
+        "udp_port_start": int_env(os.environ, "PORTMAP_UDP_PORT_START", 19000),
+        "range_port_start": int_env(os.environ, "PORTMAP_RANGE_PORT_START", 49160),
+        "host_ip": env_host_ip(os.environ),
+        "domain_suffix": env_domain_suffix(os.environ),
+        "gateway_network": os.environ.get("PORTMAP_GATEWAY_NETWORK", "portmap_gateway"),
+        "allocation_state_file": env_allocation_state_file(os.environ),
+    }
 
 
 if __name__ == "__main__":

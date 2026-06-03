@@ -11,12 +11,15 @@ def test_compose_takeover_injects_generated_override(tmp_path: Path) -> None:
     compose.write_text("services: {}\n", encoding="utf-8")
     override.parent.mkdir()
     override.write_text("services: {}\n", encoding="utf-8")
+    (override.parent / "state.json").write_text('{"compose_project": "sample_feat"}\n', encoding="utf-8")
 
     command = build_docker_compose_command(["up", "-d"], cwd=tmp_path)
 
     assert command == [
         "docker",
         "compose",
+        "-p",
+        "sample_feat",
         "-f",
         str(compose),
         "-f",
@@ -32,12 +35,14 @@ def test_compose_takeover_plan_reports_injected_override(tmp_path: Path) -> None
     compose.write_text("services: {}\n", encoding="utf-8")
     override.parent.mkdir()
     override.write_text("services: {}\n", encoding="utf-8")
+    (override.parent / "state.json").write_text('{"compose_project": "sample_feat"}\n', encoding="utf-8")
 
     plan = plan_docker_compose_command(["up", "-d"], cwd=tmp_path)
 
     assert plan.injected is True
     assert plan.compose_file == compose
     assert plan.override_file == override
+    assert plan.compose_project == "sample_feat"
 
 
 def test_compose_takeover_passes_through_without_generated_override(tmp_path: Path) -> None:
@@ -52,6 +57,7 @@ def test_compose_takeover_passes_through_explicit_file_args(tmp_path: Path) -> N
     compose.write_text("services: {}\n", encoding="utf-8")
     override.parent.mkdir()
     override.write_text("services: {}\n", encoding="utf-8")
+    (override.parent / "state.json").write_text('{"compose_project": "sample_feat"}\n', encoding="utf-8")
 
     assert build_docker_compose_command(["-f", "custom.yml", "up", "-d"], cwd=tmp_path) == [
         "docker",
@@ -69,8 +75,31 @@ def test_compose_takeover_passes_through_version_command(tmp_path: Path) -> None
     compose.write_text("services: {}\n", encoding="utf-8")
     override.parent.mkdir()
     override.write_text("services: {}\n", encoding="utf-8")
+    (override.parent / "state.json").write_text('{"compose_project": "sample_feat"}\n', encoding="utf-8")
 
     assert build_docker_compose_command(["version"], cwd=tmp_path) == ["docker", "compose", "version"]
+
+
+def test_compose_takeover_respects_explicit_project_name(tmp_path: Path) -> None:
+    compose = tmp_path / "docker-compose.yml"
+    override = tmp_path / ".portmap" / "docker-compose.override.generated.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    override.parent.mkdir()
+    override.write_text("services: {}\n", encoding="utf-8")
+    (override.parent / "state.json").write_text('{"compose_project": "sample_feat"}\n', encoding="utf-8")
+
+    assert build_docker_compose_command(["-p", "manual", "up", "-d"], cwd=tmp_path) == [
+        "docker",
+        "compose",
+        "-f",
+        str(compose),
+        "-f",
+        str(override),
+        "-p",
+        "manual",
+        "up",
+        "-d",
+    ]
 
 
 def test_docker_compose_cli_prints_takeover_hint(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -79,6 +108,7 @@ def test_docker_compose_cli_prints_takeover_hint(tmp_path: Path, monkeypatch, ca
     compose.write_text("services: {}\n", encoding="utf-8")
     override.parent.mkdir()
     override.write_text("services: {}\n", encoding="utf-8")
+    (override.parent / "state.json").write_text('{"compose_project": "sample_feat"}\n', encoding="utf-8")
 
     recorded = {}
 
@@ -96,5 +126,5 @@ def test_docker_compose_cli_prints_takeover_hint(tmp_path: Path, monkeypatch, ca
     stderr = capsys.readouterr().err
     assert "portmap: docker compose takeover active" in stderr
     assert str(override) in stderr
-    assert recorded["command"][0:5] == ["docker", "compose", "-f", str(compose), "-f"]
+    assert recorded["command"][0:7] == ["docker", "compose", "-p", "sample_feat", "-f", str(compose), "-f"]
     assert recorded["env"]["PORTMAP_BROKER_BYPASS"] == "1"

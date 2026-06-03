@@ -2,18 +2,20 @@
 
 `portmap` is a branch-scoped network control plane for local
 docker-compose projects. It does not proxy traffic itself. It translates
-project/branch rules into Docker Compose overlays, Traefik labels, Traefik
-entrypoints, and a local CLI-queryable endpoint registry.
+project/branch rules into Docker Compose overlays, Traefik HTTP labels, Docker
+direct port mappings, and a local CLI-queryable endpoint registry.
 
 The default runtime shape is a shared gateway hosted by the `portmap` tooling,
 not by each managed project. The gateway runs Traefik for HTTP routing and
-CoreDNS for wildcard debug-domain resolution. Managed project services join the
-shared Docker bridge network `portmap_gateway` through a generated compose
-override.
+CoreDNS for wildcard debug-domain resolution. Managed project services with
+HTTP endpoints join the shared Docker bridge network `portmap_gateway` through
+a generated compose override. Raw TCP/UDP/range endpoints use direct Docker
+port mappings and do not need the gateway network unless the same service also
+has an HTTP endpoint.
 
 ## Fixed Model
 
-The default data plane is Traefik:
+The default data plane is split by endpoint shape:
 
 ```text
 HTTP / WebSocket / SSE / CDP / WebRTC signaling
@@ -21,12 +23,12 @@ HTTP / WebSocket / SSE / CDP / WebRTC signaling
   -> branch service:container_port
 
 raw TCP / raw UDP
-  -> Traefik TCP/UDP entrypoints or Docker port mappings
+  -> Docker direct host port mapping
   -> branch service:container_port
 
 dynamic port-range protocols
   -> project-owned service
-  -> one entry host port plus one branch-scoped host port range
+  -> Docker direct mapping for one entry host port plus one branch-scoped host port range
 ```
 
 `portmap` owns only the control-plane pieces:
@@ -37,8 +39,8 @@ dynamic port-range protocols
 - compose inspection
 - endpoint discovery or declaration
 - generated compose overlays
-- generated Traefik labels and entrypoints
-- generated direct Docker port mappings for range endpoints
+- generated Traefik labels for HTTP endpoints
+- generated direct Docker port mappings for TCP, UDP, and range endpoints
 - raw TCP/UDP host-port allocation
 - range endpoint host-port allocation
 - local endpoint registry
@@ -283,28 +285,25 @@ Examples:
 Raw TCP usually cannot share one entrypoint by hostname because it has no HTTP
 `Host` header. TLS TCP with SNI is an exception, but v1 should not rely on it.
 
-For raw TCP, `portmap` allocates a host port and generates a Traefik
-TCP entrypoint plus labels.
+For raw TCP, `portmap` allocates a host port and writes a Docker direct port
+mapping.
 
-Example generated Traefik entrypoint:
-
-```yaml
-entryPoints:
-  mqtt-comap-feat-a:
-    address: ":18831"
-```
-
-Example generated labels:
+Example generated override:
 
 ```yaml
 services:
   mqtt:
+    ports:
+      - "18831:1883/tcp"
+    environment:
+      PORTMAP_MQTT_HOST: "192.168.201.52"
+      PORTMAP_MQTT_PORT: "18831"
+      PORTMAP_MQTT_PROTOCOL: "tcp"
     labels:
-      - traefik.enable=true
-      - traefik.tcp.routers.comap-feat-a-mqtt.entrypoints=mqtt-comap-feat-a
-      - traefik.tcp.routers.comap-feat-a-mqtt.rule=HostSNI(`*`)
-      - traefik.tcp.services.comap-feat-a-mqtt.loadbalancer.server.port=1883
-      - traefik.docker.network=portmap_gateway
+      - portmap.managed=true
+      - portmap.endpoints.comap-feat-a-mqtt.kind=tcp
+      - portmap.endpoints.comap-feat-a-mqtt.host=192.168.201.52
+      - portmap.endpoints.comap-feat-a-mqtt.host_port=18831
 ```
 
 Request path:
@@ -312,7 +311,6 @@ Request path:
 ```text
 mqtt client
   -> 127.0.0.1:18831
-  -> Traefik mqtt-comap-feat-a entrypoint
   -> mqtt container:1883
 ```
 
@@ -326,27 +324,25 @@ Examples:
 - custom UDP services
 - coturn/TURN UDP ports when the project owns coturn
 
-Raw UDP also usually needs allocated host ports. Traefik can route UDP by
-entrypoint, not by HTTP-style hostname.
+Raw UDP also needs allocated host ports. It uses Docker direct port mapping in
+v1.
 
-Example generated Traefik entrypoint:
-
-```yaml
-entryPoints:
-  udp-comap-feat-a:
-    address: ":19999/udp"
-```
-
-Example generated labels:
+Example generated override:
 
 ```yaml
 services:
   udp-service:
+    ports:
+      - "19991:9999/udp"
+    environment:
+      PORTMAP_UDP_HOST: "192.168.201.52"
+      PORTMAP_UDP_PORT: "19991"
+      PORTMAP_UDP_PROTOCOL: "udp"
     labels:
-      - traefik.enable=true
-      - traefik.udp.routers.comap-feat-a-udp.entrypoints=udp-comap-feat-a
-      - traefik.udp.services.comap-feat-a-udp.loadbalancer.server.port=9999
-      - traefik.docker.network=portmap_gateway
+      - portmap.managed=true
+      - portmap.endpoints.comap-feat-a-udp.kind=udp
+      - portmap.endpoints.comap-feat-a-udp.host=192.168.201.52
+      - portmap.endpoints.comap-feat-a-udp.host_port=19991
 ```
 
 ## TURN Boundary
@@ -461,11 +457,14 @@ Generated files should live under:
   README.md
   .gitignore
   docker-compose.override.generated.yml
+  state.json
 ```
 
 `endpoints.toml` is the project-local source of truth. The generated compose
 override is the only project-local artifact required for HTTP endpoints because
 Traefik and the catalog both read Docker labels from running containers.
+`state.json` is branch/worktree-local generated state. It records the generated
+compose project name and endpoint identity for the broker.
 
 `portmap init` creates `.portmap/endpoints.toml`, `.portmap/README.md`, and
 `.portmap/.gitignore`. The README is deliberately project-local: it documents
@@ -479,8 +478,13 @@ Raw TCP/UDP endpoints may need additional generated state because they consume
 host ports:
 
 ```text
-.portmap/state.json
+~/.local/state/portmap/allocations.json
 ```
+
+This allocation pool is host-wide, not branch state. It prevents two worktrees
+from picking the same raw/range host port before Docker has bound either port.
+If a caller explicitly chooses project-local allocation state, that file may be
+stored as `.portmap/allocations.json`.
 
 Extra Traefik static config should only exist when a runtime mode needs it. It
 should not be generated as an empty file for HTTP-only projects.
