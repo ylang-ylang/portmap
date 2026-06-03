@@ -1,5 +1,8 @@
+import pytest
+
 from portmap.catalog import (
     build_catalog_tree,
+    compose_down_project,
     container_to_service,
     parse_host_rule,
     render_html,
@@ -161,6 +164,7 @@ def test_render_html_uses_work_tree_repo_branch_hierarchy() -> None:
                     "repo_id": "sample-id",
                     "repo_name": "sample",
                     "branch": "feat-a",
+                    "compose_project": "sample_feat_a",
                     "compose_service": "frontend",
                     "container": "sample-frontend-1",
                     "image": "sample:latest",
@@ -184,3 +188,88 @@ def test_render_html_uses_work_tree_repo_branch_hierarchy() -> None:
     assert "<th>Repo</th>" not in html
     assert html.index("<h2>Work Tree</h2>") < html.index("<summary>Split DNS quick setup</summary>")
     assert '<details class="quick-setup">' in html
+    assert 'action="/actions/compose-down"' in html
+    assert 'name="compose_project" value="sample_feat_a"' in html
+    assert "docker compose -p sample_feat_a down" in html
+
+
+def test_compose_down_project_removes_portmap_managed_project(monkeypatch) -> None:
+    def fake_docker_get(path: str):
+        if path == "/containers/json?all=1":
+            return [
+                {
+                    "Id": "container-one",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_project",
+                        "portmap.managed": "true",
+                    },
+                },
+                {
+                    "Id": "container-two",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_project",
+                    },
+                },
+                {
+                    "Id": "container-other",
+                    "Labels": {
+                        "com.docker.compose.project": "other_project",
+                        "portmap.managed": "true",
+                    },
+                },
+            ]
+        if path == "/networks":
+            return [
+                {
+                    "Id": "network-one",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_project",
+                    },
+                },
+                {
+                    "Id": "network-other",
+                    "Labels": {
+                        "com.docker.compose.project": "other_project",
+                    },
+                },
+            ]
+        raise AssertionError(path)
+
+    calls = []
+
+    def fake_docker_request(method: str, path: str, *, ok_statuses=None):
+        calls.append((method, path, ok_statuses))
+        return b""
+
+    monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
+    monkeypatch.setattr("portmap.catalog.docker_request", fake_docker_request)
+
+    result = compose_down_project("sample_project")
+
+    assert result["ok"] is True
+    assert result["containers_removed"] == 2
+    assert result["networks_removed"] == 1
+    assert ("POST", "/containers/container-one/stop?t=10", {204, 304, 404, 409}) in calls
+    assert ("DELETE", "/containers/container-one?v=0&force=1", {204, 404, 409}) in calls
+    assert ("POST", "/containers/container-two/stop?t=10", {204, 304, 404, 409}) in calls
+    assert ("DELETE", "/containers/container-two?v=0&force=1", {204, 404, 409}) in calls
+    assert ("DELETE", "/networks/network-one", {204, 404}) in calls
+
+
+def test_compose_down_project_rejects_unmanaged_project(monkeypatch) -> None:
+    def fake_docker_get(path: str):
+        if path == "/containers/json?all=1":
+            return [
+                {
+                    "Id": "container-one",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_project",
+                    },
+                },
+            ]
+        raise AssertionError(path)
+
+    monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
+
+    with pytest.raises(ValueError, match="not portmap-managed"):
+        compose_down_project("sample_project")

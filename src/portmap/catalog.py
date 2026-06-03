@@ -7,6 +7,8 @@ import json
 import os
 import re
 import socket
+import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -23,6 +25,8 @@ TRAEFIK_SERVICE_PORT_RE = re.compile(
     r"^traefik\.(http|tcp|udp)\.services\.([^.]+)\.loadbalancer\.server\.port$"
 )
 HTTP_HOST_RE = re.compile(r"Host\(`([^`]+)`\)")
+NETWORK_REMOVE_ATTEMPTS = 10
+NETWORK_REMOVE_DELAY_SECONDS = 0.2
 
 
 def select_dns_server(bind_ip: str, target_ip: str) -> str:
@@ -48,13 +52,20 @@ class UnixHTTPConnection(http.client.HTTPConnection):
 
 
 def docker_get(path: str) -> Any:
+    payload = docker_request("GET", path)
+    return json.loads(payload.decode("utf-8"))
+
+
+def docker_request(method: str, path: str, *, ok_statuses: set[int] | None = None) -> bytes:
+    expected = ok_statuses or {200}
     connection = UnixHTTPConnection(DOCKER_SOCKET)
-    connection.request("GET", path)
+    connection.request(method, path)
     response = connection.getresponse()
     payload = response.read()
-    if response.status >= 400:
+    connection.close()
+    if response.status not in expected:
         raise RuntimeError(f"Docker API returned {response.status}: {payload.decode(errors='replace')}")
-    return json.loads(payload.decode("utf-8"))
+    return payload
 
 
 def collect_catalog() -> dict[str, Any]:
@@ -187,6 +198,103 @@ def parse_host_rule(rule: str) -> str | None:
     return match.group(1)
 
 
+def compose_down_project(compose_project: str) -> dict[str, Any]:
+    project = compose_project.strip()
+    if not project:
+        raise ValueError("compose_project is required")
+
+    containers = compose_project_containers(project)
+    if not containers:
+        raise ValueError(f"no containers found for compose project: {project}")
+    if not any(is_portmap_managed(container) for container in containers):
+        raise ValueError(f"compose project is not portmap-managed: {project}")
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "compose_project": project,
+        "message": "compose project stopped",
+        "containers_removed": 0,
+        "networks_removed": 0,
+        "errors": [],
+    }
+
+    for container in containers:
+        container_id = str(container.get("Id") or "")
+        if not container_id:
+            continue
+        try:
+            stop_container(container_id)
+            remove_container(container_id)
+            result["containers_removed"] += 1
+        except Exception as exc:  # pragma: no cover - depends on Docker daemon race behavior.
+            result["ok"] = False
+            result["errors"].append(f"container {container_id[:12]}: {exc}")
+
+    for network in compose_project_networks(project):
+        network_id = str(network.get("Id") or network.get("Name") or "")
+        if not network_id:
+            continue
+        try:
+            remove_network(network_id)
+            result["networks_removed"] += 1
+        except Exception as exc:  # pragma: no cover - depends on Docker daemon race behavior.
+            result["ok"] = False
+            result["errors"].append(f"network {network_id}: {exc}")
+
+    if not result["ok"]:
+        result["message"] = "compose project partially stopped"
+    return result
+
+
+def compose_project_containers(compose_project: str) -> list[dict[str, Any]]:
+    containers = docker_get("/containers/json?all=1")
+    return [
+        container
+        for container in containers
+        if (container.get("Labels") or {}).get("com.docker.compose.project") == compose_project
+    ]
+
+
+def compose_project_networks(compose_project: str) -> list[dict[str, Any]]:
+    networks = docker_get("/networks")
+    return [
+        network
+        for network in networks
+        if (network.get("Labels") or {}).get("com.docker.compose.project") == compose_project
+    ]
+
+
+def is_portmap_managed(container: dict[str, Any]) -> bool:
+    return (container.get("Labels") or {}).get("portmap.managed") == "true"
+
+
+def stop_container(container_id: str) -> None:
+    escaped = urllib.parse.quote(container_id, safe="")
+    docker_request("POST", f"/containers/{escaped}/stop?t=10", ok_statuses={204, 304, 404, 409})
+
+
+def remove_container(container_id: str) -> None:
+    escaped = urllib.parse.quote(container_id, safe="")
+    docker_request("DELETE", f"/containers/{escaped}?v=0&force=1", ok_statuses={204, 404, 409})
+
+
+def remove_network(network_id: str) -> None:
+    escaped = urllib.parse.quote(network_id, safe="")
+    for attempt in range(NETWORK_REMOVE_ATTEMPTS):
+        try:
+            docker_request("DELETE", f"/networks/{escaped}", ok_statuses={204, 404})
+            return
+        except RuntimeError:
+            if attempt == NETWORK_REMOVE_ATTEMPTS - 1:
+                raise
+            time.sleep(NETWORK_REMOVE_DELAY_SECONDS)
+
+
+def first_form_value(form: dict[str, list[str]], name: str) -> str:
+    values = form.get(name) or [""]
+    return values[0]
+
+
 class CatalogHandler(BaseHTTPRequestHandler):
     server_version = "portmap-catalog/0.1"
 
@@ -196,7 +304,18 @@ class CatalogHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self.handle_request(send_body=False)
 
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/actions/compose-down":
+            self.handle_compose_down()
+            return
+        self.send_response(404)
+        self.send_header("content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"not found\n")
+
     def handle_request(self, *, send_body: bool) -> None:
+        parsed = urllib.parse.urlparse(self.path)
         if self.path in {"/healthz", "/readyz"}:
             self.write_text("ok\n", content_type="text/plain", send_body=send_body)
             return
@@ -211,10 +330,10 @@ class CatalogHandler(BaseHTTPRequestHandler):
                 self.wfile.write(f"failed to read Docker catalog: {exc}\n".encode("utf-8"))
             return
 
-        if self.path == "/registry.json":
+        if parsed.path == "/registry.json":
             self.write_json(catalog, send_body=send_body)
             return
-        if self.path == "/":
+        if parsed.path == "/":
             self.write_text(render_html(catalog), content_type="text/html", send_body=send_body)
             return
 
@@ -223,6 +342,31 @@ class CatalogHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if send_body:
             self.wfile.write(b"not found\n")
+
+    def handle_compose_down(self) -> None:
+        length = min(int(self.headers.get("content-length", "0") or "0"), 8192)
+        payload = self.rfile.read(length).decode("utf-8", errors="replace")
+        form = urllib.parse.parse_qs(payload)
+        compose_project = first_form_value(form, "compose_project")
+        try:
+            result = compose_down_project(compose_project)
+            self.write_text(render_action_result(result), content_type="text/html", send_body=True)
+        except Exception as exc:  # pragma: no cover - exercised through container runtime.
+            self.send_response(400)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            body = render_action_result(
+                {
+                    "compose_project": compose_project,
+                    "ok": False,
+                    "message": str(exc),
+                    "containers_removed": 0,
+                    "networks_removed": 0,
+                    "errors": [],
+                }
+            ).encode("utf-8")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"{self.address_string()} - {fmt % args}")
@@ -377,6 +521,48 @@ def render_html(catalog: dict[str, Any]) -> str:
       border-bottom: 1px solid #e6ebf1;
       font-size: 14px;
       font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }}
+    .branch-actions {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-weight: 500;
+    }}
+    .down-form {{
+      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }}
+    .down-button {{
+      border: 1px solid #b42318;
+      background: #fff5f5;
+      color: #9f1d16;
+      padding: 6px 9px;
+      font-size: 13px;
+      cursor: pointer;
+    }}
+    .down-button:focus {{
+      outline: 2px solid #ef4444;
+      outline-offset: 2px;
+    }}
+    .action-result {{
+      border: 1px solid #d9e0e8;
+      background: #ffffff;
+      padding: 16px;
+    }}
+    .action-result h2 {{
+      margin: 0 0 8px;
+      font-size: 18px;
+    }}
+    .action-result p {{
+      margin: 8px 0;
     }}
     table {{
       width: 100%;
@@ -455,6 +641,15 @@ def render_html(catalog: dict[str, Any]) -> str:
       .branch-header {{
         background: #202832;
         border-bottom-color: #2b3540;
+      }}
+      .down-button {{
+        background: #3b1717;
+        color: #fecaca;
+        border-color: #b42318;
+      }}
+      .action-result {{
+        background: #171d23;
+        border-color: #2b3540;
       }}
       table {{
         background: #171d23;
@@ -544,6 +739,81 @@ def render_html(catalog: dict[str, Any]) -> str:
 """
 
 
+def render_action_result(result: dict[str, Any]) -> str:
+    errors = result.get("errors") or []
+    error_items = "".join(f"<li><code>{escape(error)}</code></li>" for error in errors)
+    error_block = f"<ul>{error_items}</ul>" if error_items else ""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>portmap action</title>
+  <style>
+    :root {{
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    body {{
+      margin: 0;
+      padding: 24px;
+      background: #f5f7fa;
+      color: #18202a;
+    }}
+    main {{
+      max-width: 760px;
+      margin: 0 auto;
+    }}
+    .action-result {{
+      border: 1px solid #d9e0e8;
+      background: #ffffff;
+      padding: 16px;
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 22px;
+    }}
+    p {{
+      margin: 8px 0;
+    }}
+    code {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break: break-all;
+    }}
+    a {{
+      color: #075985;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      body {{
+        background: #101418;
+        color: #eef2f6;
+      }}
+      .action-result {{
+        background: #171d23;
+        border-color: #2b3540;
+      }}
+      a {{
+        color: #7dd3fc;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="action-result">
+      <h1>{escape(result.get("message") or "compose down")}</h1>
+      <p>Project: <code>{escape(result.get("compose_project") or "")}</code></p>
+      <p>Containers removed: <code>{escape(result.get("containers_removed") or 0)}</code></p>
+      <p>Networks removed: <code>{escape(result.get("networks_removed") or 0)}</code></p>
+      {error_block}
+      <p><a href="/">Back to catalog</a></p>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
 def build_catalog_tree(catalog: dict[str, Any]) -> list[dict[str, Any]]:
     directories: dict[str, dict[str, Any]] = {}
     for service in catalog.get("services", []):
@@ -616,8 +886,12 @@ def render_repo(repo: dict[str, Any]) -> str:
 
 def render_branch(branch: dict[str, Any]) -> str:
     rows = "\n".join(render_service_endpoint_rows(service) for service in branch["services"])
+    actions = render_branch_actions(branch)
     return f"""          <section class="branch-group">
-            <div class="branch-header">Branch: <code>{escape(branch["branch"])}</code></div>
+            <div class="branch-header">
+              <div>Branch: <code>{escape(branch["branch"])}</code></div>
+{actions}
+            </div>
             <table>
               <thead>
                 <tr>
@@ -635,6 +909,31 @@ def render_branch(branch: dict[str, Any]) -> str:
               </tbody>
             </table>
           </section>"""
+
+
+def render_branch_actions(branch: dict[str, Any]) -> str:
+    projects = sorted(
+        {
+            str(service.get("compose_project") or "")
+            for service in branch["services"]
+            if service.get("compose_project")
+        }
+    )
+    if not projects:
+        return "              <div></div>"
+    forms = "\n".join(render_compose_down_form(project) for project in projects)
+    return f"""              <div class="branch-actions">
+{forms}
+              </div>"""
+
+
+def render_compose_down_form(compose_project: str) -> str:
+    command = f"docker compose -p {compose_project} down"
+    return f"""                <form class="down-form" method="post" action="/actions/compose-down" onsubmit="return confirm('Run docker compose down for this project?');">
+                  <input type="hidden" name="compose_project" value="{escape_attr(compose_project)}">
+                  <code>{escape(compose_project)}</code>
+                  <button class="down-button" type="submit" title="{escape_attr(command)}">Down</button>
+                </form>"""
 
 
 def render_service_endpoint_rows(service: dict[str, Any]) -> str:
