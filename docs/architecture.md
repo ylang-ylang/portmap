@@ -1,293 +1,566 @@
-# docker-branch-net Architecture
+# portmap Architecture
 
-`docker-branch-net` is a small network runtime manager for local
-docker-compose debug environments. It only manages network variation between
-branches. Project runtime capability, browser image contents, GPU support,
-Playwright scripts, MCP business tools, and debug workflows remain owned by the
-project.
+`portmap` is a branch-scoped network control plane for local
+docker-compose projects. It does not proxy traffic itself. It translates
+project/branch rules into Docker Compose overlays, Traefik labels, Traefik
+entrypoints, and a local CLI-queryable endpoint registry.
 
-## Fixed Architecture
+The default runtime shape is a shared gateway hosted by the `portmap` tooling,
+not by each managed project. The gateway runs Traefik for HTTP routing and
+CoreDNS for wildcard debug-domain resolution. Managed project services join the
+shared Docker bridge network `portmap_gateway` through a generated compose
+override.
 
-The tool supports one fixed deployment shape:
+## Fixed Model
+
+The default data plane is Traefik:
 
 ```text
-browser / human
-        |
-        v
-host nginx
-        |
-        v
-127.0.0.1:allocated_host_port
-        |
-        v
-docker bridge port mapping
-        |
-        v
-container service:container_port
+HTTP / WebSocket / SSE / CDP / WebRTC signaling
+  -> Traefik HTTP routers
+  -> branch service:container_port
 
-local agent on host
-        |
-        v
-host nginx endpoint or generated localhost endpoint
+raw TCP / raw UDP
+  -> Traefik TCP/UDP entrypoints or Docker port mappings
+  -> branch service:container_port
 
-WebRTC media
-        |
-        v
-shared TURN
+dynamic port-range protocols
+  -> project-owned service
+  -> one entry host port plus one branch-scoped host port range
 ```
 
-The fixed assumptions are:
+`portmap` owns only the control-plane pieces:
 
-- containers run on Docker bridge networks
-- host nginx is the stable browser and local-agent entrypoint
-- host ports are bound to `127.0.0.1`
-- TURN is shared infrastructure
-- the agent runs on the host, not inside the managed application container
+- branch/project naming rules
+- shared gateway network name
+- wildcard debug DNS domain
+- compose inspection
+- endpoint discovery or declaration
+- generated compose overlays
+- generated Traefik labels and entrypoints
+- generated direct Docker port mappings for range endpoints
+- raw TCP/UDP host-port allocation
+- range endpoint host-port allocation
+- local endpoint registry
+- status and cleanup metadata
 
-The tool does not choose between host networking, bridge networking, direct LAN
-exposure, or remote-public deployment. It only implements this architecture.
+It does not own:
 
-## Boundary
-
-The tool manages:
-
-- branch-scoped namespace generation
-- localhost port allocation
-- docker compose override rendering
-- nginx reverse-proxy config rendering
-- nginx config validation and reload
-- shared TURN injection or credential generation
-- generated endpoint URL registry for host-side agents
-- runtime state, locks, status, and cleanup
-
-The tool does not manage:
-
-- GPU enablement
-- Xorg, desktop, Chromium, or Playwright installation
-- MCP business tools
-- fixed debug flows
-- agent decision logic
-- frontend or backend performance analysis
+- HTTP proxy implementation
+- TCP/UDP proxy implementation
+- TURN credential generation
+- ICE configuration
+- WebRTC behavior
 - application startup policy
-- service-specific behavior beyond exposing container ports
+- GPU/browser/MCP/debug workflow behavior
 
-## Configuration Classes
+## Why Traefik
 
-There are three classes of configuration.
+Traefik is the default because it can serve as one shared network data plane for:
 
-### 1. Global Tool Configuration
+- HTTP reverse proxy
+- WebSocket reverse proxy
+- SSE and streaming HTTP
+- Docker label discovery
+- TCP routers
+- UDP routers
+- dynamic container lifecycle updates
 
-These settings are universal for all projects, branches, and tasks:
+Caddy can still be a future HTTP/WebSocket-only backend, but v1 should not need
+Caddy when Traefik is the default.
 
-- nginx listen port
-- nginx config output directory
-- debug base domain
-- proxy timeout and WebSocket headers
-- host bind address, normally `127.0.0.1`
-- TURN server address
-- TURN realm
-- TURN auth mode
-- TURN shared secret or fixed credentials
-- state directory
-- port allocation ranges
+## Shared Gateway
 
-These settings are not task-specific.
+Start the gateway from the `portmap` repository:
 
-### 2. Project Endpoint Declaration
-
-The project only declares which compose service exposes which container port:
-
-```yaml
-endpoints:
-  desktop:
-    service: browser-debug
-    container_port: 8081
-
-  cdp:
-    service: browser-debug
-    container_port: 9334
-
-  frontend:
-    service: frontend
-    container_port: 5173
-
-  backend:
-    service: backend
-    container_port: 8000
+```bash
+cp .env.example .env
+docker compose -f docker-compose.gateway.yml up -d
 ```
 
-The endpoint name is only a stable label for generated URLs and state records.
-The tool should not need to know whether an endpoint is CDP, Selkies, MCP, a
-frontend server, or a backend server.
-
-### 3. Runtime Generated Configuration
-
-These values vary per branch instance, but they are generated by the tool:
-
-- compose project name
-- docker network name
-- allocated host ports
-- nginx hostnames
-- nginx upstream addresses
-- docker compose override file
-- endpoint URL registry
-- optional TURN username and credential
-- state records used for cleanup
-
-They are instance-generated values, not task-specific configuration.
-
-## Generated Artifacts
-
-A typical run generates:
+Default shape:
 
 ```text
-.docker-branch-net/
-  docker-compose.debug.generated.yml
-  nginx.debug.generated.conf
-  agent-urls.generated.json
-  state.json
+host:80 catalog
+  -> portmap-catalog
+  -> Docker socket labels
+  -> current portmap-managed services and endpoints
+
+host:8080 HTTP
+  -> portmap-traefik
+  -> portmap_gateway Docker network
+  -> managed project service:container_port
+
+host:53 DNS
+  -> portmap-dns
+  -> *.debug.lan A 192.168.201.52
 ```
 
-The exact output location can be configured globally or by command-line flag,
-but generated files should be easy to remove and should not be hand-edited.
+The gateway compose creates the named Docker network:
 
-## Compose Override
+```text
+portmap_gateway
+```
 
-Project compose files should keep container ports stable. The manager generates
-host mappings:
+Generated project overrides declare that network as external and attach managed
+services to it:
 
 ```yaml
 services:
-  browser-debug:
-    ports:
-      - "127.0.0.1:18101:8081"
-      - "127.0.0.1:19331:9334"
-
   frontend:
-    ports:
-      - "127.0.0.1:15173:5173"
+    networks:
+      default:
+      portmap_gateway:
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=portmap_gateway
+
+networks:
+  portmap_gateway:
+    external: true
+    name: portmap_gateway
 ```
 
-The project does not manually assign branch-specific host ports.
+This keeps Traefik out of individual project compose files while still allowing
+Traefik to reach Docker bridge services without per-service host port mappings.
 
-## Nginx Proxy Model
-
-Each endpoint receives a generated hostname and an upstream target:
+Development machines should use split DNS:
 
 ```text
-desktop.feat-a.comap.debug.local -> 127.0.0.1:18101
-cdp.feat-a.comap.debug.local     -> 127.0.0.1:19331
+*.debug.lan -> portmap host DNS, for example 192.168.201.52
+all other names -> normal DNS
 ```
 
-`upstream` means the local address nginx forwards requests to. For example:
+This lets every generated Host-routing URL resolve externally without adding
+per-endpoint entries to `/etc/hosts`.
 
-```nginx
-proxy_pass http://127.0.0.1:18101;
+Linux setup command shape:
+
+```bash
+DNS_SERVER=192.168.201.52
+DNS_DOMAIN=debug.lan
+DNS_IFACE="$(ip route get "$DNS_SERVER" | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
+
+sudo resolvectl dns "$DNS_IFACE" "$DNS_SERVER"
+sudo resolvectl domain "$DNS_IFACE" "~$DNS_DOMAIN"
 ```
 
-The nginx template is intentionally generic:
+## Endpoint Classes
 
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:$allocated_port;
-    proxy_http_version 1.1;
+`portmap` should classify exposed services into four endpoint classes.
 
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Forwarded-Host $http_host;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+### `http`
 
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
+Examples:
 
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-}
+- frontend dev server
+- backend HTTP API
+- CDP HTTP/WebSocket
+- MCP over HTTP/WebSocket/SSE
+- WebRTC signaling
+
+HTTP endpoints can share one Traefik HTTP entrypoint because Traefik can route
+by HTTP `Host`.
+
+By default, generated HTTP routers rewrite the upstream request `Host` header
+to:
+
+```text
+127.0.0.1:<container_port>
 ```
 
-The first implementation should prefer subdomain routing over path-prefix
-routing because many protocols and development servers produce self-described
-URLs.
+This is a generic HTTP proxy policy, not a CDP-specific rule. It makes local
+debug services that reject arbitrary external Host headers work behind the
+shared debug domain. Endpoint declarations can opt out when the application
+needs to observe the external Host:
 
-## Agent URL Registry
+```toml
+[endpoints.frontend]
+kind = "http"
+service = "frontend"
+container_port = 5173
+preserve_host = true
+```
 
-The agent URL registry is a generated file consumed by host-side agents:
+They can also set a specific upstream Host:
+
+```toml
+[endpoints.browser_debug]
+kind = "http"
+service = "browser"
+container_port = 19333
+upstream_host = "127.0.0.1:19333"
+```
+
+Example generated labels:
+
+```yaml
+services:
+  frontend:
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.comap-feat-a-frontend.rule=Host(`frontend.feat-a.comap.debug.local`)
+      - traefik.http.routers.comap-feat-a-frontend.entrypoints=web
+      - traefik.http.services.comap-feat-a-frontend.loadbalancer.server.port=5173
+      - traefik.http.routers.comap-feat-a-frontend.middlewares=comap-feat-a-frontend-host
+      - traefik.http.middlewares.comap-feat-a-frontend-host.headers.customrequestheaders.Host=127.0.0.1:5173
+      - traefik.docker.network=portmap_gateway
+```
+
+Request path:
+
+```text
+browser
+  -> http://frontend.feat-a.comap.debug.local:8080
+  -> Traefik web entrypoint
+  -> portmap_gateway
+  -> frontend container:5173
+```
+
+The browser needs the URL, not the container port.
+
+### `range`
+
+Examples:
+
+- TURN/coturn
+- SIP plus RTP
+- RTSP plus RTP/RTCP
+- FTP passive mode
+
+Range endpoints model protocols with one entry/control port and a later
+runtime-selected data/media port range. `portmap` does not understand the
+protocol; it only allocates the external entry port and the contiguous host port
+range, then writes both into the generated compose override.
+
+Example declaration:
+
+```toml
+[endpoints.turn]
+kind = "range"
+service = "coturn"
+container_port = 3478
+protocol = "udp"
+range_size = 40
+```
+
+Example generated compose shape:
+
+```yaml
+services:
+  coturn:
+    ports:
+      - "34781:3478/udp"
+      - "49160-49199:49160-49199/udp"
+    environment:
+      PORTMAP_TURN_HOST: "192.168.201.52"
+      PORTMAP_TURN_PORT: "34781"
+      PORTMAP_TURN_PROTOCOL: "udp"
+      PORTMAP_TURN_RANGE_MIN_PORT: "49160"
+      PORTMAP_TURN_RANGE_MAX_PORT: "49199"
+      PORTMAP_TURN_RANGE_SIZE: "40"
+```
+
+The range uses same-number host/container mapping. This is deliberate because
+protocols such as TURN advertise selected relay ports to external clients; the
+project service must be configured to listen on the injected range.
+
+All services referenced by `endpoints.toml` receive the generated
+`PORTMAP_<ENDPOINT>_*` variables. This stays generic while allowing one service
+to consume another endpoint's externally assigned address, for example a browser
+service reading `PORTMAP_TURN_*` to publish TURN details.
+
+### `tcp`
+
+Examples:
+
+- MQTT
+- Postgres
+- Redis
+- MySQL
+- custom TCP services
+
+Raw TCP usually cannot share one entrypoint by hostname because it has no HTTP
+`Host` header. TLS TCP with SNI is an exception, but v1 should not rely on it.
+
+For raw TCP, `portmap` allocates a host port and generates a Traefik
+TCP entrypoint plus labels.
+
+Example generated Traefik entrypoint:
+
+```yaml
+entryPoints:
+  mqtt-comap-feat-a:
+    address: ":18831"
+```
+
+Example generated labels:
+
+```yaml
+services:
+  mqtt:
+    labels:
+      - traefik.enable=true
+      - traefik.tcp.routers.comap-feat-a-mqtt.entrypoints=mqtt-comap-feat-a
+      - traefik.tcp.routers.comap-feat-a-mqtt.rule=HostSNI(`*`)
+      - traefik.tcp.services.comap-feat-a-mqtt.loadbalancer.server.port=1883
+      - traefik.docker.network=portmap_gateway
+```
+
+Request path:
+
+```text
+mqtt client
+  -> 127.0.0.1:18831
+  -> Traefik mqtt-comap-feat-a entrypoint
+  -> mqtt container:1883
+```
+
+The service container usually does not need to know the external host port. The
+client does, so the port must be written to the registry.
+
+### `udp`
+
+Examples:
+
+- custom UDP services
+- coturn/TURN UDP ports when the project owns coturn
+
+Raw UDP also usually needs allocated host ports. Traefik can route UDP by
+entrypoint, not by HTTP-style hostname.
+
+Example generated Traefik entrypoint:
+
+```yaml
+entryPoints:
+  udp-comap-feat-a:
+    address: ":19999/udp"
+```
+
+Example generated labels:
+
+```yaml
+services:
+  udp-service:
+    labels:
+      - traefik.enable=true
+      - traefik.udp.routers.comap-feat-a-udp.entrypoints=udp-comap-feat-a
+      - traefik.udp.services.comap-feat-a-udp.loadbalancer.server.port=9999
+      - traefik.docker.network=portmap_gateway
+```
+
+## TURN Boundary
+
+TURN is not a core `portmap` concept.
+
+`portmap` should not generate TURN credentials, ICE configs, or
+WebRTC application settings. If a project runs coturn, the tool treats it like
+ordinary TCP/UDP endpoints.
+
+The WebRTC application remains responsible for using and exposing its own
+`iceServers` configuration, for example through env vars, config files, or a
+`/turn`/`/rtc-config` endpoint.
+
+Two valid project-level patterns:
+
+```text
+shared coturn:
+  all branches use turn:<host>:3478
+
+per-branch coturn:
+  branch-a uses turn:<host>:34781
+  branch-b uses turn:<host>:34782
+```
+
+`portmap` only records and exposes whichever external TCP/UDP ports
+the project chooses.
+
+## Compose Inspection
+
+The tool should inspect rendered Compose output, preferably via:
+
+```bash
+docker compose config --format json
+```
+
+It should read:
+
+- services
+- networks
+- `network_mode`
+- `ports`
+- `expose`
+- existing labels
+- compose project name
+
+Rules:
+
+- reject or warn on `network_mode: host` for managed endpoints
+- allow normal Docker bridge networks
+- prefer explicit endpoint declarations over guessing
+- treat `ports` and `expose` as endpoint candidates
+- generate explicit `loadbalancer.server.port` labels instead of relying on Traefik port guessing
+
+## Repository Identity
+
+`portmap` should distinguish repositories by Git history, not by
+directory name, branch name, or current commit.
+
+Default repo identity:
+
+```text
+repo_id = hash(first_commit_hash)
+```
+
+This means these are treated as the same repo:
+
+- different branches of the same Git history
+- different worktrees of the same Git history
+- different clones of the same Git history
+
+This is intentional. For this tool, "same repo" means "same code history root",
+not necessarily "same hosting-provider project".
+
+Human display names can still come from the directory name or remote basename:
+
+```text
+repo_id = hash(first_commit_hash)
+display_name = basename(remote_url or git_root)
+```
+
+Users may override the identity explicitly:
+
+```toml
+# .portmap/repo.toml
+repo_id = "comap"
+display_name = "comap"
+```
+
+Resolution order:
+
+```text
+1. explicit .portmap/repo.toml repo_id
+2. hash(first_commit_hash)
+3. hash(git_root_path) as fallback when the first commit is unavailable
+```
+
+Known boundaries:
+
+- shallow clones may not contain the first commit
+- history rewriting with tools such as filter-repo can change the first commit
+- forks with the same root commit are intentionally grouped unless `repo_id` is
+  explicitly overridden
+
+## Generated Artifacts
+
+Generated files should live under:
+
+```text
+.portmap/
+  endpoints.toml
+  README.md
+  .gitignore
+  docker-compose.override.generated.yml
+```
+
+`endpoints.toml` is the project-local source of truth. The generated compose
+override is the only project-local artifact required for HTTP endpoints because
+Traefik and the catalog both read Docker labels from running containers.
+
+`portmap init` creates `.portmap/endpoints.toml`, `.portmap/README.md`, and
+`.portmap/.gitignore`. The README is deliberately project-local: it documents
+how this compose repo should be shaped for portmap to manage it, how endpoint
+kinds map to HTTP/raw/range routing, how to generate the branch-specific
+override, and how to query the shared catalog. `portmap generate` should also
+add the README and `.gitignore` when they are missing, but it should not
+overwrite existing project-local docs.
+
+Raw TCP/UDP endpoints may need additional generated state because they consume
+host ports:
+
+```text
+.portmap/state.json
+```
+
+Extra Traefik static config should only exist when a runtime mode needs it. It
+should not be generated as an empty file for HTTP-only projects.
+
+The original project files should not be modified in v1:
+
+- do not rewrite `docker-compose.yml`
+- do not rewrite `.env`
+- do not remove existing `ports`
+
+## Catalog And Query
+
+The shared gateway catalog is a core feature. It answers:
+
+```text
+which repos are running
+which branch/worktree instances exist
+which endpoints each instance exposes
+which URL or host:port each endpoint uses
+```
+
+The catalog is derived from Docker labels on running containers. It is exposed
+on host port `80`:
+
+```text
+http://portmap.debug.lan/
+http://portmap.debug.lan/registry.json
+```
+
+Minimal JSON shape:
 
 ```json
 {
-  "desktop": "http://desktop.feat-a.comap.debug.local:18080",
-  "cdp": "http://cdp.feat-a.comap.debug.local:18080",
-  "frontend": "http://frontend.feat-a.comap.debug.local:18080",
-  "backend": "http://backend.feat-a.comap.debug.local:18080"
+  "services": [
+    {
+      "repo_name": "comap",
+      "branch": "feat-a",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/comap@feat-a",
+      "compose_project": "comap_feat_a",
+      "compose_service": "frontend",
+      "endpoints": [
+        {
+          "name": "frontend",
+          "kind": "http",
+          "url": "http://frontend.feat-a.comap.debug.lan:8080"
+        },
+        {
+          "name": "mqtt",
+          "kind": "tcp",
+          "host": "127.0.0.1",
+          "host_port": 18831
+        }
+      ]
+    }
+  ]
 }
 ```
 
-It lets agents connect by logical endpoint name without knowing container names,
-container ports, host ports, nginx upstreams, or TURN settings.
+Project-local `.portmap/registry.json` is intentionally not required in the
+default model. It duplicates Docker labels and can become stale when containers
+are stopped or recreated.
 
-## TURN Model
+Future CLI query commands should read the shared catalog by default:
 
-TURN is shared tool-layer infrastructure, not task-specific configuration.
-
-Global settings may look like:
-
-```env
-DEBUG_TURN_URL=turn:turn.debug.local:3478?transport=udp
-DEBUG_TURN_REALM=debug.local
-DEBUG_TURN_AUTH_MODE=static-secret
-DEBUG_TURN_SHARED_SECRET=...
+```bash
+portmap list
+portmap status
+portmap endpoints <repo> <instance>
 ```
-
-If fixed TURN credentials are used, the manager only injects static settings.
-If coturn static-auth-secret mode is used, the manager generates short-lived
-credentials:
-
-```text
-username = expiry_or_session_identifier
-credential = HMAC(shared_secret, username)
-```
-
-This is runtime security logic, not task-specific logic.
-
-## Required Runtime Logic
-
-The minimal implementation needs only these pieces of logic:
-
-- read endpoint declarations
-- allocate and lock non-conflicting localhost ports
-- render docker compose override files
-- render nginx config files
-- validate and reload nginx atomically
-- write generated endpoint URLs
-- manage runtime state for status and cleanup
-
-Optional runtime logic:
-
-- generate TURN credentials
-- manage DNS or hosts records if wildcard DNS is not available
-- run endpoint health checks
-
-The tool should not add logic to identify whether an endpoint is CDP, Selkies,
-MCP, HTTP, or WebSocket. A single proxy template should cover the initial
-runtime.
-
-## DNS
-
-Preferred setup is a wildcard local DNS entry:
-
-```text
-*.debug.local -> 127.0.0.1
-```
-
-This avoids writing branch-specific `/etc/hosts` records. If wildcard DNS is
-not available, hosts-file management can be added later as optional runtime
-logic.
 
 ## Design Rule
 
-If a setting depends on business flow, selectors, test data, performance goals,
-GPU capability, browser image content, or MCP tool behavior, it does not belong
-in `docker-branch-net`.
+If a concern can be expressed as:
 
-If a setting depends only on exposing declared container ports through stable
-branch-scoped URLs, it belongs in `docker-branch-net`.
+```text
+branch instance + endpoint kind + container port -> external URL or host port
+```
+
+it belongs in `portmap`.
+
+If a concern depends on WebRTC ICE behavior, TURN credentials, business flows,
+GPU/browser runtime, MCP tool semantics, or application internals, it belongs
+to the project or a higher-level debug workflow.

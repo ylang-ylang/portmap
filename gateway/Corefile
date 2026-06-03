@@ -1,0 +1,12 @@
+{$PORTMAP_DNS_DOMAIN}:53 {
+  template IN A {
+    match ^(.+\.)?{$PORTMAP_DNS_DOMAIN}\.$
+    answer "{{ .Name }} 60 IN A {$PORTMAP_DNS_TARGET_IP}"
+  }
+  template IN AAAA {
+    match ^(.+\.)?{$PORTMAP_DNS_DOMAIN}\.$
+    rcode NOERROR
+  }
+  errors
+  log
+}
