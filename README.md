@@ -267,7 +267,7 @@ portmap endpoints my-repo dev
 
 ## Catalog Frontend
 
-The catalog UI is a Vite app. Source files live under:
+The catalog UI is a Vite + React app. Source files live under:
 
 ```text
 frontend/

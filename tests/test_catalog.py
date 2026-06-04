@@ -107,19 +107,17 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert script_type == "application/javascript; charset=utf-8"
     assert stylesheet_type == "text/css; charset=utf-8"
     assert dns_type == "image/svg+xml"
-    assert b'data-catalog-tree' in index_body
+    assert b'id="root"' in index_body
     assert b'/assets/catalog.js' in index_body
-    assert b'split-dns-unset' in index_body
-    assert b'target="_blank"' in index_body
     assert b'Test command' not in index_body
-    assert b'fetch("/registry.json")' in script_body
+    assert b'/registry.json' in script_body
     assert b'/assets/dns-check.svg' in script_body
-    assert b'buildCatalogTree' in script_body
+    assert b'data-catalog-tree' in script_body
     assert b'data-project-group' in script_body
     assert b'data-branch-group' in script_body
+    assert b'split-dns-unset' in script_body
     assert b'noopener noreferrer' in script_body
-    assert b'compose-${action}' in script_body
-    assert b'composeRestartProject' in script_body
+    assert b'/actions/compose-' in script_body
     assert b'resolvectl revert "$DNS_IFACE"' in script_body
     assert b'split-dns-test' not in script_body
     assert b'.project-group' in stylesheet_body

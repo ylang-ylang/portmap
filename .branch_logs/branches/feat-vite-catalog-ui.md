@@ -14,3 +14,5 @@
   without running Docker services.
 - Add a mock Docker Compose entrypoint that exposes the Vite mock UI on host
   port `81`.
+- Migrate the catalog UI from hand-written DOM construction to small React
+  components with explicit chevron toggles for project and branch panels.

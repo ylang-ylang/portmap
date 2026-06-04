@@ -1,4 +1,5 @@
 import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 import { readFileSync } from "node:fs";
 
 const catalogTarget = process.env.PORTMAP_CATALOG_TARGET || "http://127.0.0.1:80";
@@ -35,12 +36,11 @@ function mockCatalogPlugin() {
 export default defineConfig({
   root: "frontend",
   publicDir: "public",
-  plugins: mockCatalog ? [mockCatalogPlugin()] : [],
+  plugins: [react(), ...(mockCatalog ? [mockCatalogPlugin()] : [])],
   build: {
     outDir: "../src/portmap/catalog_static",
     // Keep __init__.py so catalog_static remains included as package data.
     emptyOutDir: false,
-    minify: false,
     rollupOptions: {
       output: {
         entryFileNames: "assets/catalog.js",
