@@ -19,3 +19,6 @@
   endpoint ordering.
 - Include Git Guard runtime auto-sync updates required by the installed hook
   during the merge.
+- Merge `feat/default-compose-name` so the main portmap gateway compose uses
+  Docker Compose's default `docker-compose.yml` filename while the mock compose
+  remains separate.

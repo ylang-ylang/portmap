@@ -78,7 +78,7 @@ network = "test_gateway"
         "docker",
         "compose",
         "-f",
-        str(tmp_path / "docker-compose.gateway.yml"),
+        str(tmp_path / "docker-compose.yml"),
         "config",
     ]
     assert recorded["env"]["PORTMAP_DNS_DOMAIN"] == "debug.lan"
