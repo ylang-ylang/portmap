@@ -10,3 +10,5 @@
   collapsible branch groups.
 - Merge Split DNS setup and unset commands into one utility panel.
 - Open catalog links in a new browser tab with `noopener noreferrer`.
+- Add a Vite mock catalog mode for quickly previewing the project/branch UI
+  without running Docker services.

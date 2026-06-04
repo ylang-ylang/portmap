@@ -1,0 +1,133 @@
+{
+  "generated_at": "2026-06-04T09:00:00+00:00",
+  "http_port": 8080,
+  "dns_domain": "debug.lan",
+  "dns_server": "192.0.2.10",
+  "services": [
+    {
+      "container": "browserdeck_dev_a2b2-browser-gpu-lab-1",
+      "image": "comap-browser-debug-debian:local",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@dev",
+      "compose_project": "browserdeck_dev_a2b2",
+      "compose_service": "browser-gpu-lab",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "desktop-dev-browserdeck",
+          "name": "desktop",
+          "kind": "http",
+          "container_port": 18080,
+          "url": "http://desktop.dev.browserdeck.debug.lan:8080"
+        },
+        {
+          "id": "browser-debug-dev-browserdeck",
+          "name": "browser-debug",
+          "kind": "http",
+          "container_port": 19333,
+          "url": "http://browser-debug.dev.browserdeck.debug.lan:8080"
+        }
+      ]
+    },
+    {
+      "container": "browserdeck_dev_a2b2-coturn-1",
+      "image": "coturn/coturn:4.6",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@dev",
+      "compose_project": "browserdeck_dev_a2b2",
+      "compose_service": "coturn",
+      "docker_network": "browserdeck_dev_default",
+      "endpoints": [
+        {
+          "id": "turn-dev-browserdeck",
+          "name": "turn",
+          "kind": "range",
+          "container_port": 3478,
+          "host": "192.0.2.10",
+          "host_port": 19001,
+          "range_start": 49160,
+          "range_end": 49199
+        }
+      ]
+    },
+    {
+      "container": "browserdeck_feat_a2b2-browser-gpu-lab-1",
+      "image": "comap-browser-debug-debian:local",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "feat-docker-browser-pointer-alignment",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@feat-docker-browser-pointer-alignment",
+      "compose_project": "browserdeck_feat_pointer_a2b2",
+      "compose_service": "browser-gpu-lab",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "desktop-feat-browserdeck",
+          "name": "desktop",
+          "kind": "http",
+          "container_port": 18080,
+          "url": "http://desktop.feat-docker-browser-pointer-alignment.browserdeck.debug.lan:8080"
+        },
+        {
+          "id": "browser-debug-feat-browserdeck",
+          "name": "browser-debug",
+          "kind": "http",
+          "container_port": 19333,
+          "url": "http://browser-debug.feat-docker-browser-pointer-alignment.browserdeck.debug.lan:8080"
+        }
+      ]
+    },
+    {
+      "container": "comap_dev_11aa-frontend-1",
+      "image": "node:22",
+      "repo_id": "11aa22bb33cc",
+      "repo_name": "comap",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/comap@wt/comap@dev",
+      "compose_project": "comap_dev_11aa",
+      "compose_service": "frontend",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "frontend-dev-comap",
+          "name": "frontend",
+          "kind": "http",
+          "container_port": 5173,
+          "url": "http://frontend.dev.comap.debug.lan:8080"
+        }
+      ]
+    },
+    {
+      "container": "comap_dev_11aa-backend-1",
+      "image": "python:3.12",
+      "repo_id": "11aa22bb33cc",
+      "repo_name": "comap",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/comap@wt/comap@dev",
+      "compose_project": "comap_dev_11aa",
+      "compose_service": "backend",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "api-dev-comap",
+          "name": "api",
+          "kind": "http",
+          "container_port": 8000,
+          "url": "http://api.dev.comap.debug.lan:8080"
+        },
+        {
+          "id": "mqtt-dev-comap",
+          "name": "mqtt",
+          "kind": "tcp",
+          "container_port": 1883,
+          "host": "192.0.2.10",
+          "host_port": 18001
+        }
+      ]
+    }
+  ]
+}

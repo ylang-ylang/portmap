@@ -285,6 +285,12 @@ Run the frontend dev server with hot reload:
 npm run dev
 ```
 
+Run the frontend with built-in mock catalog data:
+
+```bash
+PORTMAP_CATALOG_MOCK=1 npm run dev
+```
+
 By default the Vite server proxies `/registry.json`, `/actions/*`, `/healthz`,
 and `/readyz` to the catalog service at `http://127.0.0.1:80`. Override that
 target when the catalog is exposed somewhere else:

@@ -1,10 +1,41 @@
 import { defineConfig } from "vite";
+import { readFileSync } from "node:fs";
 
 const catalogTarget = process.env.PORTMAP_CATALOG_TARGET || "http://127.0.0.1:80";
+const mockCatalog = process.env.PORTMAP_CATALOG_MOCK === "1";
+
+function mockCatalogPlugin() {
+  return {
+    name: "portmap-mock-catalog",
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        const path = (request.url || "").split("?")[0];
+        if (path === "/registry.json") {
+          const body = readFileSync(new URL("./frontend/mock/registry.json", import.meta.url));
+          response.statusCode = 200;
+          response.setHeader("content-type", "application/json; charset=utf-8");
+          response.end(body);
+          return;
+        }
+        if (path.startsWith("/actions/compose-")) {
+          response.statusCode = 200;
+          response.setHeader("content-type", "application/json; charset=utf-8");
+          response.end(JSON.stringify({
+            ok: true,
+            message: "mock action accepted",
+          }));
+          return;
+        }
+        next();
+      });
+    },
+  };
+}
 
 export default defineConfig({
   root: "frontend",
   publicDir: "public",
+  plugins: mockCatalog ? [mockCatalogPlugin()] : [],
   build: {
     outDir: "../src/portmap/catalog_static",
     // Keep __init__.py so catalog_static remains included as package data.
@@ -24,7 +55,7 @@ export default defineConfig({
   },
   server: {
     port: 5174,
-    proxy: {
+    proxy: mockCatalog ? {} : {
       "/registry.json": {
         target: catalogTarget,
         changeOrigin: true,
