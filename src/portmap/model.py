@@ -72,5 +72,6 @@ class GenerateRequest:
     host_ip: str = "127.0.0.1"
     domain_suffix: str = "debug.lan"
     gateway_network: str = "portmap_gateway"
+    container_dns_server: str | None = None
     allocation_state_file: Path | None = None
     compose_project: str | None = None

@@ -255,6 +255,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         host_ip=args.host_ip,
         domain_suffix=args.domain_suffix,
         gateway_network=args.gateway_network,
+        container_dns_server=load_portmap_settings(environ=os.environ).effective_dns_bind,
         allocation_state_file=args.allocation_state_file,
         compose_project=args.compose_project,
     )

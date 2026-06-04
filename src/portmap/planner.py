@@ -107,6 +107,7 @@ def generate_plan(request: GenerateRequest) -> GeneratedPlan:
         planned,
         compose=compose,
         gateway_network=request.gateway_network,
+        container_dns_server=request.container_dns_server,
     )
     traefik_static = build_traefik_static(planned)
     registry = build_registry(
@@ -365,6 +366,7 @@ def build_compose_override(
     *,
     compose: ComposeConfig,
     gateway_network: str,
+    container_dns_server: str | None = None,
 ) -> dict[str, Any]:
     services: dict[str, Any] = {}
     managed_service_names = tuple(dict.fromkeys(endpoint.service for endpoint in planned))
@@ -393,6 +395,10 @@ def build_compose_override(
             )
     for service_name in managed_service_names:
         service_config = services.setdefault(service_name, {})
+        if container_dns_server:
+            dns = service_config.setdefault("dns", [])
+            if container_dns_server not in dns:
+                dns.append(container_dns_server)
         service_environment = service_config.setdefault("environment", {})
         service_environment.update(environment)
     override: dict[str, Any] = {

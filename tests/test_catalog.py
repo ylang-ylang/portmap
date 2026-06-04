@@ -78,9 +78,12 @@ def test_parse_host_rule() -> None:
 
 
 def test_select_dns_server_prefers_external_bind_ip() -> None:
-    assert select_dns_server("192.168.201.52", "192.168.201.52") == "192.168.201.52"
-    assert select_dns_server("0.0.0.0", "192.168.201.52") == "192.168.201.52"
-    assert select_dns_server("127.0.0.1", "10.0.0.5") == "10.0.0.5"
+    external_bind = "external-bind"
+    external_target = "external-target"
+
+    assert select_dns_server(external_bind, external_target) == external_bind
+    assert select_dns_server("0.0.0.0", external_target) == external_target
+    assert select_dns_server("127.0.0.1", external_target) == external_target
 
 
 def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:

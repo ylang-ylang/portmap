@@ -6,6 +6,7 @@ from portmap.settings import load_portmap_settings
 
 
 def test_load_portmap_settings_reads_root_toml_and_detects_host_ip(tmp_path: Path, monkeypatch) -> None:
+    detected_host = "detected-host"
     (tmp_path / "portmap.toml").write_text(
         """
 [gateway]
@@ -28,12 +29,12 @@ dir = "~/.local/state/portmap-test"
 """.lstrip(),
         encoding="utf-8",
     )
-    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: "192.0.2.10")
+    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: detected_host)
 
     settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(tmp_path)})
 
     assert settings.dns_domain == "debug.lan"
-    assert settings.host_ip == "192.0.2.10"
+    assert settings.host_ip == detected_host
     assert settings.http_port == 18080
     assert settings.catalog_port == 180
     assert settings.dns_port == 5353
@@ -41,11 +42,12 @@ dir = "~/.local/state/portmap-test"
     assert settings.tcp_port_start == 21000
     assert settings.udp_port_start == 22000
     assert settings.range_port_start == 50000
-    assert settings.gateway_env()["PORTMAP_DNS_BIND"] == "192.0.2.10"
-    assert settings.gateway_env()["PORTMAP_DNS_TARGET_IP"] == "192.0.2.10"
+    assert settings.gateway_env()["PORTMAP_DNS_BIND"] == detected_host
+    assert settings.gateway_env()["PORTMAP_DNS_TARGET_IP"] == detected_host
 
 
 def test_gateway_cli_uses_root_toml_and_runtime_host_ip(tmp_path: Path, monkeypatch) -> None:
+    detected_host = "detected-host"
     (tmp_path / "portmap.toml").write_text(
         """
 [gateway]
@@ -65,7 +67,7 @@ network = "test_gateway"
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setenv("PORTMAP_ROOT", str(tmp_path))
-    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: "192.0.2.20")
+    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: detected_host)
     monkeypatch.setattr("portmap.cli.subprocess.run", fake_run)
 
     assert main(["gateway", "config"]) == 0
@@ -78,8 +80,8 @@ network = "test_gateway"
         "config",
     ]
     assert recorded["env"]["PORTMAP_DNS_DOMAIN"] == "debug.lan"
-    assert recorded["env"]["PORTMAP_DNS_BIND"] == "192.0.2.20"
-    assert recorded["env"]["PORTMAP_DNS_TARGET_IP"] == "192.0.2.20"
+    assert recorded["env"]["PORTMAP_DNS_BIND"] == detected_host
+    assert recorded["env"]["PORTMAP_DNS_TARGET_IP"] == detected_host
     assert recorded["env"]["PORTMAP_HTTP_PORT"] == "18080"
     assert recorded["env"]["PORTMAP_CATALOG_PORT"] == "180"
     assert recorded["env"]["PORTMAP_DNS_PORT"] == "5353"

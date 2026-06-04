@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - installed hook script mode
 DEFAULT_CONFIG = {
     "branch_logs": {
         "path": ".branch_logs/",
-        "force_required": True,
+        "force_diff_required": True,
     },
     "pre_push": {
         "auto_push_missing_tags": True,
@@ -59,7 +59,13 @@ def merge_config(config: dict[str, Any]) -> dict[str, Any]:
             merged[key] = merge_defaults(value, merged[key])
         else:
             merged[key] = value
+    normalize_config(merged)
     return merged
+
+def normalize_config(config: dict[str, Any]) -> None:
+    branch_logs = config.get("branch_logs")
+    if isinstance(branch_logs, dict):
+        branch_logs.pop("force_required", None)
 
 def merge_defaults(config: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
     merged = dict(config)

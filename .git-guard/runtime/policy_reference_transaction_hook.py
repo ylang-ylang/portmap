@@ -53,14 +53,14 @@ def main() -> int:
             is_merge_commit = merge_in_progress(repo)
             if is_merge_commit:
                 prepare_merge_commit(repo, config)
-            validate_pre_commit(repo, policy, config, require_branch_log_change=not is_merge_commit)
+            validate_pre_commit(repo, policy, config, require_branch_log_change=True)
             return 0
 
         if command == "pre-merge-commit":
             if len(sys.argv) != 2:
                 raise HookReject("HOOK_PRE_MERGE_COMMIT_USAGE", argv=sys.argv[1:])
             prepare_merge_commit(repo, config)
-            validate_pre_commit(repo, policy, config, require_branch_log_change=False)
+            validate_pre_commit(repo, policy, config, require_branch_log_change=True)
             return 0
 
         if len(sys.argv) != 2:

@@ -1,6 +1,6 @@
 {
   "branch_logs": {
-    "force_required": true,
+    "force_diff_required": true,
     "path": ".branch_logs/"
   },
   "pre_push": {
