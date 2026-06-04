@@ -117,8 +117,10 @@ DNS:     <detected-host-ip>:53
 ```
 
 CoreDNS answers every `*.debug.lan` A record with the detected host LAN IP.
-Configure development machines with split DNS so only `debug.lan` queries go
-to this DNS server.
+Other DNS queries are forwarded to the configured upstream resolver, defaulting
+to `/etc/resolv.conf`, so portmap-managed containers can still resolve public
+domains after their DNS is pointed at portmap. Configure development machines
+with split DNS so only `debug.lan` queries go to this DNS server.
 
 Gateway runtime settings are tracked in the portmap repo root:
 

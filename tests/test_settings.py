@@ -17,6 +17,7 @@ catalog_port = 180
 dns_bind = "0.0.0.0"
 dns_port = 5353
 dns_domain = "debug.lan"
+dns_forward = "/etc/resolv.conf"
 network = "test_gateway"
 
 [ports]
@@ -44,6 +45,7 @@ dir = "~/.local/state/portmap-test"
     assert settings.range_port_start == 50000
     assert settings.gateway_env()["PORTMAP_DNS_BIND"] == detected_host
     assert settings.gateway_env()["PORTMAP_DNS_TARGET_IP"] == detected_host
+    assert settings.gateway_env()["PORTMAP_DNS_FORWARD"] == "/etc/resolv.conf"
 
 
 def test_gateway_cli_uses_root_toml_and_runtime_host_ip(tmp_path: Path, monkeypatch) -> None:
@@ -82,6 +84,7 @@ network = "test_gateway"
     assert recorded["env"]["PORTMAP_DNS_DOMAIN"] == "debug.lan"
     assert recorded["env"]["PORTMAP_DNS_BIND"] == detected_host
     assert recorded["env"]["PORTMAP_DNS_TARGET_IP"] == detected_host
+    assert recorded["env"]["PORTMAP_DNS_FORWARD"] == "/etc/resolv.conf"
     assert recorded["env"]["PORTMAP_HTTP_PORT"] == "18080"
     assert recorded["env"]["PORTMAP_CATALOG_PORT"] == "180"
     assert recorded["env"]["PORTMAP_DNS_PORT"] == "5353"

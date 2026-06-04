@@ -23,6 +23,7 @@ class PortmapSettings:
     dns_bind: str
     dns_port: int
     dns_domain: str
+    dns_forward: str
     gateway_network: str
     tcp_port_start: int
     udp_port_start: int
@@ -50,6 +51,7 @@ class PortmapSettings:
             "PORTMAP_DNS_PORT": str(self.dns_port),
             "PORTMAP_DNS_DOMAIN": self.dns_domain,
             "PORTMAP_DNS_TARGET_IP": self.host_ip,
+            "PORTMAP_DNS_FORWARD": self.dns_forward,
             "PORTMAP_GATEWAY_NETWORK": self.gateway_network,
             "PORTMAP_STATE_DIR": str(self.state_dir),
         }
@@ -86,6 +88,7 @@ def load_portmap_settings(
             or string_env(env, "PORTMAP_DNS_DOMAIN")
             or string_value(gateway, "dns_domain", DEFAULT_DNS_DOMAIN)
         ).strip("."),
+        dns_forward=string_env(env, "PORTMAP_DNS_FORWARD") or string_value(gateway, "dns_forward", "/etc/resolv.conf"),
         gateway_network=(
             string_env(env, "PORTMAP_GATEWAY_NETWORK")
             or string_value(gateway, "network", DEFAULT_GATEWAY_NETWORK)
