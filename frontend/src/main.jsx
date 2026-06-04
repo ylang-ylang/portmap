@@ -266,7 +266,6 @@ function EndpointTable({ services }) {
       <table>
         <thead>
           <tr>
-            <th>Worktree</th>
             <th>Service</th>
             <th>Endpoint</th>
             <th>Kind</th>
@@ -280,7 +279,6 @@ function EndpointTable({ services }) {
           {services.flatMap((service) =>
             (service.endpoints || []).map((endpoint) => (
               <tr key={`${service.container}-${endpoint.id || endpoint.name}`}>
-                <td><CodeText value={service.worktree || ""} /></td>
                 <td><CodeText value={service.compose_service || ""} /></td>
                 <td><CodeText value={endpoint.name || endpoint.id || ""} /></td>
                 <td><CodeText value={endpoint.kind || ""} /></td>
@@ -300,7 +298,6 @@ function EndpointTable({ services }) {
 function BranchPanel({ branch, onAction }) {
   const [open, setOpen] = useState(true);
   const endpointTotal = branch.services.reduce((total, service) => total + endpointCount(service), 0);
-  const worktrees = uniqueSorted(branch.services.map((service) => service.worktree));
   const Chevron = open ? ChevronDown : ChevronRight;
   return (
     <section className="branch-group" data-branch-group="true">
@@ -314,7 +311,6 @@ function BranchPanel({ branch, onAction }) {
           <div className="summary-pills">
             <StatPill label={`${branch.services.length} services`} />
             <StatPill label={`${endpointTotal} endpoints`} />
-            {worktrees.length > 0 ? <StatPill label={`${worktrees.length} worktrees`} /> : null}
           </div>
           <BranchActions branch={branch} onAction={onAction} />
         </div>

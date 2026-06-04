@@ -16,7 +16,9 @@
   port `81`.
 - Migrate the catalog UI from hand-written DOM construction to small React
   components with explicit chevron toggles for project and branch panels.
-- Keep branch detail rows compact by removing the repeated worktree summary
-  line and relying on the endpoint table worktree column.
+- Keep branch detail rows compact by removing repeated worktree display from
+  branch summaries and endpoint tables.
+- Remove worktree from branch endpoint tables and branch header counts because
+  it repeats context and consumes too much scan width.
 - Document that user-facing endpoints such as frontend, desktop, browser, and
   WebRTC entries should be placed first in generated project onboarding docs.
