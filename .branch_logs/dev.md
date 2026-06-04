@@ -6,3 +6,5 @@
   and consume HTTP-like portmap URLs from inside Docker bridge networks.
 - Include Git Guard runtime/config auto-sync updates required by the installed
   hook during the merge.
+- Merge `feat/catalog-compose-restart-action` so the catalog can restart
+  portmap-managed compose projects from the web UI.
