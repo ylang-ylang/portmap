@@ -291,6 +291,18 @@ Run the frontend with built-in mock catalog data:
 PORTMAP_CATALOG_MOCK=1 npm run dev
 ```
 
+Run the same mock UI from Docker Compose on host port `81`:
+
+```bash
+docker compose -f docker-compose.mock.yml up
+```
+
+Then open:
+
+```text
+http://<host-ip>:81/
+```
+
 By default the Vite server proxies `/registry.json`, `/actions/*`, `/healthz`,
 and `/readyz` to the catalog service at `http://127.0.0.1:80`. Override that
 target when the catalog is exposed somewhere else:

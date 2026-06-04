@@ -1,0 +1,20 @@
+name: portmap-catalog-mock
+
+services:
+  catalog-mock:
+    image: node:24-alpine
+    working_dir: /workspace
+    command:
+      - sh
+      - -lc
+      - npm ci && npm run dev -- --host 0.0.0.0 --port 5174
+    environment:
+      PORTMAP_CATALOG_MOCK: "1"
+    ports:
+      - "81:5174"
+    volumes:
+      - .:/workspace
+      - node_modules:/workspace/node_modules
+
+volumes:
+  node_modules:

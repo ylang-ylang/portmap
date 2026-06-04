@@ -12,3 +12,5 @@
 - Open catalog links in a new browser tab with `noopener noreferrer`.
 - Add a Vite mock catalog mode for quickly previewing the project/branch UI
   without running Docker services.
+- Add a mock Docker Compose entrypoint that exposes the Vite mock UI on host
+  port `81`.
