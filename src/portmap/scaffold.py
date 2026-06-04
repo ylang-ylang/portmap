@@ -156,15 +156,115 @@ The repo should provide a normal Docker Compose file:
 Managed services must use Docker bridge networking. Do not use
 `network_mode: host` for services declared in `{endpoint_config}`.
 
-Services do not need host `ports` for HTTP/WebSocket/CDP endpoints. For those,
-keep the service listening on its container-internal port and optionally list it
-under `expose` for readability:
+## Docker Compose Rules For Portmap
+
+Use these rules when editing `{compose_display}` for services declared in
+`{endpoint_config}`.
+
+### Listen On The Container Interface
+
+The application process must listen on `0.0.0.0:<container_port>`, not only
+`127.0.0.1`. Traefik and other containers cannot reach a service that binds
+only to loopback inside its own container.
+
+Examples:
+
+```yaml
+services:
+  frontend:
+    command: npm run dev -- --host 0.0.0.0
+    expose:
+      - "5173"
+
+  backend:
+    command: uvicorn app:app --host 0.0.0.0 --port 8000
+    expose:
+      - "8000"
+```
+
+### Prefer expose Over Fixed Host Ports
+
+HTTP/WebSocket/CDP/SSE endpoints do not need host `ports`; they share the
+portmap Traefik HTTP port and are routed by generated Host names. Prefer:
 
 ```yaml
 services:
   frontend:
     expose:
       - "5173"
+```
+
+Do not add fixed host ports just for portmap-managed HTTP endpoints:
+
+```yaml
+services:
+  frontend:
+    ports:
+      - "5173:5173"
+```
+
+Raw TCP/UDP/range endpoints should also avoid fixed host ports unless the
+project has a separate non-portmap reason. Portmap injects branch-scoped host
+ports for `tcp`, `udp`, and `range` endpoints to avoid conflicts between
+worktrees.
+
+### Avoid Global Names
+
+Do not set fixed `container_name` for portmap-managed services:
+
+```yaml
+services:
+  backend:
+    container_name: backend
+```
+
+Multiple branches/worktrees can run at the same time, so fixed container names
+will collide. Let Docker Compose derive names from the portmap-generated compose
+project name.
+
+Do not rely on a fixed compose project name for portmap-managed instances.
+Portmap injects a branch/worktree-scoped compose project name during
+`docker compose ...` takeover.
+
+### Do Not Define The Gateway In The Project
+
+The project compose file should not define its own Traefik or CoreDNS services
+for portmap routing. The shared portmap gateway owns those. The generated
+override attaches HTTP-like services to the external `portmap_gateway` network
+when needed, so the project usually does not need to declare that network by
+hand.
+
+### Keep Runtime-Specific Capabilities In The Project
+
+Project runtime requirements such as GPU devices, privileged mode, bind mounts,
+browser image contents, or application-specific environment variables still
+belong in the project compose file. Portmap only manages endpoint exposure,
+branch-scoped ports, generated DNS, and routing labels.
+
+### Configure Range Services From PORTMAP Environment Variables
+
+For `range` endpoints such as TURN, RTP, passive FTP, or similar protocols, the
+service must read the injected `PORTMAP_<ENDPOINT>_*` variables and advertise
+the assigned external host and port range.
+
+For this declaration:
+
+```toml
+[endpoints.turn]
+kind = "range"
+service = "coturn"
+container_port = 3478
+protocol = "udp"
+range_size = 40
+```
+
+the service can read variables such as:
+
+```text
+PORTMAP_TURN_HOST
+PORTMAP_TURN_PORT
+PORTMAP_TURN_RANGE_MIN_PORT
+PORTMAP_TURN_RANGE_MAX_PORT
 ```
 
 ## Endpoint Declaration

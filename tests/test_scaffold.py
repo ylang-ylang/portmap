@@ -37,6 +37,12 @@ def test_init_portmap_writes_project_scaffold(tmp_path: Path) -> None:
 
     readme = (tmp_path / ".portmap" / "README.md").read_text(encoding="utf-8")
     assert "Required Repo Shape" in readme
+    assert "Docker Compose Rules For Portmap" in readme
+    assert "0.0.0.0:<container_port>" in readme
+    assert "Prefer expose Over Fixed Host Ports" in readme
+    assert "Do not set fixed `container_name`" in readme
+    assert "Do Not Define The Gateway In The Project" in readme
+    assert "PORTMAP_TURN_RANGE_MIN_PORT" in readme
     assert "docker compose" in readme
     assert "network_mode: host" in readme
     assert ".portmap/docker-compose.override.generated.yml" in readme
