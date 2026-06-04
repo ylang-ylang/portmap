@@ -321,11 +321,6 @@ function BranchPanel({ branch, onAction }) {
       </div>
       {open ? (
         <div className="branch-body">
-          {worktrees.length > 0 ? (
-            <div className="worktree-line">
-              Worktrees <CodeText value={worktrees.join(", ")} />
-            </div>
-          ) : null}
           <EndpointTable services={branch.services} />
         </div>
       ) : null}

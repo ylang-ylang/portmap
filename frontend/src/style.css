@@ -51,10 +51,12 @@ button {
 .project-header,
 .branch-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
+  min-width: 0;
+  flex-wrap: nowrap;
 }
 
 .project-header {
@@ -69,6 +71,7 @@ button {
 .project-toggle,
 .branch-toggle {
   min-width: 0;
+  flex: 1 1 auto;
   border: 0;
   padding: 0;
   background: transparent;
@@ -121,6 +124,9 @@ button {
 .branch-name {
   min-width: 0;
   font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-name {
@@ -134,20 +140,33 @@ button {
 .project-header-right,
 .branch-header-right {
   min-width: 0;
-  display: grid;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
   gap: 8px;
-  justify-items: end;
+  justify-content: flex-end;
+  white-space: nowrap;
 }
 
-.project-id,
-.worktree-line {
+.project-id {
   color: #52606d;
   font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-id code {
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 
 .summary-pills {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px;
   justify-content: flex-end;
 }
@@ -223,7 +242,7 @@ button {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   font-weight: 500;
 }
 
@@ -232,6 +251,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 
 .action-button,
@@ -286,6 +306,7 @@ button {
 
 table {
   width: 100%;
+  min-width: 1180px;
   border-collapse: collapse;
   background: #ffffff;
 }
@@ -297,6 +318,7 @@ td {
   text-align: left;
   vertical-align: top;
   font-size: 14px;
+  white-space: nowrap;
 }
 
 tr:last-child td {
@@ -315,7 +337,12 @@ th {
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
-  word-break: break-all;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
 }
 
 a {
@@ -487,21 +514,14 @@ pre {
 
   .project-summary,
   .branch-summary,
-  .project-header,
-  .branch-header,
   .quick-setup-actions,
   .dns-probe-header {
     flex-direction: column;
   }
 
   .project-header-right,
-  .branch-header-right,
-  .summary-pills {
+  .branch-header-right {
     justify-items: start;
-    justify-content: flex-start;
-  }
-
-  .branch-actions {
     justify-content: flex-start;
   }
 
@@ -520,7 +540,6 @@ pre {
   .project-meta,
   .branch-meta,
   .project-id,
-  .worktree-line,
   .quick-setup p,
   .dns-probe-header p,
   .dns-probe-details p,

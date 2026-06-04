@@ -16,3 +16,7 @@
   port `81`.
 - Migrate the catalog UI from hand-written DOM construction to small React
   components with explicit chevron toggles for project and branch panels.
+- Keep branch detail rows compact by removing the repeated worktree summary
+  line and relying on the endpoint table worktree column.
+- Document that user-facing endpoints such as frontend, desktop, browser, and
+  WebRTC entries should be placed first in generated project onboarding docs.
