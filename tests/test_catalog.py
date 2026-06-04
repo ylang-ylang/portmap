@@ -115,6 +115,9 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'data-catalog-tree' in script_body
     assert b'data-project-group' in script_body
     assert b'data-branch-group' in script_body
+    assert b'dns-status' in script_body
+    assert b'Action log' in script_body
+    assert b'action-log' in script_body
     assert b'split-dns-unset' in script_body
     assert b'noopener noreferrer' in script_body
     assert b'/actions/compose-' in script_body
@@ -122,6 +125,8 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'split-dns-test' not in script_body
     assert b'.project-group' in stylesheet_body
     assert b'.branch-group' in stylesheet_body
+    assert b'.dns-status' in stylesheet_body
+    assert b'.action-log' in stylesheet_body
     assert b'<svg ' in dns_body
 
 

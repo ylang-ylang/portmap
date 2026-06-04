@@ -139,8 +139,7 @@ async function parseActionResponse(response) {
   };
 }
 
-async function composeProjectAction({ action, composeProject, confirmText, failedText }) {
-  if (!window.confirm(confirmText)) return null;
+async function composeProjectAction({ action, composeProject, failedText }) {
   const body = new URLSearchParams({ compose_project: composeProject });
   try {
     const response = await fetch(`/actions/compose-${action}`, {
@@ -150,12 +149,20 @@ async function composeProjectAction({ action, composeProject, confirmText, faile
     });
     const result = await parseActionResponse(response);
     if (!response.ok || !result.ok) {
-      return { failed: true, message: result.message || failedText };
+      return { failed: true, message: result.message || failedText, result };
     }
-    return { failed: false, message: `${result.message}: ${composeProject}` };
+    return { failed: false, message: `${result.message}: ${composeProject}`, result };
   } catch (error) {
     return { failed: true, message: `${failedText}: ${error}` };
   }
+}
+
+function nowLabel() {
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function actionLabel(action) {
+  return action === "restart" ? "Restart" : "Down";
 }
 
 function StatPill({ label }) {
@@ -212,6 +219,29 @@ function ActionMessage({ message }) {
     <p className={`action-message ${message.failed ? "action-message-error" : ""}`} data-action-message>
       {message.message}
     </p>
+  );
+}
+
+function ActionLog({ entries }) {
+  if (!entries.length) return null;
+  return (
+    <section className="action-log" aria-label="Action log">
+      <div className="action-log-header">
+        <h2>Action log</h2>
+      </div>
+      <ol className="action-log-list">
+        {entries.map((entry) => (
+          <li className={`action-log-entry action-log-${entry.status}`} key={entry.id}>
+            <span className="action-log-time">{entry.time}</span>
+            <span className="action-log-status">{entry.status}</span>
+            <span className="action-log-message">
+              {entry.message}
+              {entry.detail ? <code>{entry.detail}</code> : null}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
@@ -412,62 +442,34 @@ function SplitDnsTools({ catalog }) {
   );
 }
 
-function DnsProbe({ catalog }) {
+function DnsStatus({ catalog }) {
   const [status, setStatus] = useState("checking");
-  if (!catalog) return null;
+  if (!catalog) {
+    return (
+      <span className="dns-status dns-status-checking">
+        <span className="dns-status-label">DNS</span>
+        <span className="dns-status-value">loading</span>
+      </span>
+    );
+  }
   const domain = text(catalog.dns_domain).replace(/\.$/, "");
   const host = `portmap.${domain}`;
   const url = `${window.location.protocol}//${host}${currentPortSuffix()}/assets/dns-check.svg?ts=${Date.now()}`;
   const statusLabel = status === "ok" ? "ok" : status === "failed" ? "failed" : "checking";
-  let message = (
-    <>
-      Checking whether this client can resolve <CodeText value={host} />.
-    </>
-  );
-  if (status === "ok") {
-    message = (
-      <>
-        This browser can resolve and load <CodeText value={host} />.
-      </>
-    );
-  }
-  if (status === "failed") {
-    message = (
-      <>
-        This browser cannot load <CodeText value={host} />. Configure split DNS for <CodeText value={domain} /> on
-        this client machine.
-      </>
-    );
-  }
   return (
-    <section className="dns-probe" data-dns-probe aria-label="Client DNS check">
-      <div className="dns-probe-header">
-        <div>
-          <h2>Client DNS check</h2>
-          <p>This browser must load the embedded URL below through split DNS.</p>
-        </div>
-        <span className={`dns-probe-status dns-probe-status-${status}`} data-dns-probe-status>
-          {statusLabel}
-        </span>
-      </div>
-      <div className="dns-probe-body">
-        <div className="dns-probe-image-frame">
-          <img
-            className={`dns-probe-image ${status === "failed" ? "is-hidden" : ""}`}
-            data-dns-probe-image
-            src={url}
-            alt="DNS check image"
-            onLoad={() => setStatus("ok")}
-            onError={() => setStatus("failed")}
-          />
-        </div>
-        <div className="dns-probe-details">
-          <div className="dns-probe-label">Embedded URL</div>
-          <OpenLink href={url}><CodeText value={url} /></OpenLink>
-          <p data-dns-probe-message>{message}</p>
-        </div>
-      </div>
-    </section>
+    <span className={`dns-status dns-status-${status}`} data-dns-probe title={url}>
+      <img
+        className="dns-status-image"
+        data-dns-probe-image
+        src={url}
+        alt=""
+        onLoad={() => setStatus("ok")}
+        onError={() => setStatus("failed")}
+      />
+      <span className="dns-status-label">DNS</span>
+      <span className="dns-status-value" data-dns-probe-status>{statusLabel}</span>
+      <OpenLink href={url}><CodeText value={host} /></OpenLink>
+    </span>
   );
 }
 
@@ -475,6 +477,7 @@ function CatalogApp() {
   const [catalog, setCatalog] = useState(null);
   const [error, setError] = useState("");
   const [actionMessage, setActionMessage] = useState(null);
+  const [actionLog, setActionLog] = useState([]);
 
   async function loadCatalog() {
     try {
@@ -488,14 +491,36 @@ function CatalogApp() {
   }
 
   async function handleAction(action, composeProject) {
+    const label = actionLabel(action);
+    if (!window.confirm(`Run docker compose ${action} for ${composeProject}?`)) return;
+    const logId = `${Date.now()}-${action}-${composeProject}`;
+    const detail = `docker compose -p ${composeProject} ${action}`;
+    setActionLog((entries) => [
+      {
+        id: logId,
+        time: nowLabel(),
+        status: "running",
+        message: `${label} requested`,
+        detail,
+      },
+      ...entries,
+    ].slice(0, 8));
     const result = await composeProjectAction({
       action,
       composeProject,
-      confirmText: `Run docker compose ${action} for ${composeProject}?`,
       failedText: `compose ${action} failed`,
     });
-    if (!result) return;
     setActionMessage(result);
+    setActionLog((entries) => entries.map((entry) => (
+      entry.id === logId
+        ? {
+          ...entry,
+          time: nowLabel(),
+          status: result.failed ? "failed" : "ok",
+          message: result.failed ? `${label} failed: ${result.message}` : `${label} completed: ${result.message}`,
+        }
+        : entry
+    )));
     if (!result.failed) await loadCatalog();
   }
 
@@ -507,11 +532,15 @@ function CatalogApp() {
     <main>
       <header className="app-header">
         <div>
-          <h1>portmap catalog</h1>
+          <div className="title-row">
+            <h1>portmap catalog</h1>
+            <DnsStatus catalog={catalog} />
+          </div>
           <CatalogMeta catalog={catalog} />
         </div>
       </header>
       <ActionMessage message={actionMessage} />
+      <ActionLog entries={actionLog} />
       {error ? (
         <section className="catalog-tree" data-catalog-tree>
           <div className="empty load-error">{error}</div>
@@ -520,7 +549,6 @@ function CatalogApp() {
         <CatalogTree catalog={catalog} onAction={handleAction} />
       )}
       <SplitDnsTools catalog={catalog} />
-      <DnsProbe catalog={catalog} />
     </main>
   );
 }

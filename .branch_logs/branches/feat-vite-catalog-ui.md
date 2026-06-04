@@ -20,5 +20,9 @@
   branch summaries and endpoint tables.
 - Remove worktree from branch endpoint tables and branch header counts because
   it repeats context and consumes too much scan width.
+- Add a compact action log so both restart and down actions leave visible
+  running, success, and failure feedback in the catalog UI.
+- Move DNS probe feedback into a compact status badge beside the page title and
+  keep the collapsed Split DNS command block in normal multi-line shell format.
 - Document that user-facing endpoints such as frontend, desktop, browser, and
   WebRTC entries should be placed first in generated project onboarding docs.

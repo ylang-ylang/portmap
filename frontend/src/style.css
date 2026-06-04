@@ -25,6 +25,13 @@ h1 {
   font-weight: 700;
 }
 
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .meta {
   margin: 0;
   color: #52606d;
@@ -300,6 +307,91 @@ button {
   color: #7f1d1d;
 }
 
+.action-log {
+  margin: 0 0 16px;
+  border: 1px solid #d9e0e8;
+  background: #ffffff;
+}
+
+.action-log-header {
+  padding: 8px 12px;
+  background: #eef2f6;
+  border-bottom: 1px solid #d9e0e8;
+}
+
+.action-log-header h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.action-log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.action-log-entry {
+  display: grid;
+  grid-template-columns: 74px 64px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid #e6ebf1;
+  font-size: 13px;
+  align-items: center;
+}
+
+.action-log-entry:first-child {
+  border-top: 0;
+}
+
+.action-log-time {
+  color: #52606d;
+  white-space: nowrap;
+}
+
+.action-log-status {
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #283544;
+  padding: 3px 6px;
+  text-align: center;
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.action-log-ok .action-log-status {
+  border-color: #16a34a;
+  background: #dcfce7;
+  color: #14532d;
+}
+
+.action-log-failed .action-log-status {
+  border-color: #dc2626;
+  background: #fee2e2;
+  color: #7f1d1d;
+}
+
+.action-log-running .action-log-status {
+  border-color: #1d4ed8;
+  background: #eff6ff;
+  color: #1e40af;
+}
+
+.action-log-message {
+  min-width: 0;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.action-log-message code {
+  max-width: 460px;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -407,6 +499,61 @@ pre {
   color: #e5e7eb;
   padding: 12px;
   border: 1px solid #1f2937;
+}
+
+.quick-setup pre code {
+  display: block;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: pre;
+}
+
+.dns-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #9aa7b4;
+  background: #f8fafc;
+  color: #283544;
+  padding: 4px 7px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.dns-status-image {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.dns-status-label {
+  font-weight: 700;
+}
+
+.dns-status-value {
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.dns-status-ok {
+  border-color: #16a34a;
+  background: #dcfce7;
+  color: #14532d;
+}
+
+.dns-status-failed {
+  border-color: #dc2626;
+  background: #fee2e2;
+  color: #7f1d1d;
+}
+
+.dns-status-checking {
+  border-color: #1d4ed8;
+  background: #eff6ff;
+  color: #1e40af;
 }
 
 .dns-probe {
@@ -528,6 +675,10 @@ pre {
   .dns-probe-body {
     grid-template-columns: 1fr;
   }
+
+  .action-log-entry {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -619,6 +770,36 @@ pre {
     background: #3b1717;
     color: #fecaca;
     border-color: #b42318;
+  }
+
+  .action-log {
+    background: #171d23;
+    border-color: #2b3540;
+  }
+
+  .action-log-header {
+    background: #202832;
+    border-color: #2b3540;
+  }
+
+  .action-log-entry {
+    border-color: #2b3540;
+  }
+
+  .action-log-time {
+    color: #a7b2bf;
+  }
+
+  .action-log-status {
+    background: #202832;
+    color: #cbd5e1;
+    border-color: #52606d;
+  }
+
+  .dns-status {
+    background: #202832;
+    color: #cbd5e1;
+    border-color: #52606d;
   }
 
   table {
