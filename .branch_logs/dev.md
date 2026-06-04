@@ -10,3 +10,6 @@
   portmap-managed compose projects from the web UI.
 - Merge `feat/uv-tool-short-commands` so new repos can use the installed
   `uv tool` command, current-directory defaults, and forwarded portmap DNS.
+- Merge `feat/compose-readme-rules` so generated project onboarding documents
+  include Docker Compose rules while scaffold content lives in package template
+  files instead of embedded Python strings.
