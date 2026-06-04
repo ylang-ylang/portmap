@@ -201,7 +201,7 @@ def cmd_gateway(args: argparse.Namespace) -> int:
         "docker",
         "compose",
         "-f",
-        str(settings.root / "docker-compose.gateway.yml"),
+        str(settings.root / "docker-compose.yml"),
         *compose_args,
     ]
     return subprocess.run(command, check=False, env=env).returncode

@@ -47,7 +47,7 @@ services:
     environment:
       PORTMAP_DNS_DOMAIN: "${PORTMAP_DNS_DOMAIN:?run portmap gateway up}"
       PORTMAP_DNS_TARGET_IP: "${PORTMAP_DNS_TARGET_IP:?run portmap gateway up}"
-      PORTMAP_DNS_FORWARD: "${PORTMAP_DNS_FORWARD:?run portmap gateway up}"
+      PORTMAP_DNS_FORWARD: "${PORTMAP_DNS_FORWARD:-/etc/resolv.conf}"
     ports:
       - "${PORTMAP_DNS_BIND:?run portmap gateway up}:${PORTMAP_DNS_PORT:?run portmap gateway up}:53/udp"
       - "${PORTMAP_DNS_BIND:?run portmap gateway up}:${PORTMAP_DNS_PORT:?run portmap gateway up}:53/tcp"
