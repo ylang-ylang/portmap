@@ -79,19 +79,6 @@ def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
         return False
     return git(repo, "merge-base", "--is-ancestor", ancestor, descendant, check=False).returncode == 0
 
-def is_first_parent_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
-    if ancestor == ZERO or descendant == ZERO:
-        return False
-    result = git(repo, "rev-list", "--first-parent", "--format=%H", descendant)
-    return ancestor in {line for line in result.stdout.splitlines() if line and not line.startswith("commit ")}
-
-def has_non_first_parent(repo: Path, commit: str, parent: str) -> bool:
-    if commit == ZERO or parent == ZERO:
-        return False
-    result = git(repo, "rev-list", "--parents", "-n", "1", commit)
-    parts = result.stdout.strip().split()
-    return len(parts) > 2 and parent in parts[2:]
-
 def ref_contains(repo: Path, ref_or_sha: str, sha: str) -> bool:
     if ref_or_sha.startswith("refs/") and not ref_exists(repo, ref_or_sha):
         return False

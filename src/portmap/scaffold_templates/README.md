@@ -155,6 +155,12 @@ protocol = "udp"
 range_size = 40
 ```
 
+Order endpoints by how humans and agents normally enter the app. Put directly
+opened surfaces such as `frontend`, `desktop`, `webrtc`, `browser`, or other
+user-facing HTTP/WebRTC entrypoints near the top of `{{ENDPOINT_CONFIG}}`.
+Lower-level raw TCP/UDP/range endpoints can follow after those primary entry
+points.
+
 Use `http` for HTTP, WebSocket, SSE, CDP, and WebRTC signaling. These share the
 gateway HTTP port and are routed by generated Host names.
 

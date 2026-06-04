@@ -11,7 +11,7 @@ try:
     from .branch_logs import enforce_branch_log_update
     from .common import HookReject, RefUpdate, SourceCandidate, ZERO, warn
     from .config import config_bool
-    from .git_ops import first_matching, git, has_non_first_parent, is_ancestor, is_first_parent_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from .git_ops import first_matching, git, is_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from .policy import is_allowed_branch_ref, required_target_refs, rule_targets_ref
     from .state import enforce_pending_lock, enforce_pending_tag_lock, load_state, save_state
     from .submodule_policy import enforce_submodule_main_guard
@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - installed hook script mode
     from branch_logs import enforce_branch_log_update
     from common import HookReject, RefUpdate, SourceCandidate, ZERO, warn
     from config import config_bool
-    from git_ops import first_matching, git, has_non_first_parent, is_ancestor, is_first_parent_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from git_ops import first_matching, git, is_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from policy import is_allowed_branch_ref, required_target_refs, rule_targets_ref
     from state import enforce_pending_lock, enforce_pending_tag_lock, load_state, save_state
     from submodule_policy import enforce_submodule_main_guard
@@ -320,9 +320,7 @@ def source_candidates_for_target(repo: Path, policy: dict[str, Any], update: Ref
 def enforce_sync_merge_required(repo: Path, candidate: SourceCandidate, update: RefUpdate) -> None:
     if not candidate.rule.get("sync_merge_required"):
         return
-    if is_first_parent_ancestor(repo, update.old, candidate.sha):
-        return
-    if has_non_first_parent(repo, candidate.sha, update.old):
+    if is_ancestor(repo, update.old, candidate.sha):
         return
     raise HookReject(
         "SYNC_MERGE_REQUIRED",

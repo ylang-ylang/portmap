@@ -13,3 +13,9 @@
 - Merge `feat/compose-readme-rules` so generated project onboarding documents
   include Docker Compose rules while scaffold content lives in package template
   files instead of embedded Python strings.
+- Merge `feat/vite-catalog-ui` so the catalog frontend is a Vite/React app
+  with a mock compose preview, project/branch panels, compact endpoint tables,
+  action feedback logs, and generated onboarding guidance for user-facing
+  endpoint ordering.
+- Include Git Guard runtime auto-sync updates required by the installed hook
+  during the merge.

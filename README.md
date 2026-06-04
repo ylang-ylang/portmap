@@ -265,6 +265,64 @@ portmap status
 portmap endpoints my-repo dev
 ```
 
+## Catalog Frontend
+
+The catalog UI is a Vite + React app. Source files live under:
+
+```text
+frontend/
+```
+
+Install frontend dependencies once:
+
+```bash
+npm install
+```
+
+Run the frontend dev server with hot reload:
+
+```bash
+npm run dev
+```
+
+Run the frontend with built-in mock catalog data:
+
+```bash
+PORTMAP_CATALOG_MOCK=1 npm run dev
+```
+
+Run the same mock UI from Docker Compose on host port `81`:
+
+```bash
+docker compose -f docker-compose.mock.yml up
+```
+
+Then open:
+
+```text
+http://<host-ip>:81/
+```
+
+By default the Vite server proxies `/registry.json`, `/actions/*`, `/healthz`,
+and `/readyz` to the catalog service at `http://127.0.0.1:80`. Override that
+target when the catalog is exposed somewhere else:
+
+```bash
+PORTMAP_CATALOG_TARGET=http://127.0.0.1:8081 npm run dev
+```
+
+Build the frontend into the Python package static directory:
+
+```bash
+npm run build
+```
+
+The build output is tracked in:
+
+```text
+src/portmap/catalog_static/
+```
+
 ## Integration Test Repo
 
 The repo includes a Python-managed integration fixture that creates a real Git

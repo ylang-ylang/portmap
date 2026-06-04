@@ -43,6 +43,9 @@ def test_init_portmap_writes_project_scaffold(tmp_path: Path) -> None:
     assert "Do not set fixed `container_name`" in readme
     assert "Do Not Define The Gateway In The Project" in readme
     assert "PORTMAP_TURN_RANGE_MIN_PORT" in readme
+    assert "Put directly" in readme
+    assert "frontend" in readme
+    assert "webrtc" in readme
     assert "docker compose" in readme
     assert "network_mode: host" in readme
     assert ".portmap/docker-compose.override.generated.yml" in readme
