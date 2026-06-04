@@ -272,6 +272,17 @@ curl http://portmap.debug.lan/registry.json
 ```
 
 The catalog tells external tools and agents which URL or host port to use.
+HTTP-like endpoint URLs also work from portmap-managed Docker containers.
+During compose override generation, portmap injects the shared portmap DNS
+server into services declared in `{endpoint_config}` so those containers can
+resolve sibling repo/branch hosts such as:
+
+```text
+http://frontend.dev.other-repo.debug.lan:8080
+```
+
+This DNS injection is only applied to services listed in `{endpoint_config}`;
+ordinary compose services that are not declared as endpoints are left untouched.
 
 ## Tracked And Generated Files
 

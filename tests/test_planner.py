@@ -5,6 +5,9 @@ from portmap.model import GenerateRequest
 from portmap.planner import generate_plan
 
 
+CONTAINER_DNS_SERVER = "portmap-runtime-dns"
+
+
 def write_compose_json(path: Path) -> None:
     path.write_text(
         json.dumps(
@@ -132,6 +135,7 @@ def make_request(tmp_path: Path, *, branch: str = "feat/example") -> GenerateReq
         http_port=28081,
         tcp_port_start=28800,
         udp_port_start=29900,
+        container_dns_server=CONTAINER_DNS_SERVER,
     )
 
 
@@ -171,6 +175,7 @@ def make_http_request(tmp_path: Path, *, branch: str = "feat/example") -> Genera
         http_port=28081,
         tcp_port_start=28800,
         udp_port_start=29900,
+        container_dns_server=CONTAINER_DNS_SERVER,
     )
 
 
@@ -191,6 +196,7 @@ def make_preserve_host_request(tmp_path: Path, *, branch: str = "feat/example") 
         http_port=28081,
         tcp_port_start=28800,
         udp_port_start=29900,
+        container_dns_server=CONTAINER_DNS_SERVER,
     )
 
 
@@ -260,6 +266,10 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
         "default": None,
         "portmap_gateway": None,
     }
+    assert plan.compose_override["services"]["frontend"]["dns"] == [CONTAINER_DNS_SERVER]
+    assert plan.compose_override["services"]["mqtt"]["dns"] == [CONTAINER_DNS_SERVER]
+    assert plan.compose_override["services"]["udp-echo"]["dns"] == [CONTAINER_DNS_SERVER]
+    assert plan.compose_override["services"]["turn"]["dns"] == [CONTAINER_DNS_SERVER]
     assert "networks" not in plan.compose_override["services"]["mqtt"]
     assert "networks" not in plan.compose_override["services"]["udp-echo"]
     assert "networks" not in plan.compose_override["services"]["turn"]

@@ -67,6 +67,7 @@ def ensure_generated_override(
         host_ip=settings.host_ip,
         domain_suffix=settings.dns_domain,
         gateway_network=settings.gateway_network,
+        container_dns_server=settings.effective_dns_bind,
         allocation_state_file=allocation_state_file(env),
     )
     plan = generate_plan(request)

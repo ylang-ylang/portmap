@@ -21,6 +21,7 @@ def test_should_auto_generate_for_compose_runtime_commands() -> None:
 
 
 def test_ensure_generated_override_writes_project_artifacts(tmp_path: Path, monkeypatch) -> None:
+    detected_host = "detected-host"
     compose = tmp_path / "docker-compose.yml"
     config = tmp_path / ".portmap" / "endpoints.toml"
     compose.write_text("services: {}\n", encoding="utf-8")
@@ -47,7 +48,7 @@ container_port = 5173
         cwd=tmp_path,
         environ={
             "PORTMAP_HTTP_PORT": "28080",
-            "PORTMAP_DNS_TARGET_IP": "192.168.201.52",
+            "PORTMAP_DNS_TARGET_IP": detected_host,
             "PORTMAP_DNS_DOMAIN": "debug.lan",
             "PORTMAP_GATEWAY_NETWORK": "portmap_gateway",
             "PORTMAP_ALLOCATION_STATE_FILE": str(tmp_path / "allocations.json"),
@@ -61,12 +62,14 @@ container_port = 5173
     assert (tmp_path / ".portmap" / "docker-compose.override.generated.yml").exists()
     assert (tmp_path / ".portmap" / "README.md").exists()
     assert recorded["request"].http_port == 28080
-    assert recorded["request"].host_ip == "192.168.201.52"
+    assert recorded["request"].host_ip == detected_host
     assert recorded["request"].domain_suffix == "debug.lan"
+    assert recorded["request"].container_dns_server == recorded["request"].host_ip
     assert recorded["request"].allocation_state_file == tmp_path / "allocations.json"
 
 
 def test_ensure_generated_override_reads_portmap_root_config(tmp_path: Path, monkeypatch) -> None:
+    detected_host = "detected-host"
     portmap_root = tmp_path / "portmap-root"
     project = tmp_path / "project"
     portmap_root.mkdir()
@@ -108,7 +111,7 @@ container_port = 5173
         return FakePlan()
 
     monkeypatch.setattr("portmap.broker.generate_plan", fake_generate_plan)
-    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: "10.10.10.10")
+    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: detected_host)
 
     result = ensure_generated_override(
         ["ps"],
@@ -119,8 +122,9 @@ container_port = 5173
     assert result.generated is True
     assert recorded["request"].http_port == 28082
     assert recorded["request"].domain_suffix == "debug.lan"
-    assert recorded["request"].host_ip == "10.10.10.10"
+    assert recorded["request"].host_ip == detected_host
     assert recorded["request"].gateway_network == "custom_gateway"
+    assert recorded["request"].container_dns_server == recorded["request"].host_ip
     assert recorded["request"].tcp_port_start == 21000
     assert recorded["request"].udp_port_start == 22000
     assert recorded["request"].range_port_start == 50000
