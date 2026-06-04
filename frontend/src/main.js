@@ -1,3 +1,5 @@
+import "./style.css";
+
 function text(value) {
   return value == null ? "" : String(value);
 }
@@ -141,47 +143,48 @@ function setupDnsProbe(catalog) {
   image.src = url;
 }
 
+function endpointCount(service) {
+  return (service.endpoints || []).length;
+}
+
+function uniqueSorted(values) {
+  return Array.from(new Set(values.filter(Boolean).map(text))).sort((left, right) => left.localeCompare(right));
+}
+
 function buildCatalogTree(catalog) {
-  const directories = new Map();
+  const projects = new Map();
   for (const service of catalog.services || []) {
-    const worktree = text(service.worktree || "unknown");
     const repoId = text(service.repo_id || "unknown");
+    const repoName = text(service.repo_name || repoId);
+    const projectKey = repoId || repoName;
     const branchName = text(service.branch || "unknown");
 
-    if (!directories.has(worktree)) {
-      directories.set(worktree, { worktree, repos: new Map() });
-    }
-    const directory = directories.get(worktree);
-
-    if (!directory.repos.has(repoId)) {
-      directory.repos.set(repoId, {
+    if (!projects.has(projectKey)) {
+      projects.set(projectKey, {
         repo_id: repoId,
-        repo_name: service.repo_name || repoId,
+        repo_name: repoName,
         branches: new Map(),
       });
     }
-    const repo = directory.repos.get(repoId);
-
-    if (!repo.branches.has(branchName)) {
-      repo.branches.set(branchName, { branch: branchName, services: [] });
+    const project = projects.get(projectKey);
+    if (!project.branches.has(branchName)) {
+      project.branches.set(branchName, {
+        branch: branchName,
+        services: [],
+      });
     }
-    repo.branches.get(branchName).services.push(service);
+    project.branches.get(branchName).services.push(service);
   }
 
-  return Array.from(directories.values())
-    .sort((left, right) => left.worktree.localeCompare(right.worktree))
-    .map((directory) => ({
-      ...directory,
-      repos: Array.from(directory.repos.values())
-        .sort((left, right) => text(left.repo_name).localeCompare(text(right.repo_name)) || text(left.repo_id).localeCompare(text(right.repo_id)))
-        .map((repo) => ({
-          ...repo,
-          branches: Array.from(repo.branches.values())
-            .sort((left, right) => left.branch.localeCompare(right.branch))
-            .map((branch) => ({
-              ...branch,
-              services: branch.services.sort((left, right) => text(left.compose_service).localeCompare(text(right.compose_service)) || text(left.container).localeCompare(text(right.container))),
-            })),
+  return Array.from(projects.values())
+    .sort((left, right) => text(left.repo_name).localeCompare(text(right.repo_name)) || text(left.repo_id).localeCompare(text(right.repo_id)))
+    .map((project) => ({
+      ...project,
+      branches: Array.from(project.branches.values())
+        .sort((left, right) => left.branch.localeCompare(right.branch))
+        .map((branch) => ({
+          ...branch,
+          services: branch.services.sort((left, right) => text(left.compose_service).localeCompare(text(right.compose_service)) || text(left.container).localeCompare(text(right.container))),
         })),
     }));
 }
@@ -208,6 +211,8 @@ function renderExternalCell(endpoint) {
   if (external.startsWith("http://") || external.startsWith("https://")) {
     const link = document.createElement("a");
     link.href = external;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
     link.appendChild(codeElement(external));
     cell.appendChild(link);
     return cell;
@@ -225,6 +230,7 @@ function tableCellWithCode(value) {
 function renderServiceRows(service) {
   return (service.endpoints || []).map((endpoint) => {
     const row = document.createElement("tr");
+    row.appendChild(tableCellWithCode(service.worktree || ""));
     row.appendChild(tableCellWithCode(service.compose_service || ""));
     row.appendChild(tableCellWithCode(endpoint.name || endpoint.id || ""));
     row.appendChild(tableCellWithCode(endpoint.kind || ""));
@@ -254,6 +260,18 @@ async function composeRestartProject(composeProject) {
   });
 }
 
+async function parseActionResponse(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+  const body = await response.text();
+  return {
+    ok: false,
+    message: body.trim() || `HTTP ${response.status}`,
+  };
+}
+
 async function composeProjectAction({ action, composeProject, confirmText, failedText }) {
   if (!window.confirm(confirmText)) return;
   const body = new URLSearchParams({ compose_project: composeProject });
@@ -264,7 +282,7 @@ async function composeProjectAction({ action, composeProject, confirmText, faile
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });
-    result = await response.json();
+    result = await parseActionResponse(response);
     if (!response.ok || !result.ok) {
       showActionMessage(result.message || failedText, true);
       return;
@@ -292,7 +310,7 @@ function showActionMessage(message, failed) {
 }
 
 function renderBranchActions(branch) {
-  const projects = Array.from(new Set(branch.services.map((service) => service.compose_project).filter(Boolean))).sort();
+  const projects = uniqueSorted(branch.services.map((service) => service.compose_project));
   if (!projects.length) return document.createElement("div");
 
   const wrapper = createElement("div", { className: "branch-actions" });
@@ -310,8 +328,16 @@ function renderBranchActions(branch) {
       title: `docker compose -p ${project} down`,
       type: "button",
     });
-    restartButton.addEventListener("click", () => composeRestartProject(project));
-    downButton.addEventListener("click", () => composeDownProject(project));
+    restartButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      composeRestartProject(project);
+    });
+    downButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      composeDownProject(project);
+    });
     action.appendChild(codeElement(project));
     action.appendChild(restartButton);
     action.appendChild(downButton);
@@ -320,20 +346,40 @@ function renderBranchActions(branch) {
   return wrapper;
 }
 
-function renderBranch(branch) {
-  const section = createElement("section", { className: "branch-group" });
-  const header = createElement("div", { className: "branch-header" });
-  const title = document.createElement("div");
-  appendText(title, "Branch: ");
-  title.appendChild(codeElement(branch.branch));
-  header.appendChild(title);
-  header.appendChild(renderBranchActions(branch));
-  section.appendChild(header);
+function branchSummaryStats(branch) {
+  const endpointTotal = branch.services.reduce((total, service) => total + endpointCount(service), 0);
+  const worktrees = uniqueSorted(branch.services.map((service) => service.worktree));
+  return { endpointTotal, worktrees };
+}
 
+function renderBranch(branch) {
+  const section = createElement("details", { className: "branch-group" });
+  section.open = true;
+  section.setAttribute("data-branch-group", "true");
+
+  const summary = createElement("summary", { className: "branch-summary" });
+  const title = createElement("div", { className: "branch-title" });
+  appendText(title, "Branch ");
+  title.appendChild(codeElement(branch.branch));
+
+  const stats = branchSummaryStats(branch);
+  const meta = createElement("div", { className: "branch-meta" });
+  appendText(meta, `${branch.services.length} services, ${stats.endpointTotal} endpoints`);
+  if (stats.worktrees.length) {
+    appendText(meta, ", worktrees ");
+    meta.appendChild(codeElement(stats.worktrees.join(", ")));
+  }
+  title.appendChild(meta);
+
+  summary.appendChild(title);
+  summary.appendChild(renderBranchActions(branch));
+  section.appendChild(summary);
+
+  const tableWrap = createElement("div", { className: "table-wrap" });
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  for (const label of ["Service", "Endpoint", "Kind", "External", "Container Port", "Container", "Image"]) {
+  for (const label of ["Worktree", "Service", "Endpoint", "Kind", "External", "Container Port", "Container", "Image"]) {
     headRow.appendChild(createElement("th", { text: label }));
   }
   thead.appendChild(headRow);
@@ -346,34 +392,43 @@ function renderBranch(branch) {
     }
   }
   table.appendChild(tbody);
-  section.appendChild(table);
+  tableWrap.appendChild(table);
+  section.appendChild(tableWrap);
   return section;
 }
 
-function renderRepo(repo) {
-  const section = createElement("section", { className: "repo-group" });
-  const header = createElement("div", { className: "repo-header" });
-  header.appendChild(createElement("h3", { text: repo.repo_name || repo.repo_id }));
-  const meta = createElement("div", { className: "meta" });
-  appendText(meta, "repo_id: ");
-  meta.appendChild(codeElement(repo.repo_id || ""));
-  header.appendChild(meta);
-  section.appendChild(header);
-  for (const branch of repo.branches) {
-    section.appendChild(renderBranch(branch));
-  }
-  return section;
+function projectStats(project) {
+  const services = project.branches.flatMap((branch) => branch.services);
+  const endpointTotal = services.reduce((total, service) => total + endpointCount(service), 0);
+  return {
+    branchTotal: project.branches.length,
+    serviceTotal: services.length,
+    endpointTotal,
+  };
 }
 
-function renderDirectory(directory) {
-  const section = createElement("section", { className: "directory-group" });
-  const header = createElement("div", { className: "directory-header" });
-  header.appendChild(createElement("h2", { text: "Work Tree" }));
-  header.appendChild(codeElement(directory.worktree));
-  section.appendChild(header);
-  for (const repo of directory.repos) {
-    section.appendChild(renderRepo(repo));
+function renderProject(project) {
+  const section = createElement("details", { className: "project-group" });
+  section.open = true;
+  section.setAttribute("data-project-group", "true");
+
+  const summary = createElement("summary", { className: "project-summary" });
+  const title = createElement("div", { className: "project-title" });
+  title.appendChild(createElement("h2", { text: project.repo_name || project.repo_id }));
+  const meta = createElement("div", { className: "project-meta" });
+  appendText(meta, "repo_id ");
+  meta.appendChild(codeElement(project.repo_id || ""));
+  const stats = projectStats(project);
+  appendText(meta, `, ${stats.branchTotal} branches, ${stats.serviceTotal} services, ${stats.endpointTotal} endpoints`);
+  title.appendChild(meta);
+  summary.appendChild(title);
+  section.appendChild(summary);
+
+  const body = createElement("div", { className: "project-body" });
+  for (const branch of project.branches) {
+    body.appendChild(renderBranch(branch));
   }
+  section.appendChild(body);
   return section;
 }
 
@@ -381,16 +436,16 @@ function renderCatalogTree(catalog) {
   const container = document.querySelector("[data-catalog-tree]");
   if (!container) return;
   clear(container);
-  const directories = buildCatalogTree(catalog);
-  if (!directories.length) {
+  const projects = buildCatalogTree(catalog);
+  if (!projects.length) {
     container.appendChild(createElement("div", {
       className: "empty",
       text: "No portmap-managed services are currently visible.",
     }));
     return;
   }
-  for (const directory of directories) {
-    container.appendChild(renderDirectory(directory));
+  for (const project of projects) {
+    container.appendChild(renderProject(project));
   }
 }
 
@@ -405,6 +460,8 @@ function renderMeta(catalog) {
   appendText(meta, "JSON: ");
   const link = document.createElement("a");
   link.href = "/registry.json";
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
   link.textContent = "/registry.json";
   meta.appendChild(link);
   appendText(meta, ".");

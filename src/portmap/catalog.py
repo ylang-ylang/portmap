@@ -9,7 +9,7 @@ import socket
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -28,11 +28,11 @@ HTTP_HOST_RE = re.compile(r"Host\(`([^`]+)`\)")
 NETWORK_REMOVE_ATTEMPTS = 10
 NETWORK_REMOVE_DELAY_SECONDS = 0.2
 STATIC_ROOT = Path(__file__).with_name("catalog_static")
-STATIC_CONTENT_TYPES = {
-    "index.html": "text/html; charset=utf-8",
-    "catalog.css": "text/css; charset=utf-8",
-    "catalog.js": "application/javascript; charset=utf-8",
-    "dns-check.svg": "image/svg+xml",
+STATIC_CONTENT_TYPES_BY_SUFFIX = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
 }
 
 
@@ -341,12 +341,24 @@ def first_form_value(form: dict[str, list[str]], name: str) -> str:
     return values[0]
 
 
-def read_static_asset(filename: str) -> tuple[bytes, str] | None:
-    if "/" in filename or filename not in STATIC_CONTENT_TYPES:
+def safe_static_path(asset_path: str) -> Path | None:
+    normalized = PurePosixPath(asset_path)
+    if normalized.is_absolute() or ".." in normalized.parts or not normalized.parts:
         return None
-    path = STATIC_ROOT / filename
+    return STATIC_ROOT.joinpath(*normalized.parts)
+
+
+def static_content_type(asset_path: str) -> str | None:
+    return STATIC_CONTENT_TYPES_BY_SUFFIX.get(PurePosixPath(asset_path).suffix)
+
+
+def read_static_asset(asset_path: str) -> tuple[bytes, str] | None:
+    path = safe_static_path(asset_path)
+    content_type = static_content_type(asset_path)
+    if path is None or content_type is None:
+        return None
     try:
-        return path.read_bytes(), STATIC_CONTENT_TYPES[filename]
+        return path.read_bytes(), content_type
     except FileNotFoundError:
         return None
 
@@ -384,8 +396,8 @@ class CatalogHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path.startswith("/assets/"):
-            filename = parsed.path.removeprefix("/assets/")
-            if self.write_static(filename, send_body=send_body):
+            asset_path = parsed.path.removeprefix("/")
+            if self.write_static(asset_path, send_body=send_body):
                 return
             self.write_not_found(send_body=send_body)
             return

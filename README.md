@@ -265,6 +265,46 @@ portmap status
 portmap endpoints my-repo dev
 ```
 
+## Catalog Frontend
+
+The catalog UI is a Vite app. Source files live under:
+
+```text
+frontend/
+```
+
+Install frontend dependencies once:
+
+```bash
+npm install
+```
+
+Run the frontend dev server with hot reload:
+
+```bash
+npm run dev
+```
+
+By default the Vite server proxies `/registry.json`, `/actions/*`, `/healthz`,
+and `/readyz` to the catalog service at `http://127.0.0.1:80`. Override that
+target when the catalog is exposed somewhere else:
+
+```bash
+PORTMAP_CATALOG_TARGET=http://127.0.0.1:8081 npm run dev
+```
+
+Build the frontend into the Python package static directory:
+
+```bash
+npm run build
+```
+
+The build output is tracked in:
+
+```text
+src/portmap/catalog_static/
+```
+
 ## Integration Test Repo
 
 The repo includes a Python-managed integration fixture that creates a real Git
