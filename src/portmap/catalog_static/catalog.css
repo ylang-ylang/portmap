@@ -274,20 +274,34 @@ pre {
   font-weight: 500;
 }
 
-.down-form {
+.project-action {
   margin: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
+.action-button {
+  padding: 6px 9px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.restart-button {
+  border: 1px solid #1d4ed8;
+  background: #eff6ff;
+  color: #1e40af;
+}
+
+.restart-button:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+
 .down-button {
   border: 1px solid #b42318;
   background: #fff5f5;
   color: #9f1d16;
-  padding: 6px 9px;
-  font-size: 13px;
-  cursor: pointer;
 }
 
 .down-button:focus {

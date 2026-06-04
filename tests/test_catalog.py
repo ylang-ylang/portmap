@@ -2,6 +2,7 @@ import pytest
 
 from portmap.catalog import (
     compose_down_project,
+    compose_restart_project,
     container_to_service,
     parse_host_rule,
     read_static_asset,
@@ -109,6 +110,8 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'fetch("/registry.json")' in script_body
     assert b'/assets/dns-check.svg' in script_body
     assert b'buildCatalogTree' in script_body
+    assert b'compose-${action}' in script_body
+    assert b'composeRestartProject' in script_body
     assert b'resolvectl revert "$DNS_IFACE"' in script_body
     assert b'split-dns-test' not in script_body
     assert b'<svg ' in dns_body
@@ -199,3 +202,66 @@ def test_compose_down_project_rejects_unmanaged_project(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="not portmap-managed"):
         compose_down_project("sample_project")
+
+
+def test_compose_restart_project_restarts_portmap_managed_project(monkeypatch) -> None:
+    def fake_docker_get(path: str):
+        if path == "/containers/json?all=1":
+            return [
+                {
+                    "Id": "container-one",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_project",
+                        "portmap.managed": "true",
+                    },
+                },
+                {
+                    "Id": "container-two",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_project",
+                    },
+                },
+                {
+                    "Id": "container-other",
+                    "Labels": {
+                        "com.docker.compose.project": "other_project",
+                        "portmap.managed": "true",
+                    },
+                },
+            ]
+        raise AssertionError(path)
+
+    calls = []
+
+    def fake_docker_request(method: str, path: str, *, ok_statuses=None):
+        calls.append((method, path, ok_statuses))
+        return b""
+
+    monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
+    monkeypatch.setattr("portmap.catalog.docker_request", fake_docker_request)
+
+    result = compose_restart_project("sample_project")
+
+    assert result["ok"] is True
+    assert result["containers_restarted"] == 2
+    assert ("POST", "/containers/container-one/restart?t=10", {204, 404}) in calls
+    assert ("POST", "/containers/container-two/restart?t=10", {204, 404}) in calls
+
+
+def test_compose_restart_project_rejects_unmanaged_project(monkeypatch) -> None:
+    def fake_docker_get(path: str):
+        if path == "/containers/json?all=1":
+            return [
+                {
+                    "Id": "container-one",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_project",
+                    },
+                },
+            ]
+        raise AssertionError(path)
+
+    monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
+
+    with pytest.raises(ValueError, match="not portmap-managed"):
+        compose_restart_project("sample_project")

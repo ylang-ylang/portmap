@@ -237,22 +237,40 @@ function renderServiceRows(service) {
 }
 
 async function composeDownProject(composeProject) {
-  if (!window.confirm(`Run docker compose down for ${composeProject}?`)) return;
+  await composeProjectAction({
+    action: "down",
+    composeProject,
+    confirmText: `Run docker compose down for ${composeProject}?`,
+    failedText: "compose down failed",
+  });
+}
+
+async function composeRestartProject(composeProject) {
+  await composeProjectAction({
+    action: "restart",
+    composeProject,
+    confirmText: `Run docker compose restart for ${composeProject}?`,
+    failedText: "compose restart failed",
+  });
+}
+
+async function composeProjectAction({ action, composeProject, confirmText, failedText }) {
+  if (!window.confirm(confirmText)) return;
   const body = new URLSearchParams({ compose_project: composeProject });
   let result;
   try {
-    const response = await fetch("/actions/compose-down", {
+    const response = await fetch(`/actions/compose-${action}`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });
     result = await response.json();
     if (!response.ok || !result.ok) {
-      showActionMessage(result.message || "compose down failed", true);
+      showActionMessage(result.message || failedText, true);
       return;
     }
   } catch (error) {
-    showActionMessage(`compose down failed: ${error}`, true);
+    showActionMessage(`${failedText}: ${error}`, true);
     return;
   }
   showActionMessage(`${result.message}: ${composeProject}`, false);
@@ -279,16 +297,24 @@ function renderBranchActions(branch) {
 
   const wrapper = createElement("div", { className: "branch-actions" });
   for (const project of projects) {
-    const action = createElement("div", { className: "down-form" });
-    const button = createElement("button", {
-      className: "down-button",
+    const action = createElement("div", { className: "project-action" });
+    const restartButton = createElement("button", {
+      className: "action-button restart-button",
+      text: "Restart",
+      title: `docker compose -p ${project} restart`,
+      type: "button",
+    });
+    const downButton = createElement("button", {
+      className: "action-button down-button",
       text: "Down",
       title: `docker compose -p ${project} down`,
       type: "button",
     });
-    button.addEventListener("click", () => composeDownProject(project));
+    restartButton.addEventListener("click", () => composeRestartProject(project));
+    downButton.addEventListener("click", () => composeDownProject(project));
     action.appendChild(codeElement(project));
-    action.appendChild(button);
+    action.appendChild(restartButton);
+    action.appendChild(downButton);
     wrapper.appendChild(action);
   }
   return wrapper;

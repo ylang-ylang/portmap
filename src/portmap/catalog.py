@@ -253,6 +253,40 @@ def compose_down_project(compose_project: str) -> dict[str, Any]:
     return result
 
 
+def compose_restart_project(compose_project: str) -> dict[str, Any]:
+    project = compose_project.strip()
+    if not project:
+        raise ValueError("compose_project is required")
+
+    containers = compose_project_containers(project)
+    if not containers:
+        raise ValueError(f"no containers found for compose project: {project}")
+    if not any(is_portmap_managed(container) for container in containers):
+        raise ValueError(f"compose project is not portmap-managed: {project}")
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "compose_project": project,
+        "message": "compose project restarted",
+        "containers_restarted": 0,
+        "errors": [],
+    }
+    for container in containers:
+        container_id = str(container.get("Id") or "")
+        if not container_id:
+            continue
+        try:
+            restart_container(container_id)
+            result["containers_restarted"] += 1
+        except Exception as exc:  # pragma: no cover - depends on Docker daemon race behavior.
+            result["ok"] = False
+            result["errors"].append(f"container {container_id[:12]}: {exc}")
+
+    if not result["ok"]:
+        result["message"] = "compose project partially restarted"
+    return result
+
+
 def compose_project_containers(compose_project: str) -> list[dict[str, Any]]:
     containers = docker_get("/containers/json?all=1")
     return [
@@ -278,6 +312,11 @@ def is_portmap_managed(container: dict[str, Any]) -> bool:
 def stop_container(container_id: str) -> None:
     escaped = urllib.parse.quote(container_id, safe="")
     docker_request("POST", f"/containers/{escaped}/stop?t=10", ok_statuses={204, 304, 404, 409})
+
+
+def restart_container(container_id: str) -> None:
+    escaped = urllib.parse.quote(container_id, safe="")
+    docker_request("POST", f"/containers/{escaped}/restart?t=10", ok_statuses={204, 404})
 
 
 def remove_container(container_id: str) -> None:
@@ -325,6 +364,9 @@ class CatalogHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/actions/compose-down":
             self.handle_compose_down()
+            return
+        if parsed.path == "/actions/compose-restart":
+            self.handle_compose_restart()
             return
         self.send_response(404)
         self.send_header("content-type", "text/plain; charset=utf-8")
@@ -379,6 +421,27 @@ class CatalogHandler(BaseHTTPRequestHandler):
                     "message": str(exc),
                     "containers_removed": 0,
                     "networks_removed": 0,
+                    "errors": [],
+                },
+                status=400,
+                send_body=True,
+            )
+
+    def handle_compose_restart(self) -> None:
+        length = min(int(self.headers.get("content-length", "0") or "0"), 8192)
+        payload = self.rfile.read(length).decode("utf-8", errors="replace")
+        form = urllib.parse.parse_qs(payload)
+        compose_project = first_form_value(form, "compose_project")
+        try:
+            result = compose_restart_project(compose_project)
+            self.write_json(result, send_body=True)
+        except Exception as exc:  # pragma: no cover - exercised through container runtime.
+            self.write_json(
+                {
+                    "compose_project": compose_project,
+                    "ok": False,
+                    "message": str(exc),
+                    "containers_restarted": 0,
                     "errors": [],
                 },
                 status=400,
