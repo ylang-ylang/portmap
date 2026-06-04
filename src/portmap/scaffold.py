@@ -225,7 +225,6 @@ Then, from this repo/worktree:
 BRANCH="$(git branch --show-current)"
 
 portmap generate \\
-  --project-dir . \\
   --compose-file {compose_display} \\
   --config {endpoint_config} \\
   --out-dir {out_display} \\
@@ -242,7 +241,7 @@ override. Portmap uses the repo identity and branch/worktree instance to assign
 different compose project names, Host names, and raw/range ports.
 
 For transparent `docker compose ...` takeover, install the Docker Compose
-plugin shim from the portmap repo:
+plugin shim once after installing `portmap` as a uv tool:
 
 ```bash
 portmap broker install --method docker-plugin

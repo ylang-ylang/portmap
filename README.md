@@ -95,6 +95,13 @@ that endpoint. If a service needs a specific upstream Host, set
 
 ## CLI
 
+Install the local checkout as a `uv` tool so other repos can call the short
+`portmap` command:
+
+```bash
+uv tool install --editable /home/ylang/ylangs_ws/portmap@wt/portmap@dev --force
+```
+
 Start the shared gateway once:
 
 ```bash
@@ -169,33 +176,28 @@ use Docker bridge networking for managed services, declare endpoint kinds in
 with that override, and query the shared catalog for the assigned URLs and raw
 ports.
 
-After editing `.portmap/endpoints.toml`, generate files for the current
-branch/worktree:
+After editing `.portmap/endpoints.toml`, the recommended path is to let the
+Docker Compose broker regenerate files automatically:
 
 ```bash
-portmap generate \
-  --project-dir /path/to/project \
-  --compose-file /path/to/project/docker-compose.yml \
-  --config /path/to/project/.portmap/endpoints.toml \
-  --out-dir /path/to/project/.portmap \
-  --branch dev \
-  --repo-id my-repo \
-  --repo-name my-repo
+docker compose up -d
 ```
 
-Then start the project with the generated override:
-
-```bash
-docker compose \
-  -f docker-compose.yml \
-  -f .portmap/docker-compose.override.generated.yml \
-  up -d
-```
-
-The broker can be called explicitly without any shell integration:
+The broker can also be called explicitly without shell integration:
 
 ```bash
 portmap docker-compose -- up -d
+```
+
+For manual generation, `portmap generate` defaults to the current directory
+when paths are omitted:
+
+```bash
+portmap generate \
+  --compose-file docker-compose.yml \
+  --config .portmap/endpoints.toml \
+  --out-dir .portmap \
+  --branch "$(git branch --show-current)"
 ```
 
 For transparent `docker compose ...` takeover, install the Docker Compose

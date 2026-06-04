@@ -40,6 +40,7 @@ def test_init_portmap_writes_project_scaffold(tmp_path: Path) -> None:
     assert "docker compose" in readme
     assert "network_mode: host" in readme
     assert ".portmap/docker-compose.override.generated.yml" in readme
+    assert "--project-dir ." not in readme
 
     gitignore = (tmp_path / ".portmap" / ".gitignore").read_text(encoding="utf-8")
     assert "docker-compose.override.generated.yml" in gitignore
