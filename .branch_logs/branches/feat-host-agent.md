@@ -12,3 +12,7 @@
   gateway compose defaults transparent.
 - Update README and architecture docs with the agent/gateway split and the
   external network entrypoint scope.
+- Clarify that portmap manages port resources and repo/worktree/branch indexes,
+  not protocol behavior.
+- Add TODO tracking for HTTPS plumbing, diagnostics, stale cleanup, endpoint
+  discovery hints, agent integration API, and adjacent-tool comparison.

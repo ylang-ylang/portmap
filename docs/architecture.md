@@ -8,6 +8,8 @@ direct port mappings, and a local CLI-queryable endpoint registry.
 The default runtime shape is a host-side agent plus a shared gateway hosted by
 the `portmap` tooling, not by each managed project. The host agent handles
 host-only concerns such as Git worktree scanning and host-side compose starts.
+It should stay small and integration-friendly: another local service can host
+it, call it, or vendor it as a submodule without inheriting the full gateway UI.
 The gateway runs Traefik for HTTP routing, CoreDNS for wildcard debug-domain
 resolution, and the catalog UI. Managed project services with HTTP endpoints
 join the shared Docker bridge network `portmap_gateway` through a generated
@@ -53,6 +55,7 @@ It does not own:
 
 - HTTP proxy implementation
 - TCP/UDP proxy implementation
+- range-like protocol implementation
 - TURN credential generation
 - ICE configuration
 - WebRTC behavior
@@ -250,6 +253,14 @@ Range endpoints model protocols with one entry/control port and a later
 runtime-selected data/media port range. `portmap` does not understand the
 protocol; it only allocates the external entry port and the contiguous host port
 range, then writes both into the generated compose override.
+
+The important resource is the port pool and its index:
+
+```text
+repo + worktree root + branch + endpoint -> entry port + range
+```
+
+Protocol-specific behavior stays outside `portmap`.
 
 Example declaration:
 
@@ -584,3 +595,5 @@ it belongs in `portmap`.
 If a concern depends on WebRTC ICE behavior, TURN credentials, business flows,
 GPU/browser runtime, MCP tool semantics, or application internals, it belongs
 to the project or a higher-level debug workflow.
+
+Open implementation items are tracked in [todos.md](todos.md).

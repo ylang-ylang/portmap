@@ -42,9 +42,16 @@ TCP, UDP, TURN, and other raw-port services get non-conflicting host ports.
 The catalog shows which repo, worktree, and branch are running, and how each
 service should be reached.
 
-`portmap` does not manage your application runtime. It does not know how your
-frontend builds, how your database migrates, how TURN credentials are created,
-or how WebRTC media behaves.
+`portmap` is intentionally narrow. It manages port resources and the index for
+those resources:
+
+```text
+repo + worktree root + branch + endpoint -> URL / host port / host port range
+```
+
+It does not manage your application runtime. It does not know how your frontend
+builds, how your database migrates, how TURN credentials are created, or how
+WebRTC media behaves.
 
 It manages the external network entrypoints of Docker Compose services:
 
@@ -59,6 +66,10 @@ Compared with env-based port allocators, `portmap` goes deeper into Docker
 Compose networking. It models the endpoint shape explicitly, then generates the
 Compose override, Traefik labels, port mappings, and catalog metadata needed to
 reach that endpoint from outside the container.
+
+`portmap` also avoids reimplementing the network data plane. HTTP routing is
+delegated to Traefik, debug-domain DNS is delegated to CoreDNS, and raw TCP/UDP
+or range exposure is delegated to Docker Compose port mappings.
 
 ## Requirements
 
@@ -95,9 +106,12 @@ If you only run one branch at a time, you may not need `portmap`. If you often
 debug several worktrees or branches in parallel, it removes a lot of manual
 port bookkeeping.
 
+See [docs/todos.md](docs/todos.md) for planned work, missing pieces, and the
+comparison with adjacent tools.
+
 ## Scope
 
-`portmap` manages network variation between branches:
+`portmap` manages external endpoint resources between branches:
 
 - inspect rendered Docker Compose services, ports, expose entries, and labels
 - generate branch-scoped Docker Compose override files
@@ -117,12 +131,29 @@ The project only declares endpoint names, compose service names, and container
 internal ports. Existing `ports` and `expose` entries can be treated as endpoint
 candidates.
 
+## Design Principles
+
+`portmap` follows two hard boundaries:
+
+```text
+Manage port resources and their repo/worktree/branch index.
+Do not manage protocol behavior.
+
+Use Traefik, CoreDNS, and Docker Compose as the network data plane.
+Do not implement an HTTP/TCP/UDP proxy inside portmap.
+```
+
+For example, a TURN-like endpoint is just an entry port plus an allocated port
+range in `portmap`. The project still owns coturn config, credentials, ICE
+server JSON, and WebRTC behavior.
+
 ## Non-goals
 
 - no host-network mode selection
 - no GPU or desktop runtime management
 - no HTTP/TCP/UDP proxy implementation
 - no TURN credential or ICE config management
+- no range-like protocol implementation beyond port allocation and cataloging
 - no business-flow orchestration
 - no test selector or performance-analysis logic
 
