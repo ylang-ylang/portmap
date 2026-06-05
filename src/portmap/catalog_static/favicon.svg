@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="portmap">
+  <rect width="64" height="64" rx="10" fill="#18202a"/>
+  <text x="32" y="40" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" font-weight="800" fill="#bbf7d0">pM</text>
+</svg>

@@ -455,7 +455,7 @@ function DnsStatus({ catalog }) {
   const domain = text(catalog.dns_domain).replace(/\.$/, "");
   const host = `portmap.${domain}`;
   const url = `${window.location.protocol}//${host}${currentPortSuffix()}/assets/dns-check.svg?ts=${Date.now()}`;
-  const statusLabel = status === "ok" ? "ok" : status === "failed" ? "failed" : "checking";
+  const statusLabel = status === "ok" ? "succ" : status === "failed" ? "failed" : "checking";
   return (
     <span className={`dns-status dns-status-${status}`} data-dns-probe title={url}>
       <img
