@@ -5,3 +5,5 @@ __pycache__/
 *.py[cod]
 test_repo/
 node_modules/
+.portmap-state/
+.portmap-agent-runtime/

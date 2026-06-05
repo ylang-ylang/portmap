@@ -5,13 +5,17 @@ docker-compose projects. It does not proxy traffic itself. It translates
 project/branch rules into Docker Compose overlays, Traefik HTTP labels, Docker
 direct port mappings, and a local CLI-queryable endpoint registry.
 
-The default runtime shape is a shared gateway hosted by the `portmap` tooling,
-not by each managed project. The gateway runs Traefik for HTTP routing and
-CoreDNS for wildcard debug-domain resolution. Managed project services with
-HTTP endpoints join the shared Docker bridge network `portmap_gateway` through
-a generated compose override. Raw TCP/UDP/range endpoints use direct Docker
-port mappings and do not need the gateway network unless the same service also
-has an HTTP endpoint.
+The default runtime shape is a host-side agent plus a shared gateway hosted by
+the `portmap` tooling, not by each managed project. The host agent handles
+host-only concerns such as Git worktree scanning and host-side compose starts.
+It should stay small and integration-friendly: another local service can host
+it, call it, or vendor it as a submodule without inheriting the full gateway UI.
+The gateway runs Traefik for HTTP routing, CoreDNS for wildcard debug-domain
+resolution, and the catalog UI. Managed project services with HTTP endpoints
+join the shared Docker bridge network `portmap_gateway` through a generated
+compose override. Raw TCP/UDP/range endpoints use direct Docker port mappings
+and do not need the gateway network unless the same service also has an HTTP
+endpoint.
 
 ## Fixed Model
 
@@ -43,6 +47,7 @@ dynamic port-range protocols
 - generated direct Docker port mappings for TCP, UDP, and range endpoints
 - raw TCP/UDP host-port allocation
 - range endpoint host-port allocation
+- host Git worktree discovery through the host agent
 - local endpoint registry
 - status and cleanup metadata
 
@@ -50,6 +55,7 @@ It does not own:
 
 - HTTP proxy implementation
 - TCP/UDP proxy implementation
+- range-like protocol implementation
 - TURN credential generation
 - ICE configuration
 - WebRTC behavior
@@ -71,25 +77,35 @@ Traefik is the default because it can serve as one shared network data plane for
 Caddy can still be a future HTTP/WebSocket-only backend, but v1 should not need
 Caddy when Traefik is the default.
 
-## Shared Gateway
+## Host Agent And Shared Gateway
 
-Start the gateway from the `portmap` repository:
+Start portmap from the `portmap` repository:
 
 ```bash
-portmap gateway up -d
+portmap up
 ```
 
-The gateway reads the tracked root-level `portmap.toml` directly. Runtime-only
-values such as the host LAN IP are detected when the command runs instead of
-being stored in config.
+This starts the host agent, then starts the gateway containers. The lower-level
+`portmap gateway ...` command remains available when only the Docker gateway
+containers should be controlled.
+
+The agent and gateway read the tracked root-level `portmap.toml` directly.
+Runtime-only values such as the host LAN IP and agent Unix-socket runtime
+directory are detected when the command runs instead of being stored in config.
 
 Default shape:
 
 ```text
+host agent
+  -> Unix socket under XDG_RUNTIME_DIR
+  -> host Git worktree list
+  -> host docker compose up
+
 host:80 catalog
   -> portmap-catalog
   -> Docker socket labels
-  -> current portmap-managed services and endpoints
+  -> host agent socket
+  -> current portmap-managed services, stopped worktrees, and endpoints
 
 host:8080 HTTP
   -> portmap-traefik
@@ -237,6 +253,14 @@ Range endpoints model protocols with one entry/control port and a later
 runtime-selected data/media port range. `portmap` does not understand the
 protocol; it only allocates the external entry port and the contiguous host port
 range, then writes both into the generated compose override.
+
+The important resource is the port pool and its index:
+
+```text
+repo + worktree root + branch + endpoint -> entry port + range
+```
+
+Protocol-specific behavior stays outside `portmap`.
 
 Example declaration:
 
@@ -571,3 +595,5 @@ it belongs in `portmap`.
 If a concern depends on WebRTC ICE behavior, TURN credentials, business flows,
 GPU/browser runtime, MCP tool semantics, or application internals, it belongs
 to the project or a higher-level debug workflow.
+
+Open implementation items are tracked in [todos.md](todos.md).

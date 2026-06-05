@@ -32,7 +32,8 @@ dir = "~/.local/state/portmap-test"
     )
     monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: detected_host)
 
-    settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(tmp_path)})
+    runtime_dir = tmp_path / "runtime"
+    settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(tmp_path), "XDG_RUNTIME_DIR": str(runtime_dir)})
 
     assert settings.dns_domain == "debug.lan"
     assert settings.host_ip == detected_host
@@ -46,6 +47,10 @@ dir = "~/.local/state/portmap-test"
     assert settings.gateway_env()["PORTMAP_DNS_BIND"] == detected_host
     assert settings.gateway_env()["PORTMAP_DNS_TARGET_IP"] == detected_host
     assert settings.gateway_env()["PORTMAP_DNS_FORWARD"] == "/etc/resolv.conf"
+    assert settings.agent_runtime_dir == runtime_dir / "portmap"
+    assert settings.agent_socket == runtime_dir / "portmap" / "agent.sock"
+    assert settings.gateway_env()["PORTMAP_AGENT_RUNTIME_HOST_DIR"] == str(runtime_dir / "portmap")
+    assert settings.gateway_env()["PORTMAP_AGENT_SOCKET"] == "/run/portmap/agent.sock"
 
 
 def test_gateway_cli_uses_root_toml_and_runtime_host_ip(tmp_path: Path, monkeypatch) -> None:
@@ -89,3 +94,5 @@ network = "test_gateway"
     assert recorded["env"]["PORTMAP_CATALOG_PORT"] == "180"
     assert recorded["env"]["PORTMAP_DNS_PORT"] == "5353"
     assert recorded["env"]["PORTMAP_GATEWAY_NETWORK"] == "test_gateway"
+    assert recorded["env"]["PORTMAP_AGENT_SOCKET"] == "/run/portmap/agent.sock"
+    assert recorded["env"]["PORTMAP_AGENT_RUNTIME_HOST_DIR"].endswith("/portmap")
