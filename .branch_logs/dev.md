@@ -32,3 +32,6 @@
   identity and linked `.git` wt root, exposes running/dead branch controls,
   and keeps startable history as dead branch discovery instead of a separate UI
   level.
+- Merge `feat/transparent-compose` so the main gateway compose file remains
+  transparent in repos without `.portmap` runtime state and no longer requires
+  `PORTMAP_STATE_DIR` just to parse `docker compose down`.
