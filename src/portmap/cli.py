@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .agent import ensure_agent_started, run_agent_server, stop_agent
+from .agent import agent_status as get_agent_status
 from .broker import allocation_state_file as env_allocation_state_file
 from .broker import domain_suffix as env_domain_suffix
 from .broker import ensure_generated_override, host_ip as env_host_ip
@@ -52,6 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    up = subparsers.add_parser("up", help="start the host agent and shared gateway containers")
+    up.add_argument("compose_args", nargs=argparse.REMAINDER, help="gateway compose args; defaults to 'up -d'")
+    up.set_defaults(func=cmd_up)
+
+    down = subparsers.add_parser("down", help="stop shared gateway containers and the host agent")
+    down.add_argument("compose_args", nargs=argparse.REMAINDER, help="gateway compose args; defaults to 'down'")
+    down.set_defaults(func=cmd_down)
+
+    restart = subparsers.add_parser("restart", help="restart the host agent and shared gateway containers")
+    restart.set_defaults(func=cmd_restart)
+
     init = subparsers.add_parser("init", help="create .portmap scaffold files for a compose project")
     init.add_argument("--project-dir", type=Path, default=Path.cwd())
     init.add_argument("--compose-file", type=Path)
@@ -76,6 +89,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="docker compose arguments; defaults to 'up -d'",
     )
     gateway.set_defaults(func=cmd_gateway)
+
+    agent = subparsers.add_parser("agent", help="manage the host-side portmap agent")
+    agent_subparsers = agent.add_subparsers(dest="agent_command", required=True)
+
+    agent_serve = agent_subparsers.add_parser("serve", help="serve the host agent in the foreground")
+    agent_serve.add_argument("--socket", type=Path)
+    agent_serve.add_argument("--pid-file", type=Path)
+    agent_serve.set_defaults(func=cmd_agent_serve)
+
+    agent_start = agent_subparsers.add_parser("start", help="start the host agent in the background")
+    agent_start.set_defaults(func=cmd_agent_start)
+
+    agent_stop = agent_subparsers.add_parser("stop", help="stop the background host agent")
+    agent_stop.set_defaults(func=cmd_agent_stop)
+
+    agent_status = agent_subparsers.add_parser("status", help="print host agent status")
+    agent_status.set_defaults(func=cmd_agent_status)
 
     dns = subparsers.add_parser("dns", help="manage host split DNS for portmap domains")
     dns_subparsers = dns.add_subparsers(dest="dns_command", required=True)
@@ -223,9 +253,43 @@ def cmd_docker_compose(args: argparse.Namespace) -> int:
     return subprocess.run(plan.command, check=False, env=env).returncode
 
 
+def cmd_up(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    status = ensure_agent_started(settings)
+    if not status.running:
+        print_json(status.as_dict())
+        return 1
+    compose_args = strip_remainder(args.compose_args) or ["up", "-d"]
+    return run_gateway_compose(settings, compose_args)
+
+
+def cmd_down(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    compose_args = strip_remainder(args.compose_args) or ["down"]
+    gateway_result = run_gateway_compose(settings, compose_args)
+    stop_agent(settings)
+    return gateway_result
+
+
+def cmd_restart(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    gateway_result = run_gateway_compose(settings, ["down"])
+    stop_agent(settings)
+    status = ensure_agent_started(settings)
+    if not status.running:
+        print_json(status.as_dict())
+        return 1
+    up_result = run_gateway_compose(settings, ["up", "-d"])
+    return gateway_result or up_result
+
+
 def cmd_gateway(args: argparse.Namespace) -> int:
     settings = load_portmap_settings(environ=os.environ)
     compose_args = strip_remainder(args.compose_args) or ["up", "-d"]
+    return run_gateway_compose(settings, compose_args)
+
+
+def run_gateway_compose(settings, compose_args: list[str]) -> int:
     env = os.environ.copy()
     env.update(settings.gateway_env())
     env["PORTMAP_ROOT"] = str(settings.root)
@@ -238,6 +302,32 @@ def cmd_gateway(args: argparse.Namespace) -> int:
         *compose_args,
     ]
     return subprocess.run(command, check=False, env=env).returncode
+
+
+def cmd_agent_serve(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    socket_path = args.socket or settings.agent_socket
+    pid_file = args.pid_file or settings.agent_pid_file
+    run_agent_server(socket_path, pid_file=pid_file)
+    return 0
+
+
+def cmd_agent_start(args: argparse.Namespace) -> int:
+    status = ensure_agent_started(load_portmap_settings(environ=os.environ))
+    print_json(status.as_dict())
+    return 0 if status.running else 1
+
+
+def cmd_agent_stop(args: argparse.Namespace) -> int:
+    status = stop_agent(load_portmap_settings(environ=os.environ))
+    print_json(status.as_dict())
+    return 0 if not status.running else 1
+
+
+def cmd_agent_status(args: argparse.Namespace) -> int:
+    status = get_agent_status(load_portmap_settings(environ=os.environ))
+    print_json(status.as_dict())
+    return 0 if status.running else 1
 
 
 def cmd_dns_set(args: argparse.Namespace) -> int:

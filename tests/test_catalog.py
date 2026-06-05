@@ -21,13 +21,24 @@ from portmap.catalog import (
 )
 
 
-def request_catalog(path: str, *, method: str = "GET") -> tuple[int, http.client.HTTPMessage, bytes]:
+@pytest.fixture(autouse=True)
+def missing_agent_socket(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_AGENT_SOCKET", str(tmp_path / "missing-agent.sock"))
+
+
+def request_catalog(
+    path: str,
+    *,
+    method: str = "GET",
+    body: str | None = None,
+) -> tuple[int, http.client.HTTPMessage, bytes]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), CatalogHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
     try:
-        connection.request(method, path)
+        headers = {"content-type": "application/x-www-form-urlencoded"} if body is not None else {}
+        connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
         return response.status, response.headers, response.read()
     finally:
@@ -163,6 +174,73 @@ def test_select_dns_server_prefers_external_bind_ip() -> None:
     assert select_dns_server(external_bind, external_target) == external_bind
     assert select_dns_server("0.0.0.0", external_target) == external_target
     assert select_dns_server("127.0.0.1", external_target) == external_target
+
+
+def test_collect_catalog_uses_agent_worktrees_to_enrich_running_services(monkeypatch) -> None:
+    def fake_docker_get(path: str):
+        if path == "/containers/json?all=0":
+            return [
+                {
+                    "Names": ["/sample-frontend-1"],
+                    "Image": "sample:latest",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_dev",
+                        "com.docker.compose.service": "frontend",
+                        "traefik.enable": "true",
+                        "portmap.managed": "true",
+                        "portmap.repo_id": "sample-repo",
+                        "portmap.repo_name": "sample",
+                        "portmap.branch": "dev",
+                        "portmap.worktree": "/repo/sample@dev",
+                        "portmap.endpoints.sample-dev-frontend.name": "frontend",
+                        "portmap.endpoints.sample-dev-frontend.kind": "http",
+                        "portmap.endpoints.sample-dev-frontend.container_port": "5173",
+                    },
+                }
+            ]
+        raise AssertionError(path)
+
+    def fake_agent_worktrees():
+        return {
+            "ok": True,
+            "generated_at": "now",
+            "worktrees": [
+                {
+                    "repo_id": "sample-repo",
+                    "repo_name": "sample",
+                    "branch": "dev",
+                    "worktree": "/repo/sample@dev",
+                    "worktree_title": "sample@dev",
+                    "worktree_root": "/repo/linked-git/sample.git",
+                    "worktree_root_title": "sample linked .git",
+                    "compose_project": "sample_dev",
+                    "running": True,
+                    "startable": True,
+                },
+                {
+                    "repo_id": "sample-repo",
+                    "repo_name": "sample",
+                    "branch": "feat-example",
+                    "worktree": "/repo/sample@feat-example",
+                    "worktree_title": "sample@feat-example",
+                    "worktree_root": "/repo/linked-git/sample.git",
+                    "worktree_root_title": "sample linked .git",
+                    "compose_project": "sample_feat_example",
+                    "running": False,
+                    "startable": True,
+                },
+            ],
+        }
+
+    monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
+    monkeypatch.setattr("portmap.catalog.agent_worktrees", fake_agent_worktrees)
+
+    catalog = collect_catalog()
+
+    assert catalog["agent"]["available"] is True
+    assert len(catalog["worktrees"]) == 2
+    assert catalog["services"][0]["worktree_root"] == "/repo/linked-git/sample.git"
+    assert catalog["services"][0]["worktree_root_title"] == "sample linked .git"
 
 
 def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
@@ -407,6 +485,27 @@ def test_collect_catalog_drops_non_startable_history(tmp_path: Path, monkeypatch
 
     assert catalog["services"] == []
     assert catalog["worktrees"] == []
+
+
+def test_catalog_compose_up_action_uses_agent(monkeypatch) -> None:
+    calls = {}
+
+    def fake_agent_compose_up(worktree: str):
+        calls["worktree"] = worktree
+        return {"ok": True, "message": "started by agent", "worktree": worktree}
+
+    monkeypatch.setattr("portmap.catalog.agent_compose_up_worktree", fake_agent_compose_up)
+
+    status, _, body = request_catalog(
+        "/actions/compose-up",
+        method="POST",
+        body="worktree=%2Frepo%2Fsample%40dev",
+    )
+
+    payload = json.loads(body.decode("utf-8"))
+    assert status == 200
+    assert calls["worktree"] == "/repo/sample@dev"
+    assert payload["message"] == "started by agent"
 
 
 def test_compose_up_worktree_runs_generated_compose_command(tmp_path: Path, monkeypatch) -> None:

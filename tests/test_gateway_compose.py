@@ -7,4 +7,6 @@ def test_gateway_compose_has_transparent_defaults() -> None:
     assert ":?" not in compose
     assert 'PORTMAP_STATE_DIR: "${PORTMAP_STATE_CONTAINER_DIR:-/state}"' in compose
     assert '"${PORTMAP_STATE_DIR:-./.portmap-state}:${PORTMAP_STATE_CONTAINER_DIR:-/state}"' in compose
+    assert 'PORTMAP_AGENT_SOCKET: "${PORTMAP_AGENT_SOCKET:-/run/portmap/agent.sock}"' in compose
+    assert '"${PORTMAP_AGENT_RUNTIME_HOST_DIR:-./.portmap-agent-runtime}:/run/portmap"' in compose
     assert "${PORTMAP_HTTP_PORT:-8080}:80" in compose

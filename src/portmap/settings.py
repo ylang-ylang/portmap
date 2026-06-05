@@ -11,6 +11,7 @@ from typing import Any, Mapping
 CONFIG_FILE_NAME = "portmap.toml"
 DEFAULT_DNS_DOMAIN = "debug.lan"
 DEFAULT_GATEWAY_NETWORK = "portmap_gateway"
+AGENT_CONTAINER_SOCKET = "/run/portmap/agent.sock"
 
 
 @dataclass(frozen=True)
@@ -30,10 +31,23 @@ class PortmapSettings:
     range_port_start: int
     state_dir: Path
     host_ip: str
+    agent_runtime_dir: Path
 
     @property
     def allocation_state_file(self) -> Path:
         return self.state_dir / "allocations.json"
+
+    @property
+    def agent_socket(self) -> Path:
+        return self.agent_runtime_dir / "agent.sock"
+
+    @property
+    def agent_pid_file(self) -> Path:
+        return self.agent_runtime_dir / "agent.pid"
+
+    @property
+    def agent_log_file(self) -> Path:
+        return self.state_dir / "agent.log"
 
     @property
     def effective_dns_bind(self) -> str:
@@ -54,6 +68,8 @@ class PortmapSettings:
             "PORTMAP_DNS_FORWARD": self.dns_forward,
             "PORTMAP_GATEWAY_NETWORK": self.gateway_network,
             "PORTMAP_STATE_DIR": str(self.state_dir),
+            "PORTMAP_AGENT_RUNTIME_HOST_DIR": str(self.agent_runtime_dir),
+            "PORTMAP_AGENT_SOCKET": AGENT_CONTAINER_SOCKET,
         }
 
 
@@ -68,11 +84,18 @@ def load_portmap_settings(
     gateway = table(config, "gateway")
     ports = table(config, "ports")
     state = table(config, "state")
+    agent = table(config, "agent")
 
     host_ip = string_env(env, "PORTMAP_HOST_IP") or string_env(env, "PORTMAP_DNS_TARGET_IP") or detect_host_ip()
     state_dir = expand_path(
         string_env(env, "PORTMAP_STATE_DIR")
         or string_value(state, "dir", "~/.local/state/portmap"),
+        root=resolved_root,
+    )
+    agent_runtime_dir = expand_path(
+        string_env(env, "PORTMAP_AGENT_RUNTIME_DIR")
+        or string_env(env, "PORTMAP_AGENT_RUNTIME_HOST_DIR")
+        or string_value(agent, "runtime_dir", default_agent_runtime_dir(env)),
         root=resolved_root,
     )
     return PortmapSettings(
@@ -98,6 +121,7 @@ def load_portmap_settings(
         range_port_start=int_env(env, "PORTMAP_RANGE_PORT_START", int_value(ports, "range_start", 49160)),
         state_dir=state_dir,
         host_ip=host_ip,
+        agent_runtime_dir=agent_runtime_dir,
     )
 
 
@@ -179,3 +203,9 @@ def expand_path(value: str, *, root: Path) -> Path:
     if path.is_absolute():
         return path
     return root / path
+
+
+def default_agent_runtime_dir(env: Mapping[str, str]) -> str:
+    if runtime_dir := string_env(env, "XDG_RUNTIME_DIR"):
+        return str(Path(runtime_dir) / "portmap")
+    return f"/tmp/portmap-{os.getuid()}"

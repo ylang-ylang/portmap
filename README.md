@@ -1,18 +1,99 @@
 # portmap
 
-Branch-scoped network manager for local docker-compose debug environments.
+Are you tired of changing, checking, and remembering local ports every time you
+run more than one Docker Compose branch?
 
-The tool is a control plane, not a traffic proxy. Its default data plane is
-Traefik.
+For example:
 
-It maps branch/worktree instances to generated Docker Compose overlays,
-Traefik HTTP labels, Docker direct port mappings, and a CLI-queryable endpoint
-registry.
+```text
+myrepo@dev
+myrepo@feat-a
+myrepo@feat-b
+```
 
-It deliberately does not manage project runtime capability such as GPU,
-browser image contents, Playwright workflows, MCP business tools, frontend
-performance logic, TURN credentials, ICE config, or application startup policy.
-Those belong to the project or the agent workflow.
+They all want to use `5173`, `8000`, or `9333`, so you start assigning ports by
+hand. After a while, it gets hard to remember:
+
+```text
+Which port belongs to which branch?
+Which URL points at which worktree?
+Is that old container still running?
+```
+
+`portmap` is for that local development mess.
+
+It does not replace Docker Compose. It adds the missing layer for running
+multiple branches or worktrees at the same time:
+
+```text
+Docker Compose starts the containers.
+portmap keeps the branch network entrypoints organized.
+```
+
+HTTP, WebSocket, and CDP-like services get stable URLs:
+
+```text
+http://frontend.dev.myrepo.debug.lan:8080
+http://frontend.feat-a.myrepo.debug.lan:8080
+```
+
+TCP, UDP, TURN, and other raw-port services get non-conflicting host ports.
+
+The catalog shows which repo, worktree, and branch are running, and how each
+service should be reached.
+
+`portmap` does not manage your application runtime. It does not know how your
+frontend builds, how your database migrates, how TURN credentials are created,
+or how WebRTC media behaves.
+
+It manages the external network entrypoints of Docker Compose services:
+
+```text
+HTTP / WebSocket / SSE / CDP / WebRTC signaling
+raw TCP
+raw UDP
+entry port + dynamic port range
+```
+
+Compared with env-based port allocators, `portmap` goes deeper into Docker
+Compose networking. It models the endpoint shape explicitly, then generates the
+Compose override, Traefik labels, port mappings, and catalog metadata needed to
+reach that endpoint from outside the container.
+
+## Requirements
+
+Your project should use Docker Compose, and services managed by `portmap`
+should have:
+
+```text
+Docker bridge network
+stable service names
+known internal container ports
+```
+
+For example, the compose file should have stable service names:
+
+```yaml
+services:
+  frontend:
+  backend:
+```
+
+Then declare their entrypoints in `.portmap/endpoints.toml`:
+
+```toml
+[endpoints.frontend]
+kind = "http"
+service = "frontend"
+container_port = 5173
+```
+
+Services should listen on `0.0.0.0` inside the container so the gateway can
+reach them through the Docker bridge network.
+
+If you only run one branch at a time, you may not need `portmap`. If you often
+debug several worktrees or branches in parallel, it removes a lot of manual
+port bookkeeping.
 
 ## Scope
 
@@ -102,11 +183,16 @@ Install the local checkout as a `uv` tool so other repos can call the short
 uv tool install --editable /home/ylang/ylangs_ws/portmap@wt/portmap@dev --force
 ```
 
-Start the shared gateway once:
+Start portmap once:
 
 ```bash
-portmap gateway up -d
+portmap up
 ```
+
+This starts the host-side agent, then starts the shared gateway containers. The
+agent scans host Git worktrees and handles host-side compose starts for the
+catalog page; the gateway containers provide Traefik, CoreDNS, and the catalog
+UI.
 
 This creates the `portmap_gateway` Docker network and exposes:
 
@@ -128,9 +214,10 @@ Gateway runtime settings are tracked in the portmap repo root:
 portmap.toml
 ```
 
-`portmap gateway` reads that file directly and detects the current host LAN IP
-at runtime. The detected IP is used for DNS answers and raw/range endpoint
-advertisement, so the LAN IP does not need to be stored in config.
+`portmap up` and the lower-level `portmap gateway ...` command read that file
+directly and detect the current host LAN IP at runtime. The detected IP is used
+for DNS answers and raw/range endpoint advertisement, so the LAN IP does not
+need to be stored in config.
 
 Configure split DNS on a Linux development machine without manually looking up
 the network interface:
@@ -186,9 +273,11 @@ curl -I "http://portmap.$DNS_DOMAIN/"
 ```
 
 The catalog page lists currently visible `portmap`/Traefik-managed services and
-their generated endpoints. Each visible compose project also has a `Down`
-button that removes its portmap-managed Docker Compose containers and networks
-by compose project label, which is useful when a worktree/repo path has moved.
+their generated endpoints. When the host agent is running, the catalog also
+lists startable stopped worktrees from the same Git repo so dead branches can be
+started from the UI. Each visible compose project also has a `Down` button that
+removes its portmap-managed Docker Compose containers and networks by compose
+project label, which is useful when a worktree/repo path has moved.
 The JSON form is available at:
 
 ```text

@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .agent_client import AgentUnavailable, agent_compose_up_worktree, agent_worktrees
 from .broker import ENDPOINT_CONFIG, ensure_generated_override
 from .compose_takeover import find_compose_file, generated_compose_project, plan_docker_compose_command
 from .repo_identity import git, git_branch, resolve_repo_identity, stable_hash
@@ -96,8 +97,26 @@ def collect_catalog() -> dict[str, Any]:
         if (service := container_to_service(container)) is not None
     ]
     generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
-    worktrees = discover_catalog_worktrees(services)
-    worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+    agent = {"available": False, "message": "agent unavailable"}
+    try:
+        agent_payload = agent_worktrees()
+    except AgentUnavailable as exc:
+        worktrees = discover_catalog_worktrees(services)
+        worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+        agent["message"] = str(exc)
+    except Exception as exc:
+        worktrees = discover_catalog_worktrees(services)
+        worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+        agent["message"] = str(exc)
+    else:
+        raw_worktrees = agent_payload.get("worktrees")
+        worktrees = raw_worktrees if isinstance(raw_worktrees, list) else []
+        agent = {
+            "available": True,
+            "message": str(agent_payload.get("message") or "agent ready"),
+            "generated_at": str(agent_payload.get("generated_at") or ""),
+        }
+    enrich_services_from_worktrees(services, worktrees)
     services.sort(
         key=lambda item: (
             item.get("repo_name") or "",
@@ -111,9 +130,32 @@ def collect_catalog() -> dict[str, Any]:
         "http_port": HTTP_PORT,
         "dns_domain": DNS_DOMAIN,
         "dns_server": DNS_SERVER,
+        "agent": agent,
         "services": services,
         "worktrees": worktrees,
     }
+
+
+def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: list[dict[str, Any]]) -> None:
+    by_worktree = {
+        str(worktree.get("worktree") or ""): worktree
+        for worktree in worktrees
+        if str(worktree.get("worktree") or "").strip()
+    }
+    for service in services:
+        worktree = by_worktree.get(str(service.get("worktree") or ""))
+        if not worktree:
+            continue
+        for key in (
+            "repo_id",
+            "repo_name",
+            "branch",
+            "worktree_root",
+            "worktree_root_title",
+            "compose_project",
+        ):
+            if not service.get(key) and worktree.get(key):
+                service[key] = worktree[key]
 
 
 def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
@@ -867,7 +909,10 @@ class CatalogHandler(BaseHTTPRequestHandler):
         form = self.read_form()
         worktree = first_form_value(form, "worktree")
         try:
-            result = compose_up_worktree(worktree)
+            try:
+                result = agent_compose_up_worktree(worktree)
+            except AgentUnavailable:
+                result = compose_up_worktree(worktree)
             self.write_json(result, send_body=True)
         except Exception as exc:  # pragma: no cover - exercised through container runtime.
             self.write_json(
