@@ -174,15 +174,17 @@ variables and configure itself to advertise the assigned host and port range.
 
 ## Generate And Start A Branch Instance
 
-Start the shared portmap gateway once from the portmap repo:
+Start portmap once from the portmap repo:
 
 ```bash
-portmap gateway up -d
+portmap up
 ```
 
-Gateway/domain/port defaults are read directly from the tracked
-`portmap.toml` in the portmap repo root. They are not copied into this
-project's `.portmap` directory.
+This starts the host-side portmap agent and the shared gateway containers. The
+agent is what lets the catalog discover startable stopped Git worktrees and run
+host-side compose starts. Gateway/domain/port defaults are read directly from
+the tracked `portmap.toml` in the portmap repo root. They are not copied into
+this project's `.portmap` directory.
 
 Then, from this repo/worktree:
 

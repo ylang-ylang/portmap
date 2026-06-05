@@ -39,6 +39,7 @@ export default defineConfig({
   plugins: [react(), ...(mockCatalog ? [mockCatalogPlugin()] : [])],
   build: {
     outDir: "../src/portmap/catalog_static",
+    cssMinify: false,
     // Keep __init__.py so catalog_static remains included as package data.
     emptyOutDir: false,
     rollupOptions: {

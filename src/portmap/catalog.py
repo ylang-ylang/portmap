@@ -6,11 +6,19 @@ import json
 import os
 import re
 import socket
+import subprocess
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from .agent_client import AgentUnavailable, agent_compose_up_worktree, agent_worktrees
+from .broker import ENDPOINT_CONFIG, ensure_generated_override
+from .compose_takeover import find_compose_file, generated_compose_project, plan_docker_compose_command
+from .repo_identity import git, git_branch, resolve_repo_identity, stable_hash
+from .settings import load_portmap_settings
+from .slug import slugify
 
 
 DOCKER_SOCKET = os.environ.get("PORTMAP_DOCKER_SOCKET", "/var/run/docker.sock")
@@ -18,6 +26,8 @@ HTTP_PORT = int(os.environ.get("PORTMAP_HTTP_PORT", "8080"))
 DNS_DOMAIN = os.environ.get("PORTMAP_DNS_DOMAIN", "debug.lan").strip(".")
 DNS_BIND = os.environ.get("PORTMAP_DNS_BIND", "127.0.0.1")
 DNS_TARGET_IP = os.environ.get("PORTMAP_DNS_TARGET_IP", "127.0.0.1")
+CATALOG_WORKTREE_ROOTS = os.environ.get("PORTMAP_CATALOG_WORKTREE_ROOTS", "")
+CATALOG_HISTORY_FILE_NAME = "catalog-worktrees.json"
 
 PORTMAP_ENDPOINT_RE = re.compile(r"^portmap\.endpoints\.([^.]+)\.([^.]+)$")
 TRAEFIK_ROUTER_RE = re.compile(r"^traefik\.(http|tcp|udp)\.routers\.([^.]+)\.([^.]+)$")
@@ -31,8 +41,12 @@ STATIC_ROOT = Path(__file__).with_name("catalog_static")
 STATIC_CONTENT_TYPES_BY_SUFFIX = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
+    ".ico": "image/x-icon",
     ".js": "application/javascript; charset=utf-8",
+    ".png": "image/png",
     ".svg": "image/svg+xml",
+    ".txt": "text/plain; charset=utf-8",
+    ".webmanifest": "application/manifest+json",
 }
 
 
@@ -82,6 +96,27 @@ def collect_catalog() -> dict[str, Any]:
         for container in containers
         if (service := container_to_service(container)) is not None
     ]
+    generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
+    agent = {"available": False, "message": "agent unavailable"}
+    try:
+        agent_payload = agent_worktrees()
+    except AgentUnavailable as exc:
+        worktrees = discover_catalog_worktrees(services)
+        worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+        agent["message"] = str(exc)
+    except Exception as exc:
+        worktrees = discover_catalog_worktrees(services)
+        worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+        agent["message"] = str(exc)
+    else:
+        raw_worktrees = agent_payload.get("worktrees")
+        worktrees = raw_worktrees if isinstance(raw_worktrees, list) else []
+        agent = {
+            "available": True,
+            "message": str(agent_payload.get("message") or "agent ready"),
+            "generated_at": str(agent_payload.get("generated_at") or ""),
+        }
+    enrich_services_from_worktrees(services, worktrees)
     services.sort(
         key=lambda item: (
             item.get("repo_name") or "",
@@ -91,12 +126,36 @@ def collect_catalog() -> dict[str, Any]:
         )
     )
     return {
-        "generated_at": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat(),
+        "generated_at": generated_at,
         "http_port": HTTP_PORT,
         "dns_domain": DNS_DOMAIN,
         "dns_server": DNS_SERVER,
+        "agent": agent,
         "services": services,
+        "worktrees": worktrees,
     }
+
+
+def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: list[dict[str, Any]]) -> None:
+    by_worktree = {
+        str(worktree.get("worktree") or ""): worktree
+        for worktree in worktrees
+        if str(worktree.get("worktree") or "").strip()
+    }
+    for service in services:
+        worktree = by_worktree.get(str(service.get("worktree") or ""))
+        if not worktree:
+            continue
+        for key in (
+            "repo_id",
+            "repo_name",
+            "branch",
+            "worktree_root",
+            "worktree_root_title",
+            "compose_project",
+        ):
+            if not service.get(key) and worktree.get(key):
+                service[key] = worktree[key]
 
 
 def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
@@ -111,14 +170,17 @@ def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     container_name = first_container_name(container)
+    worktree = labels.get("portmap.worktree") or labels.get("com.docker.compose.project.working_dir")
+    root, root_title = worktree_root_from_raw(worktree)
     return {
         "container": container_name,
         "image": container.get("Image"),
         "repo_id": labels.get("portmap.repo_id"),
         "repo_name": labels.get("portmap.repo_name"),
         "branch": labels.get("portmap.branch"),
-        "worktree": labels.get("portmap.worktree")
-        or labels.get("com.docker.compose.project.working_dir"),
+        "worktree": worktree,
+        "worktree_root": root,
+        "worktree_root_title": root_title,
         "compose_project": labels.get("com.docker.compose.project"),
         "compose_service": labels.get("com.docker.compose.service"),
         "docker_network": labels.get("traefik.docker.network"),
@@ -203,6 +265,400 @@ def parse_host_rule(rule: str) -> str | None:
     if match is None:
         return None
     return match.group(1)
+
+
+def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    running_by_worktree = running_services_by_worktree(services)
+    candidates: dict[str, Path] = {}
+
+    for worktree in running_by_worktree:
+        path = Path(worktree)
+        add_existing_worktree_candidate(candidates, path)
+        for sibling in git_worktree_paths(path):
+            add_existing_worktree_candidate(candidates, sibling)
+
+    for root in catalog_worktree_roots():
+        for candidate in root_worktree_candidates(root):
+            add_existing_worktree_candidate(candidates, candidate)
+            for sibling in git_worktree_paths(candidate):
+                add_existing_worktree_candidate(candidates, sibling)
+
+    worktrees = []
+    for path in candidates.values():
+        worktree = catalog_worktree_from_path(path, running_by_worktree)
+        if worktree is None:
+            continue
+        if not worktree.get("running") and not worktree.get("startable"):
+            continue
+        worktrees.append(worktree)
+    worktrees.sort(
+        key=lambda item: (
+            item.get("repo_name") or "",
+            item.get("repo_id") or "",
+            item.get("worktree_title") or "",
+            item.get("branch") or "",
+            item.get("worktree") or "",
+        )
+    )
+    return worktrees
+
+
+def merge_catalog_history(
+    current_worktrees: list[dict[str, Any]],
+    services: list[dict[str, Any]],
+    *,
+    generated_at: str,
+) -> list[dict[str, Any]]:
+    running_by_worktree = running_services_by_worktree(services)
+    merged = {
+        worktree_instance_key(worktree): dict(worktree, source="current")
+        for worktree in current_worktrees
+    }
+    current_worktree_paths = {str(worktree.get("worktree") or "") for worktree in current_worktrees}
+    previous = read_catalog_history()
+
+    for historical in previous:
+        raw_worktree = str(historical.get("worktree") or "").strip()
+        if not raw_worktree:
+            continue
+        record = catalog_worktree_from_path(Path(raw_worktree), running_by_worktree)
+        if record is None or not record.get("startable"):
+            continue
+        historical_branch = slugify(str(historical.get("branch") or record["branch"]))
+        if historical_branch != record["branch"]:
+            continue
+        key = worktree_instance_key(record)
+        if key in merged:
+            continue
+        record["source"] = "history" if record["worktree"] not in current_worktree_paths else "current"
+        record["last_seen_at"] = historical.get("last_seen_at") or historical.get("updated_at") or ""
+        merged[key] = record
+
+    worktrees = list(merged.values())
+    for worktree in worktrees:
+        if worktree.get("source") == "current":
+            worktree["last_seen_at"] = generated_at
+
+    worktrees.sort(
+        key=lambda item: (
+            item.get("repo_name") or "",
+            item.get("repo_id") or "",
+            item.get("worktree_title") or "",
+            item.get("branch") or "",
+            item.get("worktree") or "",
+        )
+    )
+    write_catalog_history(worktrees, generated_at=generated_at)
+    return worktrees
+
+
+def worktree_instance_key(worktree: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(worktree.get("repo_id") or worktree.get("repo_name") or ""),
+            str(worktree.get("worktree") or ""),
+            str(worktree.get("branch") or ""),
+        ]
+    )
+
+
+def catalog_history_file() -> Path:
+    explicit = os.environ.get("PORTMAP_CATALOG_HISTORY_FILE")
+    if explicit:
+        return Path(explicit).expanduser()
+    state_dir = os.environ.get("PORTMAP_STATE_DIR")
+    if state_dir:
+        return Path(state_dir).expanduser() / CATALOG_HISTORY_FILE_NAME
+    return load_portmap_settings(environ=os.environ).state_dir / CATALOG_HISTORY_FILE_NAME
+
+
+def read_catalog_history() -> list[dict[str, Any]]:
+    path = catalog_history_file()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+    worktrees = payload.get("worktrees") if isinstance(payload, dict) else None
+    if not isinstance(worktrees, list):
+        return []
+    return [item for item in worktrees if isinstance(item, dict)]
+
+
+def write_catalog_history(worktrees: list[dict[str, Any]], *, generated_at: str) -> None:
+    path = catalog_history_file()
+    entries = []
+    for worktree in worktrees:
+        raw_path = str(worktree.get("worktree") or "").strip()
+        if not raw_path:
+            continue
+        if not worktree.get("startable"):
+            continue
+        entries.append(
+            {
+                "repo_id": worktree.get("repo_id"),
+                "repo_name": worktree.get("repo_name"),
+                "branch": worktree.get("branch"),
+                "worktree": raw_path,
+                "worktree_title": worktree.get("worktree_title"),
+                "worktree_root": worktree.get("worktree_root"),
+                "worktree_root_title": worktree.get("worktree_root_title"),
+                "compose_project": worktree.get("compose_project"),
+                "startable": bool(worktree.get("startable")),
+                "last_seen_at": worktree.get("last_seen_at") or generated_at,
+            }
+        )
+    payload = {
+        "version": 1,
+        "updated_at": generated_at,
+        "worktrees": entries,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
+        return
+
+
+def running_services_by_worktree(services: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for service in services:
+        raw_worktree = str(service.get("worktree") or "").strip()
+        if not raw_worktree:
+            continue
+        key = canonical_worktree_path(Path(raw_worktree))
+        grouped.setdefault(key, []).append(service)
+    return grouped
+
+
+def catalog_worktree_roots() -> list[Path]:
+    raw = os.environ.get("PORTMAP_CATALOG_WORKTREE_ROOTS", CATALOG_WORKTREE_ROOTS)
+    roots: list[Path] = []
+    for item in re.split(rf"[{re.escape(os.pathsep)},]", raw):
+        value = item.strip()
+        if value:
+            roots.append(Path(value).expanduser())
+    return roots
+
+
+def root_worktree_candidates(root: Path) -> list[Path]:
+    try:
+        resolved = root.expanduser().resolve()
+    except OSError:
+        return []
+    if not resolved.exists() or not resolved.is_dir():
+        return []
+
+    candidates = [resolved]
+    try:
+        children = [child for child in resolved.iterdir() if child.is_dir()]
+    except OSError:
+        return candidates
+
+    candidates.extend(children)
+    wt_containers = [resolved, *children] if looks_like_worktree_container(resolved) else children
+    for child in wt_containers:
+        if not looks_like_worktree_container(child):
+            continue
+        try:
+            candidates.extend(grandchild for grandchild in child.iterdir() if grandchild.is_dir())
+        except OSError:
+            continue
+    return candidates
+
+
+def looks_like_worktree_container(path: Path) -> bool:
+    return path.name.endswith(("@wt", "@worktree"))
+
+
+def add_existing_worktree_candidate(candidates: dict[str, Path], path: Path) -> None:
+    top_level = git_top_level(path)
+    if top_level is None or not top_level.exists():
+        return
+    candidates[str(top_level)] = top_level
+
+
+def canonical_worktree_path(path: Path) -> str:
+    top_level = git_top_level(path)
+    if top_level is not None:
+        return str(top_level)
+    try:
+        return str(path.expanduser().resolve())
+    except OSError:
+        return str(path.expanduser())
+
+
+def git_top_level(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    result = git(path, "rev-parse", "--show-toplevel")
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value:
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def git_common_dir(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    result = git(path, "rev-parse", "--git-common-dir")
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value:
+        return None
+    common_dir = Path(value).expanduser()
+    if not common_dir.is_absolute():
+        common_dir = path / common_dir
+    try:
+        return common_dir.resolve()
+    except OSError:
+        return common_dir
+
+
+def worktree_root_from_raw(raw_worktree: str | None) -> tuple[str | None, str | None]:
+    if not raw_worktree:
+        return None, None
+    top_level = git_top_level(Path(raw_worktree).expanduser())
+    if top_level is None:
+        return None, None
+    return worktree_root_from_top_level(top_level)
+
+
+def worktree_root_from_top_level(top_level: Path) -> tuple[str, str]:
+    common_dir = git_common_dir(top_level)
+    if common_dir is None:
+        return str(top_level), top_level.name
+    title = common_dir.parent.name if common_dir.name == ".git" else common_dir.name
+    return str(common_dir), title
+
+
+def git_worktree_paths(path: Path) -> list[Path]:
+    if git_top_level(path) is None:
+        return []
+    result = git(path, "worktree", "list", "--porcelain")
+    if result.returncode != 0:
+        return []
+    return parse_git_worktree_porcelain(result.stdout)
+
+
+def parse_git_worktree_porcelain(output: str) -> list[Path]:
+    paths: list[Path] = []
+    for line in output.splitlines():
+        if line.startswith("worktree "):
+            value = line.removeprefix("worktree ").strip()
+            if value:
+                paths.append(Path(value).expanduser())
+    return paths
+
+
+def catalog_worktree_from_path(
+    path: Path,
+    running_by_worktree: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    top_level = git_top_level(path)
+    if top_level is None:
+        return None
+
+    identity = resolve_repo_identity(
+        project_directory=top_level,
+        repo_root=top_level,
+        repo_id=None,
+        repo_name=None,
+    )
+    branch = worktree_branch(top_level)
+    worktree_root, worktree_root_title = worktree_root_from_top_level(top_level)
+    running_services = running_by_worktree.get(str(top_level), [])
+    compose_project = generated_compose_project(top_level) or first_service_value(running_services, "compose_project")
+    compose_file = find_compose_file(top_level)
+    endpoint_config = top_level / ENDPOINT_CONFIG
+    startable = compose_file is not None and endpoint_config.exists()
+    start_error = ""
+    if compose_file is None:
+        start_error = "missing compose file"
+    elif not endpoint_config.exists():
+        start_error = f"missing {ENDPOINT_CONFIG}"
+
+    endpoint_total = sum(len(service.get("endpoints") or []) for service in running_services)
+    return {
+        "id": stable_hash(str(top_level)),
+        "repo_id": identity.repo_id,
+        "repo_name": identity.display_name,
+        "branch": branch,
+        "worktree": str(top_level),
+        "worktree_title": top_level.name,
+        "worktree_root": worktree_root,
+        "worktree_root_title": worktree_root_title,
+        "compose_project": compose_project,
+        "running": bool(running_services),
+        "status": "running" if running_services else "stopped",
+        "startable": startable,
+        "start_error": start_error,
+        "service_count": len(running_services),
+        "endpoint_count": endpoint_total,
+    }
+
+
+def worktree_branch(path: Path) -> str:
+    branch = git_branch(path)
+    if branch:
+        return slugify(branch)
+    result = git(path, "rev-parse", "--short", "HEAD")
+    if result.returncode == 0 and result.stdout.strip():
+        return slugify(f"detached-{result.stdout.strip()}")
+    return "detached"
+
+
+def first_service_value(services: list[dict[str, Any]], key: str) -> str | None:
+    for service in services:
+        value = service.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def compose_up_worktree(worktree: str) -> dict[str, Any]:
+    raw_worktree = worktree.strip()
+    if not raw_worktree:
+        raise ValueError("worktree is required")
+
+    path = Path(raw_worktree).expanduser().resolve()
+    record = catalog_worktree_from_path(path, {})
+    if record is None:
+        raise ValueError(f"not a git worktree: {path}")
+    if not record["startable"]:
+        raise ValueError(f"worktree is not startable: {record['start_error']}")
+
+    ensure_generated_override(["up", "-d"], cwd=path, environ=os.environ)
+    plan = plan_docker_compose_command(["up", "-d"], cwd=path)
+    if not plan.injected:
+        raise RuntimeError("generated compose override was not available for docker compose up")
+
+    env = os.environ.copy()
+    env["PORTMAP_BROKER_BYPASS"] = "1"
+    result = subprocess.run(
+        plan.command,
+        cwd=path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+        raise RuntimeError(f"docker compose up failed: {detail}")
+
+    return {
+        "ok": True,
+        "message": "compose project started",
+        "worktree": str(path),
+        "compose_project": plan.compose_project or generated_compose_project(path),
+        "command": plan.command,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
 
 
 def compose_down_project(compose_project: str) -> dict[str, Any]:
@@ -363,6 +819,20 @@ def read_static_asset(asset_path: str) -> tuple[bytes, str] | None:
         return None
 
 
+def vite_public_root_asset(request_path: str) -> str | None:
+    if not request_path.startswith("/"):
+        return None
+    normalized = PurePosixPath(request_path.removeprefix("/"))
+    if len(normalized.parts) != 1:
+        return None
+    asset_path = normalized.as_posix()
+    if asset_path in {"", ".", "index.html"}:
+        return None
+    if static_content_type(asset_path) is None:
+        return None
+    return asset_path
+
+
 class CatalogHandler(BaseHTTPRequestHandler):
     server_version = "portmap-catalog/0.1"
 
@@ -374,6 +844,9 @@ class CatalogHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/actions/compose-up":
+            self.handle_compose_up()
+            return
         if parsed.path == "/actions/compose-down":
             self.handle_compose_down()
             return
@@ -415,12 +888,46 @@ class CatalogHandler(BaseHTTPRequestHandler):
             self.write_json(catalog, send_body=send_body)
             return
 
+        public_asset = vite_public_root_asset(parsed.path)
+        if public_asset is not None:
+            # Vite serves files from frontend/public at the site root in mock
+            # mode; the packaged Python server must expose the same build
+            # output shape for production.
+            if self.write_static(public_asset, send_body=send_body):
+                return
+            self.write_not_found(send_body=send_body)
+            return
+
         self.write_not_found(send_body=send_body)
 
-    def handle_compose_down(self) -> None:
+    def read_form(self) -> dict[str, list[str]]:
         length = min(int(self.headers.get("content-length", "0") or "0"), 8192)
         payload = self.rfile.read(length).decode("utf-8", errors="replace")
-        form = urllib.parse.parse_qs(payload)
+        return urllib.parse.parse_qs(payload)
+
+    def handle_compose_up(self) -> None:
+        form = self.read_form()
+        worktree = first_form_value(form, "worktree")
+        try:
+            try:
+                result = agent_compose_up_worktree(worktree)
+            except AgentUnavailable:
+                result = compose_up_worktree(worktree)
+            self.write_json(result, send_body=True)
+        except Exception as exc:  # pragma: no cover - exercised through container runtime.
+            self.write_json(
+                {
+                    "worktree": worktree,
+                    "ok": False,
+                    "message": str(exc),
+                    "errors": [],
+                },
+                status=400,
+                send_body=True,
+            )
+
+    def handle_compose_down(self) -> None:
+        form = self.read_form()
         compose_project = first_form_value(form, "compose_project")
         try:
             result = compose_down_project(compose_project)
@@ -440,9 +947,7 @@ class CatalogHandler(BaseHTTPRequestHandler):
             )
 
     def handle_compose_restart(self) -> None:
-        length = min(int(self.headers.get("content-length", "0") or "0"), 8192)
-        payload = self.rfile.read(length).decode("utf-8", errors="replace")
-        form = urllib.parse.parse_qs(payload)
+        form = self.read_form()
         compose_project = first_form_value(form, "compose_project")
         try:
             result = compose_restart_project(compose_project)

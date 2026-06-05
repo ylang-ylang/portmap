@@ -24,3 +24,18 @@
   remains separate.
 - Merge `feat/host-dns-cli` so portmap can install and remove host-level
   systemd-resolved split DNS drop-ins with `portmap dns set/unset`.
+- Merge `feat/fronted` so the catalog DNS status keeps red/green state colors
+  in dark mode and the browser tab shows the `pM` favicon.
+- Merge `feat/catalog-public-static` so the production Python catalog server
+  serves Vite public root static assets such as `/favicon.svg`.
+- Merge `feat/catalog-worktree-start` so the catalog groups entries by repo
+  identity and linked `.git` wt root, exposes running/dead branch controls,
+  and keeps startable history as dead branch discovery instead of a separate UI
+  level.
+- Merge `feat/transparent-compose` so the main gateway compose file remains
+  transparent in repos without `.portmap` runtime state and no longer requires
+  `PORTMAP_STATE_DIR` just to parse `docker compose down`.
+- Merge `feat/host-agent` so the catalog can use a small host-side agent for
+  Git worktree discovery and host compose starts, while docs clarify that
+  portmap manages port resources and endpoint indexes rather than protocol
+  behavior.
