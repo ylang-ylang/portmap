@@ -39,3 +39,5 @@
   Git worktree discovery and host compose starts, while docs clarify that
   portmap manages port resources and endpoint indexes rather than protocol
   behavior.
+- Merge `feat/fronted` so empty running/dead branch controls are fixed-width
+  and visually muted when their counts are zero.

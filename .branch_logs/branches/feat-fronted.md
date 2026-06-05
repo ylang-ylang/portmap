@@ -9,3 +9,7 @@
   static frontend build.
 - Extend static frontend tests to cover the favicon, DNS success label, and DNS
   status CSS classes.
+- Sync the current `dev` branch into `feat/fronted` before additional catalog
+  frontend changes.
+- Make running/dead branch count buttons fixed-width and visually mute zero
+  states with explicit empty styling.

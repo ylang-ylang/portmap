@@ -415,7 +415,7 @@ function RunningBranchesMenu({ branches, onAction }) {
   return (
     <div className="running-menu" data-running-branch-menu>
       <button
-        className="running-menu-button"
+        className={`running-menu-button ${hasItems ? "has-items" : "is-empty"}`}
         type="button"
         title="running branches"
         disabled={!hasItems}
@@ -544,7 +544,7 @@ function DeadInstancesMenu({ instances, onStart }) {
   return (
     <div className="dead-menu" data-dead-panel>
       <button
-        className="dead-menu-button"
+        className={`dead-menu-button ${hasItems ? "has-items" : "is-empty"}`}
         type="button"
         title="dead branches"
         disabled={!hasItems}
