@@ -13,3 +13,7 @@
   frontend changes.
 - Make running/dead branch count buttons fixed-width and visually mute zero
   states with explicit empty styling.
+- Widen the fixed running/dead branch controls so their icons, count badge, and
+  label fit without overflow.
+- Increase spacing between restart/down action buttons so branch controls do
+  not feel visually cramped.

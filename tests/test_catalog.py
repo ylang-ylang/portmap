@@ -299,9 +299,11 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'.branch-group' in stylesheet_body
     assert b'.dead-menu' in stylesheet_body
     assert b'.running-menu' in stylesheet_body
+    assert b'.running-action' in stylesheet_body
+    assert b'gap: 8px' in stylesheet_body
     assert b'.running-menu-button.is-empty' in stylesheet_body
     assert b'.dead-menu-button.is-empty' in stylesheet_body
-    assert b'inline-size: 108px' in stylesheet_body
+    assert b'inline-size: 144px' in stylesheet_body
     assert b'.branch-running-name' in stylesheet_body
     assert b'.history-panel' not in stylesheet_body
     assert stylesheet_body.count(b"\n") > 20

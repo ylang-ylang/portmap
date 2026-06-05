@@ -344,7 +344,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 10px;
   flex-wrap: nowrap;
   font-weight: 500;
 }
@@ -353,6 +353,7 @@ button {
   margin: 0;
   display: inline-flex;
   align-items: center;
+  gap: 8px;
   white-space: nowrap;
 }
 
@@ -631,17 +632,19 @@ a {
   border: 1px solid #9aa7b4;
   background: #f8fafc;
   color: #18202a;
-  inline-size: 108px;
-  min-width: 108px;
+  box-sizing: border-box;
+  inline-size: 144px;
+  min-width: 144px;
   min-height: 32px;
-  padding: 7px 10px;
+  padding: 7px 8px;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 5px;
+  white-space: nowrap;
 }
 
 .running-menu-button {
