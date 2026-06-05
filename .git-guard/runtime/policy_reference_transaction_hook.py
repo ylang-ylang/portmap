@@ -12,6 +12,7 @@ try:
     from .common import AGENT_REJECT_HINT, HookReject
     from .config import load_config, load_json_object
     from .git_ops import append_log, read_push_updates, read_updates, required_env
+    from .managed_files import enforce_git_guard_managed_files_staged
     from .tag_policy import validate_pre_push
 except ImportError:  # pragma: no cover - installed hook script mode
     from branch_logs import merge_in_progress, prepare_merge_commit, validate_pre_commit
@@ -19,6 +20,7 @@ except ImportError:  # pragma: no cover - installed hook script mode
     from common import AGENT_REJECT_HINT, HookReject
     from config import load_config, load_json_object
     from git_ops import append_log, read_push_updates, read_updates, required_env
+    from managed_files import enforce_git_guard_managed_files_staged
     from tag_policy import validate_pre_push
 
 
@@ -53,14 +55,16 @@ def main() -> int:
             is_merge_commit = merge_in_progress(repo)
             if is_merge_commit:
                 prepare_merge_commit(repo, config)
-            validate_pre_commit(repo, policy, config, require_branch_log_change=not is_merge_commit)
+            enforce_git_guard_managed_files_staged(repo, config)
+            validate_pre_commit(repo, policy, config, require_branch_log_change=True)
             return 0
 
         if command == "pre-merge-commit":
             if len(sys.argv) != 2:
                 raise HookReject("HOOK_PRE_MERGE_COMMIT_USAGE", argv=sys.argv[1:])
             prepare_merge_commit(repo, config)
-            validate_pre_commit(repo, policy, config, require_branch_log_change=False)
+            enforce_git_guard_managed_files_staged(repo, config)
+            validate_pre_commit(repo, policy, config, require_branch_log_change=True)
             return 0
 
         if len(sys.argv) != 2:

@@ -10,3 +10,10 @@
   errors
   log
 }
+
+.:53 {
+  forward . {$PORTMAP_DNS_FORWARD}
+  cache 30
+  errors
+  log
+}

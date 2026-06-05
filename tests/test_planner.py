@@ -5,6 +5,9 @@ from portmap.model import GenerateRequest
 from portmap.planner import generate_plan
 
 
+CONTAINER_DNS_SERVER = "portmap-runtime-dns"
+
+
 def write_compose_json(path: Path) -> None:
     path.write_text(
         json.dumps(
@@ -132,6 +135,7 @@ def make_request(tmp_path: Path, *, branch: str = "feat/example") -> GenerateReq
         http_port=28081,
         tcp_port_start=28800,
         udp_port_start=29900,
+        container_dns_server=CONTAINER_DNS_SERVER,
     )
 
 
@@ -171,6 +175,7 @@ def make_http_request(tmp_path: Path, *, branch: str = "feat/example") -> Genera
         http_port=28081,
         tcp_port_start=28800,
         udp_port_start=29900,
+        container_dns_server=CONTAINER_DNS_SERVER,
     )
 
 
@@ -191,6 +196,7 @@ def make_preserve_host_request(tmp_path: Path, *, branch: str = "feat/example") 
         http_port=28081,
         tcp_port_start=28800,
         udp_port_start=29900,
+        container_dns_server=CONTAINER_DNS_SERVER,
     )
 
 
@@ -207,7 +213,7 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert "traefik.http.routers.sample-feat-example-frontend.entrypoints=web" in frontend_labels
     assert (
         "traefik.http.routers.sample-feat-example-frontend.rule="
-        "Host(`frontend.feat-example.sample.debug.local`)"
+        "Host(`frontend.feat-example.sample.debug.lan`)"
     ) in frontend_labels
     assert (
         "traefik.http.services.sample-feat-example-frontend.loadbalancer.server.port=5173"
@@ -225,23 +231,22 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert "portmap.endpoints.sample-feat-example-frontend.upstream_host=127.0.0.1:5173" in frontend_labels
     assert (
         "portmap.endpoints.sample-feat-example-frontend.url="
-        "http://frontend.feat-example.sample.debug.local:28081"
+        "http://frontend.feat-example.sample.debug.lan:28081"
     ) in frontend_labels
 
     mqtt_labels = plan.compose_override["services"]["mqtt"]["labels"]
-    assert "traefik.tcp.routers.sample-feat-example-mqtt.entrypoints=mqtt-sample-feat-example" in mqtt_labels
-    assert "traefik.tcp.routers.sample-feat-example-mqtt.rule=HostSNI(`*`)" in mqtt_labels
-    assert "traefik.tcp.routers.sample-feat-example-mqtt.service=sample-feat-example-mqtt" in mqtt_labels
-    assert "traefik.tcp.services.sample-feat-example-mqtt.loadbalancer.server.port=1883" in mqtt_labels
+    assert "traefik.enable=true" not in mqtt_labels
+    assert not any(label.startswith("traefik.tcp.") for label in mqtt_labels)
     assert "portmap.endpoints.sample-feat-example-mqtt.kind=tcp" in mqtt_labels
     assert "portmap.endpoints.sample-feat-example-mqtt.host_port=28831" in mqtt_labels
+    assert plan.compose_override["services"]["mqtt"]["ports"] == ["28831:1883/tcp"]
 
     udp_labels = plan.compose_override["services"]["udp-echo"]["labels"]
-    assert "traefik.udp.routers.sample-feat-example-udp-echo.entrypoints=udp-echo-sample-feat-example" in udp_labels
-    assert "traefik.udp.routers.sample-feat-example-udp-echo.service=sample-feat-example-udp-echo" in udp_labels
-    assert "traefik.udp.services.sample-feat-example-udp-echo.loadbalancer.server.port=9999" in udp_labels
+    assert "traefik.enable=true" not in udp_labels
+    assert not any(label.startswith("traefik.udp.") for label in udp_labels)
     assert "portmap.endpoints.sample-feat-example-udp-echo.kind=udp" in udp_labels
     assert "portmap.endpoints.sample-feat-example-udp-echo.host_port=29991" in udp_labels
+    assert plan.compose_override["services"]["udp-echo"]["ports"] == ["29991:9999/udp"]
 
     turn_override = plan.compose_override["services"]["turn"]
     turn_labels = turn_override["labels"]
@@ -261,27 +266,31 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
         "default": None,
         "portmap_gateway": None,
     }
+    assert plan.compose_override["services"]["frontend"]["dns"] == [CONTAINER_DNS_SERVER]
+    assert plan.compose_override["services"]["mqtt"]["dns"] == [CONTAINER_DNS_SERVER]
+    assert plan.compose_override["services"]["udp-echo"]["dns"] == [CONTAINER_DNS_SERVER]
+    assert plan.compose_override["services"]["turn"]["dns"] == [CONTAINER_DNS_SERVER]
+    assert "networks" not in plan.compose_override["services"]["mqtt"]
+    assert "networks" not in plan.compose_override["services"]["udp-echo"]
+    assert "networks" not in plan.compose_override["services"]["turn"]
     assert plan.compose_override["services"]["frontend"]["environment"]["PORTMAP_TURN_PORT"] == "34781"
     assert plan.compose_override["services"]["frontend"]["environment"]["PORTMAP_TURN_RANGE_MIN_PORT"] == "49160"
     assert plan.compose_override["services"]["frontend"]["environment"]["PORTMAP_TURN_RANGE_MAX_PORT"] == "49199"
     assert plan.compose_override["services"]["turn"]["environment"]["PORTMAP_FRONTEND_URL"] == (
-        "http://frontend.feat-example.sample.debug.local:28081"
+        "http://frontend.feat-example.sample.debug.lan:28081"
     )
     assert plan.compose_override["networks"]["portmap_gateway"] == {
         "external": True,
         "name": "portmap_gateway",
     }
 
-    assert plan.traefik_static == {
-        "entryPoints": {
-            "mqtt-sample-feat-example": {"address": ":28831/tcp"},
-            "udp-echo-sample-feat-example": {"address": ":29991/udp"},
-        }
-    }
+    assert plan.traefik_static == {"entryPoints": {}}
 
     instance = plan.registry["repos"]["sample-repo"]["instances"]["feat-example"]
-    assert instance["compose_project"] == "sample_project"
-    assert instance["endpoints"]["frontend"]["url"] == "http://frontend.feat-example.sample.debug.local:28081"
+    assert instance["compose_project"] == plan.compose_project
+    assert plan.compose_project is not None
+    assert plan.compose_project.startswith("sample_feat_example_")
+    assert instance["endpoints"]["frontend"]["url"] == "http://frontend.feat-example.sample.debug.lan:28081"
     assert instance["endpoints"]["mqtt"]["port"] == 28831
     assert instance["endpoints"]["udp_echo"]["port"] == 29991
     assert instance["endpoints"]["turn"]["port"] == 34781
@@ -315,13 +324,66 @@ def test_range_endpoint_auto_allocation_uses_non_overlapping_state(tmp_path: Pat
         "30001:3478/udp",
         "40003-40005:40003-40005/udp",
     ]
+    assert "networks" not in feat_plan.compose_override
+    assert "networks" not in feat_plan.compose_override["services"]["turn"]
+
+
+def test_global_allocation_file_allocates_across_worktrees(tmp_path: Path) -> None:
+    allocation_state_file = tmp_path / "global" / "allocations.json"
+    dev_dir = tmp_path / "sample@dev"
+    feat_dir = tmp_path / "sample@feat"
+    dev_dir.mkdir()
+    feat_dir.mkdir()
+    write_compose_json(dev_dir / "compose.json")
+    write_auto_range_endpoint_config(dev_dir / "endpoints.toml")
+    write_compose_json(feat_dir / "compose.json")
+    write_auto_range_endpoint_config(feat_dir / "endpoints.toml")
+
+    dev_plan = generate_plan(
+        GenerateRequest(
+            compose_file=None,
+            compose_json_file=dev_dir / "compose.json",
+            project_directory=dev_dir,
+            out_dir=dev_dir / ".portmap",
+            config_file=dev_dir / "endpoints.toml",
+            branch="feat/example",
+            repo_id="sample-repo",
+            repo_name="sample",
+            udp_port_start=30000,
+            range_port_start=40000,
+            allocation_state_file=allocation_state_file,
+        )
+    )
+    feat_plan = generate_plan(
+        GenerateRequest(
+            compose_file=None,
+            compose_json_file=feat_dir / "compose.json",
+            project_directory=feat_dir,
+            out_dir=feat_dir / ".portmap",
+            config_file=feat_dir / "endpoints.toml",
+            branch="feat/example",
+            repo_id="sample-repo",
+            repo_name="sample",
+            udp_port_start=30000,
+            range_port_start=40000,
+            allocation_state_file=allocation_state_file,
+        )
+    )
+
+    dev_turn = dev_plan.registry["repos"]["sample-repo"]["instances"]["feat-example"]["endpoints"]["turn"]
+    feat_turn = feat_plan.registry["repos"]["sample-repo"]["instances"]["feat-example"]["endpoints"]["turn"]
+    assert dev_turn["port"] == 30000
+    assert feat_turn["port"] == 30001
+    assert dev_turn["range"] == {"min_port": 40000, "max_port": 40002}
+    assert feat_turn["range"] == {"min_port": 40003, "max_port": 40005}
+    assert dev_plan.compose_project != feat_plan.compose_project
 
 
 def test_write_keeps_project_artifacts_minimal_for_http_only_project(tmp_path: Path) -> None:
     out_dir = tmp_path / ".portmap"
     out_dir.mkdir()
     (out_dir / "registry.json").write_text("{}\n", encoding="utf-8")
-    (out_dir / "state.json").write_text(
+    (out_dir / "allocations.json").write_text(
         '{"allocations": {"tcp": {"stale": 18831}, "udp": {"stale": 19991}}}\n',
         encoding="utf-8",
     )
@@ -335,7 +397,8 @@ def test_write_keeps_project_artifacts_minimal_for_http_only_project(tmp_path: P
 
     assert not (out_dir / "registry.json").exists()
     assert not (out_dir / "traefik.generated.yml").exists()
-    assert not (out_dir / "state.json").exists()
+    assert not (out_dir / "allocations.json").exists()
+    assert (out_dir / "state.json").exists()
 
     override = (out_dir / "docker-compose.override.generated.yml").read_text(encoding="utf-8")
     assert "traefik.http.routers.sample-feat-example-frontend.rule" in override

@@ -1,0 +1,417 @@
+{
+  "generated_at": "2026-06-04T09:00:00+00:00",
+  "http_port": 8080,
+  "dns_domain": "debug.lan",
+  "dns_server": "192.0.2.10",
+  "services": [
+    {
+      "container": "browserdeck_dev_a2b2-browser-gpu-lab-1",
+      "image": "comap-browser-debug-debian:local",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@dev",
+      "compose_project": "browserdeck_dev_a2b2",
+      "compose_service": "browser-gpu-lab",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "desktop-dev-browserdeck",
+          "name": "desktop",
+          "kind": "http",
+          "container_port": 18080,
+          "url": "http://desktop.dev.browserdeck.debug.lan:8080"
+        },
+        {
+          "id": "browser-debug-dev-browserdeck",
+          "name": "browser-debug",
+          "kind": "http",
+          "container_port": 19333,
+          "url": "http://browser-debug.dev.browserdeck.debug.lan:8080"
+        }
+      ],
+      "worktree_root": "/home/ylang/linked-git/browserdeck.git",
+      "worktree_root_title": "browserdeck linked .git"
+    },
+    {
+      "container": "browserdeck_dev_a2b2-coturn-1",
+      "image": "coturn/coturn:4.6",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@dev",
+      "compose_project": "browserdeck_dev_a2b2",
+      "compose_service": "coturn",
+      "docker_network": "browserdeck_dev_default",
+      "endpoints": [
+        {
+          "id": "turn-dev-browserdeck",
+          "name": "turn",
+          "kind": "range",
+          "container_port": 3478,
+          "host": "192.0.2.10",
+          "host_port": 19001,
+          "range_start": 49160,
+          "range_end": 49199
+        }
+      ],
+      "worktree_root": "/home/ylang/linked-git/browserdeck.git",
+      "worktree_root_title": "browserdeck linked .git"
+    },
+    {
+      "container": "browserdeck_feat_a2b2-browser-gpu-lab-1",
+      "image": "comap-browser-debug-debian:local",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "feat-docker-browser-pointer-alignment",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@feat-docker-browser-pointer-alignment",
+      "compose_project": "browserdeck_feat_pointer_a2b2",
+      "compose_service": "browser-gpu-lab",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "desktop-feat-browserdeck",
+          "name": "desktop",
+          "kind": "http",
+          "container_port": 18080,
+          "url": "http://desktop.feat-docker-browser-pointer-alignment.browserdeck.debug.lan:8080"
+        },
+        {
+          "id": "browser-debug-feat-browserdeck",
+          "name": "browser-debug",
+          "kind": "http",
+          "container_port": 19333,
+          "url": "http://browser-debug.feat-docker-browser-pointer-alignment.browserdeck.debug.lan:8080"
+        }
+      ],
+      "worktree_root": "/home/ylang/linked-git/browserdeck.git",
+      "worktree_root_title": "browserdeck linked .git"
+    },
+    {
+      "container": "comap_dev_11aa-frontend-1",
+      "image": "node:22",
+      "repo_id": "11aa22bb33cc",
+      "repo_name": "comap",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/comap@wt/comap@dev",
+      "compose_project": "comap_dev_11aa",
+      "compose_service": "frontend",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "frontend-dev-comap",
+          "name": "frontend",
+          "kind": "http",
+          "container_port": 5173,
+          "url": "http://frontend.dev.comap.debug.lan:8080"
+        }
+      ],
+      "worktree_root": "/home/ylang/linked-git/comap.git",
+      "worktree_root_title": "comap linked .git"
+    },
+    {
+      "container": "comap_dev_11aa-backend-1",
+      "image": "python:3.12",
+      "repo_id": "11aa22bb33cc",
+      "repo_name": "comap",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/comap@wt/comap@dev",
+      "compose_project": "comap_dev_11aa",
+      "compose_service": "backend",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "api-dev-comap",
+          "name": "api",
+          "kind": "http",
+          "container_port": 8000,
+          "url": "http://api.dev.comap.debug.lan:8080"
+        },
+        {
+          "id": "mqtt-dev-comap",
+          "name": "mqtt",
+          "kind": "tcp",
+          "container_port": 1883,
+          "host": "192.0.2.10",
+          "host_port": 18001
+        }
+      ],
+      "worktree_root": "/home/ylang/linked-git/comap.git",
+      "worktree_root_title": "comap linked .git"
+    },
+    {
+      "container": "robotops_dev_55cc-api-1",
+      "image": "python:3.12",
+      "repo_id": "55cc66dd77ee",
+      "repo_name": "robotops",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/robotops@wt/robotops@dev",
+      "compose_project": "robotops_dev_55cc",
+      "compose_service": "api",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "api-dev-robotops",
+          "name": "api",
+          "kind": "http",
+          "container_port": 8080,
+          "url": "http://api.dev.robotops.debug.lan:8080"
+        },
+        {
+          "id": "metrics-dev-robotops",
+          "name": "metrics",
+          "kind": "http",
+          "container_port": 9100,
+          "url": "http://metrics.dev.robotops.debug.lan:8080"
+        }
+      ],
+      "worktree_root": "/home/ylang/linked-git/robotops.git",
+      "worktree_root_title": "robotops linked .git"
+    },
+    {
+      "container": "robotops_dev_55cc-message-bus-1",
+      "image": "eclipse-mosquitto:2",
+      "repo_id": "55cc66dd77ee",
+      "repo_name": "robotops",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/robotops@wt/robotops@dev",
+      "compose_project": "robotops_dev_55cc",
+      "compose_service": "message-bus",
+      "docker_network": "robotops_dev_default",
+      "endpoints": [
+        {
+          "id": "mqtt-dev-robotops",
+          "name": "mqtt",
+          "kind": "tcp",
+          "container_port": 1883,
+          "host": "192.0.2.10",
+          "host_port": 18002
+        }
+      ],
+      "worktree_root": "/home/ylang/linked-git/robotops.git",
+      "worktree_root_title": "robotops linked .git"
+    },
+    {
+      "container": "robotops_feat_sim_55cc-sim-ui-1",
+      "image": "node:22",
+      "repo_id": "55cc66dd77ee",
+      "repo_name": "robotops",
+      "branch": "feat-sim",
+      "worktree": "/home/ylang/ylangs_ws/robotops@wt/robotops@feat-sim",
+      "compose_project": "robotops_feat_sim_55cc",
+      "compose_service": "sim-ui",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "sim-ui-feat-robotops",
+          "name": "sim-ui",
+          "kind": "http",
+          "container_port": 5173,
+          "url": "http://sim-ui.feat-sim.robotops.debug.lan:8080"
+        }
+      ],
+      "worktree_root": "/home/ylang/linked-git/robotops.git",
+      "worktree_root_title": "robotops linked .git"
+    },
+    {
+      "container": "browserdeck_clone_7f21-web-1",
+      "image": "node:22",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "dev-clone",
+      "worktree": "/home/ylang/ylangs_ws/browserdeck-clone@wt/browserdeck@dev-clone",
+      "worktree_root": "/home/ylang/linked-git/browserdeck-clone.git",
+      "worktree_root_title": "browserdeck clone linked .git",
+      "compose_project": "browserdeck_clone_dev_7f21",
+      "compose_service": "web",
+      "docker_network": "portmap_gateway",
+      "endpoints": [
+        {
+          "id": "web-clone-browserdeck",
+          "name": "web",
+          "kind": "http",
+          "container_port": 5173,
+          "url": "http://web.dev-clone.browserdeck.debug.lan:8080"
+        }
+      ]
+    }
+  ],
+  "worktrees": [
+    {
+      "id": "wt-browserdeck-dev",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@dev",
+      "worktree_title": "browserdeck@dev",
+      "compose_project": "browserdeck_dev_a2b2",
+      "running": true,
+      "status": "running",
+      "startable": true,
+      "source": "current",
+      "last_seen_at": "2026-06-04T09:00:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/browserdeck.git",
+      "worktree_root_title": "browserdeck linked .git"
+    },
+    {
+      "id": "wt-browserdeck-feat",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "feat-docker-browser-pointer-alignment",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@feat-docker-browser-pointer-alignment",
+      "worktree_title": "browserdeck@feat-docker-browser-pointer-alignment",
+      "compose_project": "browserdeck_feat_pointer_a2b2",
+      "running": true,
+      "status": "running",
+      "startable": true,
+      "source": "current",
+      "last_seen_at": "2026-06-04T09:00:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/browserdeck.git",
+      "worktree_root_title": "browserdeck linked .git"
+    },
+    {
+      "id": "wt-browserdeck-history",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "feat-bug-fix",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@feat-bug-fix",
+      "worktree_title": "browserdeck@feat-bug-fix",
+      "compose_project": "",
+      "running": false,
+      "status": "stopped",
+      "startable": true,
+      "source": "history",
+      "last_seen_at": "2026-06-03T17:20:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/browserdeck.git",
+      "worktree_root_title": "browserdeck linked .git"
+    },
+    {
+      "id": "wt-comap-dev",
+      "repo_id": "11aa22bb33cc",
+      "repo_name": "comap",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/comap@worktree/comap@wt/comap@dev",
+      "worktree_title": "comap@dev",
+      "compose_project": "comap_dev_11aa",
+      "running": true,
+      "status": "running",
+      "startable": true,
+      "source": "current",
+      "last_seen_at": "2026-06-04T09:00:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/comap.git",
+      "worktree_root_title": "comap linked .git"
+    },
+    {
+      "id": "wt-robotops-dev",
+      "repo_id": "55cc66dd77ee",
+      "repo_name": "robotops",
+      "branch": "dev",
+      "worktree": "/home/ylang/ylangs_ws/robotops@wt/robotops@dev",
+      "worktree_title": "robotops@dev",
+      "compose_project": "robotops_dev_55cc",
+      "running": true,
+      "status": "running",
+      "startable": true,
+      "source": "current",
+      "last_seen_at": "2026-06-04T09:00:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/robotops.git",
+      "worktree_root_title": "robotops linked .git"
+    },
+    {
+      "id": "wt-robotops-feat-sim",
+      "repo_id": "55cc66dd77ee",
+      "repo_name": "robotops",
+      "branch": "feat-sim",
+      "worktree": "/home/ylang/ylangs_ws/robotops@wt/robotops@feat-sim",
+      "worktree_title": "robotops@feat-sim",
+      "compose_project": "robotops_feat_sim_55cc",
+      "running": true,
+      "status": "running",
+      "startable": true,
+      "source": "current",
+      "last_seen_at": "2026-06-04T09:00:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/robotops.git",
+      "worktree_root_title": "robotops linked .git"
+    },
+    {
+      "id": "wt-robotops-feat-calibration",
+      "repo_id": "55cc66dd77ee",
+      "repo_name": "robotops",
+      "branch": "feat-calibration",
+      "worktree": "/home/ylang/ylangs_ws/robotops@wt/robotops@feat-calibration",
+      "worktree_title": "robotops@feat-calibration",
+      "compose_project": "",
+      "running": false,
+      "status": "stopped",
+      "startable": true,
+      "source": "current",
+      "last_seen_at": "2026-06-04T08:10:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/robotops.git",
+      "worktree_root_title": "robotops linked .git"
+    },
+    {
+      "id": "wt-robotops-history-main",
+      "repo_id": "55cc66dd77ee",
+      "repo_name": "robotops",
+      "branch": "main",
+      "worktree": "/home/ylang/ylangs_ws/archive/robotops@main",
+      "worktree_title": "robotops@main",
+      "compose_project": "",
+      "running": false,
+      "status": "stopped",
+      "startable": true,
+      "source": "history",
+      "last_seen_at": "2026-05-29T13:30:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/robotops.git",
+      "worktree_root_title": "robotops linked .git"
+    },
+    {
+      "id": "wt-robotops-history-hotfix",
+      "repo_id": "55cc66dd77ee",
+      "repo_name": "robotops",
+      "branch": "hotfix-controller-timeout",
+      "worktree": "/home/ylang/ylangs_ws/archive/robotops@hotfix-controller-timeout",
+      "worktree_title": "robotops@hotfix-controller-timeout",
+      "compose_project": "",
+      "running": false,
+      "status": "stopped",
+      "startable": true,
+      "source": "history",
+      "last_seen_at": "2026-05-28T09:15:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/robotops.git",
+      "worktree_root_title": "robotops linked .git"
+    },
+    {
+      "id": "wt-pcb-tools-feat",
+      "repo_id": "88aa99bb00cc",
+      "repo_name": "pcb-tools",
+      "branch": "feat-kicad-browser",
+      "worktree": "/home/ylang/ylangs_ws/pcb-tools@wt/pcb-tools@feat-kicad-browser",
+      "worktree_title": "pcb-tools@feat-kicad-browser",
+      "compose_project": "",
+      "running": false,
+      "status": "stopped",
+      "startable": true,
+      "source": "current",
+      "last_seen_at": "2026-06-04T07:00:00+00:00",
+      "worktree_root": "/home/ylang/linked-git/pcb-tools.git",
+      "worktree_root_title": "pcb-tools linked .git"
+    },
+    {
+      "id": "wt-browserdeck-clone-dev",
+      "repo_id": "a2b2a254990e",
+      "repo_name": "browserdeck",
+      "branch": "dev-clone",
+      "worktree": "/home/ylang/ylangs_ws/browserdeck-clone@wt/browserdeck@dev-clone",
+      "worktree_title": "browserdeck@dev-clone",
+      "worktree_root": "/home/ylang/linked-git/browserdeck-clone.git",
+      "worktree_root_title": "browserdeck clone linked .git",
+      "compose_project": "browserdeck_clone_dev_7f21",
+      "running": true,
+      "status": "running",
+      "startable": true,
+      "source": "current",
+      "last_seen_at": "2026-06-04T09:00:00+00:00"
+    }
+  ]
+}

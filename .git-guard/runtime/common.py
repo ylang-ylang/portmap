@@ -53,8 +53,7 @@ class LocalPolicyTag:
 @dataclass(frozen=True)
 class BranchLogSettings:
     path: str
-    force_required: bool
-    is_directory: bool
+    force_diff_required: bool
 
 class HookReject(RuntimeError):
     def __init__(self, code: str, **context: Any) -> None:

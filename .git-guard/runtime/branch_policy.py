@@ -8,19 +8,19 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .branch_logs import enforce_branch_log_target_invariant
+    from .branch_logs import enforce_branch_log_update
     from .common import HookReject, RefUpdate, SourceCandidate, ZERO, warn
     from .config import config_bool
-    from .git_ops import first_matching, git, has_non_first_parent, is_ancestor, is_first_parent_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from .git_ops import first_matching, git, is_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from .policy import is_allowed_branch_ref, required_target_refs, rule_targets_ref
     from .state import enforce_pending_lock, enforce_pending_tag_lock, load_state, save_state
     from .submodule_policy import enforce_submodule_main_guard
     from .tag_policy import clear_satisfied_pending_tags, latest_reachable_release_tag, update_pending_tags, validate_tag
 except ImportError:  # pragma: no cover - installed hook script mode
-    from branch_logs import enforce_branch_log_target_invariant
+    from branch_logs import enforce_branch_log_update
     from common import HookReject, RefUpdate, SourceCandidate, ZERO, warn
     from config import config_bool
-    from git_ops import first_matching, git, has_non_first_parent, is_ancestor, is_first_parent_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from git_ops import first_matching, git, is_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from policy import is_allowed_branch_ref, required_target_refs, rule_targets_ref
     from state import enforce_pending_lock, enforce_pending_tag_lock, load_state, save_state
     from submodule_policy import enforce_submodule_main_guard
@@ -44,6 +44,7 @@ def validate_prepared(repo: Path, policy: dict[str, Any], config: dict[str, Any]
 
         if update.ref.startswith("refs/heads/"):
             validate_branch_name(policy, update.ref)
+            enforce_branch_log_update(repo, policy, config, update)
 
         enforce_pending_lock(repo, pending, update)
         enforce_pending_tag_lock(repo, policy, pending_tags, update)
@@ -213,7 +214,6 @@ def validate_managed_branch_update(
     for source_ref in introduced_policy_branch_heads(repo, policy, update):
         rule = merge_rule_for_source(policy, source_ref, update.ref)
         if rule:
-            enforce_branch_log_target_invariant(repo, config, update)
             continue
         raise HookReject(
             "MANAGED_BRANCH_SOURCE_NOT_ALLOWED",
@@ -280,7 +280,6 @@ def validate_protected_target_update(
 
     candidate = candidates[0]
     enforce_sync_merge_required(repo, candidate, update)
-    enforce_branch_log_target_invariant(repo, config, update)
 
     required = required_target_refs(policy, candidate.rule["source"])
     if len(required) <= 1:
@@ -321,9 +320,7 @@ def source_candidates_for_target(repo: Path, policy: dict[str, Any], update: Ref
 def enforce_sync_merge_required(repo: Path, candidate: SourceCandidate, update: RefUpdate) -> None:
     if not candidate.rule.get("sync_merge_required"):
         return
-    if is_first_parent_ancestor(repo, update.old, candidate.sha):
-        return
-    if has_non_first_parent(repo, candidate.sha, update.old):
+    if is_ancestor(repo, update.old, candidate.sha):
         return
     raise HookReject(
         "SYNC_MERGE_REQUIRED",

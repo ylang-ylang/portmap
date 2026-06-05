@@ -1,0 +1,28 @@
+# feat/vite-catalog-ui
+
+<!-- git-guard: ref=refs/heads/feat/vite-catalog-ui -->
+
+- Move the catalog frontend into a Vite app with dev, build, and preview
+  scripts.
+- Build Vite output into `src/portmap/catalog_static/` so the Python catalog
+  server can continue serving packaged static assets.
+- Change the catalog hierarchy to collapsible project groups containing
+  collapsible branch groups.
+- Merge Split DNS setup and unset commands into one utility panel.
+- Open catalog links in a new browser tab with `noopener noreferrer`.
+- Add a Vite mock catalog mode for quickly previewing the project/branch UI
+  without running Docker services.
+- Add a mock Docker Compose entrypoint that exposes the Vite mock UI on host
+  port `81`.
+- Migrate the catalog UI from hand-written DOM construction to small React
+  components with explicit chevron toggles for project and branch panels.
+- Keep branch detail rows compact by removing repeated worktree display from
+  branch summaries and endpoint tables.
+- Remove worktree from branch endpoint tables and branch header counts because
+  it repeats context and consumes too much scan width.
+- Add a compact action log so both restart and down actions leave visible
+  running, success, and failure feedback in the catalog UI.
+- Move DNS probe feedback into a compact status badge beside the page title and
+  keep the collapsed Split DNS command block in normal multi-line shell format.
+- Document that user-facing endpoints such as frontend, desktop, browser, and
+  WebRTC entries should be placed first in generated project onboarding docs.

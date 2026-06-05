@@ -10,7 +10,7 @@ from .config import load_endpoint_declarations
 from .errors import ComposeError
 from .model import ComposeConfig, EndpointDeclaration, EndpointKind, GenerateRequest
 from .ports import PortAllocator
-from .repo_identity import RepoIdentity, git_branch, resolve_repo_identity
+from .repo_identity import RepoIdentity, git_branch, resolve_repo_identity, stable_hash
 from .slug import route_id, slugify
 from .yaml_writer import dump_yaml
 
@@ -51,12 +51,23 @@ class GeneratedPlan:
             dump_yaml(self.compose_override),
             encoding="utf-8",
         )
+        state_file = out_dir / "state.json"
+        state_file.write_text(json.dumps(self.metadata(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
         (out_dir / "registry.json").unlink(missing_ok=True)
-        traefik_file = out_dir / "traefik.generated.yml"
-        if self.traefik_static.get("entryPoints"):
-            traefik_file.write_text(dump_yaml(self.traefik_static), encoding="utf-8")
-        else:
-            traefik_file.unlink(missing_ok=True)
+        (out_dir / "traefik.generated.yml").unlink(missing_ok=True)
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "repo_id": self.repo_identity.repo_id,
+            "repo_name": self.repo_identity.display_name,
+            "branch": self.branch,
+            "compose_project": self.compose_project,
+            "endpoints": {
+                endpoint.name: endpoint_state(endpoint)
+                for endpoint in self.endpoints
+            },
+        }
 
 
 def generate_plan(request: GenerateRequest) -> GeneratedPlan:
@@ -73,26 +84,30 @@ def generate_plan(request: GenerateRequest) -> GeneratedPlan:
         repo_name=request.repo_name,
     )
     branch = slugify(request.branch or git_branch(identity.git_root or request.project_directory) or "detached")
-    allocator = PortAllocator(request.out_dir / "state.json", host_ip=request.host_ip)
-    planned = tuple(
-        plan_endpoint(
-            endpoint=endpoint,
-            compose=compose,
-            identity=identity,
-            branch=branch,
-            request=request,
-            allocator=allocator,
+    compose_project = request.compose_project or default_compose_project(identity, branch, request.project_directory)
+    local_allocation_state = request.allocation_state_file is None
+    allocator = PortAllocator(request.allocation_state_file or request.out_dir / "allocations.json", host_ip=request.host_ip)
+    with allocator:
+        planned = tuple(
+            plan_endpoint(
+                endpoint=endpoint,
+                compose=compose,
+                identity=identity,
+                branch=branch,
+                request=request,
+                allocator=allocator,
+            )
+            for endpoint in endpoints
         )
-        for endpoint in endpoints
-    )
-    if any(endpoint.kind != EndpointKind.HTTP for endpoint in planned):
-        allocator.save()
-    else:
-        allocator.state_file.unlink(missing_ok=True)
+        if any(endpoint.kind != EndpointKind.HTTP for endpoint in planned):
+            allocator.save()
+        elif local_allocation_state and allocator.state_file is not None:
+            allocator.state_file.unlink(missing_ok=True)
     compose_override = build_compose_override(
         planned,
         compose=compose,
         gateway_network=request.gateway_network,
+        container_dns_server=request.container_dns_server,
     )
     traefik_static = build_traefik_static(planned)
     registry = build_registry(
@@ -109,7 +124,7 @@ def generate_plan(request: GenerateRequest) -> GeneratedPlan:
         endpoints=planned,
         repo_identity=identity,
         branch=branch,
-        compose_project=compose.name,
+        compose_project=compose_project,
     )
 
 
@@ -125,6 +140,7 @@ def plan_endpoint(
     if endpoint.service not in compose.services:
         raise ComposeError(f"endpoint {endpoint.name!r} references unknown service: {endpoint.service}")
 
+    instance = instance_slug(identity=identity, branch=branch, project_directory=request.project_directory)
     router = route_id(identity.display_name, branch, endpoint.name)
     traefik_service = router
     service = compose.services[endpoint.service]
@@ -172,14 +188,14 @@ def plan_endpoint(
         protocol = endpoint.protocol or "udp"
         entry_host_port = allocator.allocate(
             protocol=protocol,
-            key=f"{identity.repo_id}:{branch}:{endpoint.name}:{protocol}:entry",
+            key=f"{instance}:{endpoint.name}:{protocol}:entry",
             preferred=endpoint.host_port,
             start=request.udp_port_start if protocol == "udp" else request.tcp_port_start,
         )
         range_size = endpoint.range_size or 1
         range_start, range_end = allocator.allocate_range(
             protocol=protocol,
-            key=f"{identity.repo_id}:{branch}:{endpoint.name}:{protocol}:range",
+            key=f"{instance}:{endpoint.name}:{protocol}:range",
             preferred_start=endpoint.range_start,
             start=request.range_port_start,
             size=range_size,
@@ -216,35 +232,21 @@ def plan_endpoint(
         )
 
     protocol = "udp" if endpoint.kind == EndpointKind.UDP else "tcp"
+    labels = portmap_service_labels(identity, branch, request)
     port_start = request.udp_port_start if protocol == "udp" else request.tcp_port_start
-    allocation_key = f"{identity.repo_id}:{branch}:{endpoint.name}:{protocol}"
+    allocation_key = f"{instance}:{endpoint.name}:{protocol}"
     host_port = allocator.allocate(
         protocol=protocol,
         key=allocation_key,
         preferred=endpoint.host_port,
         start=port_start,
     )
-    entrypoint = route_id(endpoint.name, identity.display_name, branch)
-    if protocol == "udp":
-        labels += (
-            f"traefik.udp.routers.{router}.entrypoints={entrypoint}",
-            f"traefik.udp.routers.{router}.service={traefik_service}",
-            f"traefik.udp.services.{traefik_service}.loadbalancer.server.port={endpoint.container_port}",
-        )
-    else:
-        labels += (
-            f"traefik.tcp.routers.{router}.entrypoints={entrypoint}",
-            f"traefik.tcp.routers.{router}.rule=HostSNI(`*`)",
-            f"traefik.tcp.routers.{router}.service={traefik_service}",
-            f"traefik.tcp.services.{traefik_service}.loadbalancer.server.port={endpoint.container_port}",
-        )
     labels += portmap_endpoint_labels(
         router=router,
         endpoint=endpoint,
         fields={
             "host": request.host_ip,
             "host_port": str(host_port),
-            "entrypoint": entrypoint,
             "protocol": protocol,
         },
     )
@@ -257,8 +259,8 @@ def plan_endpoint(
         service_name=traefik_service,
         host_ip=request.host_ip,
         host_port=host_port,
-        entrypoint=entrypoint,
         protocol=protocol,
+        ports=(f"{host_port}:{endpoint.container_port}/{protocol}",),
         labels=labels,
     )
 
@@ -321,14 +323,58 @@ def default_http_host(endpoint: str, branch: str, repo_name: str, domain_suffix:
     )
 
 
+def endpoint_state(endpoint: PlannedEndpoint) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "kind": endpoint.kind.value,
+        "service": endpoint.service,
+        "container_port": endpoint.container_port,
+    }
+    if endpoint.host is not None:
+        state["host"] = endpoint.host
+    if endpoint.url is not None:
+        state["url"] = endpoint.url
+    if endpoint.host_ip is not None:
+        state["host"] = endpoint.host_ip
+    if endpoint.host_port is not None:
+        state["host_port"] = endpoint.host_port
+    if endpoint.protocol is not None:
+        state["protocol"] = endpoint.protocol
+    if endpoint.range_start is not None and endpoint.range_end is not None:
+        state["range"] = {
+            "min_port": endpoint.range_start,
+            "max_port": endpoint.range_end,
+        }
+    return state
+
+
+def instance_slug(*, identity: RepoIdentity, branch: str, project_directory: Path) -> str:
+    worktree_hash = stable_hash(str(project_directory.resolve()))[:8]
+    return route_id(identity.repo_id, branch, worktree_hash)
+
+
+def default_compose_project(identity: RepoIdentity, branch: str, project_directory: Path) -> str:
+    worktree_hash = stable_hash(str(project_directory.resolve()))[:8]
+    value = route_id(identity.display_name, branch, identity.repo_id[:8], worktree_hash)
+    normalized = value.replace("-", "_")
+    if not normalized[0].isalnum():
+        normalized = f"p_{normalized}"
+    return normalized[:63].rstrip("_-") or "portmap_project"
+
+
 def build_compose_override(
     planned: tuple[PlannedEndpoint, ...],
     *,
     compose: ComposeConfig,
     gateway_network: str,
+    container_dns_server: str | None = None,
 ) -> dict[str, Any]:
     services: dict[str, Any] = {}
     managed_service_names = tuple(dict.fromkeys(endpoint.service for endpoint in planned))
+    gateway_service_names = {
+        endpoint.service
+        for endpoint in planned
+        if endpoint.kind == EndpointKind.HTTP
+    }
     environment = portmap_environment(planned)
     for endpoint in planned:
         service_config = services.setdefault(endpoint.service, {})
@@ -341,24 +387,31 @@ def build_compose_override(
             for port in endpoint.ports:
                 if port not in ports:
                     ports.append(port)
-        service_config["networks"] = service_networks_with_gateway(
-            compose=compose,
-            service_name=endpoint.service,
-            gateway_network=gateway_network,
-        )
+        if endpoint.service in gateway_service_names:
+            service_config["networks"] = service_networks_with_gateway(
+                compose=compose,
+                service_name=endpoint.service,
+                gateway_network=gateway_network,
+            )
     for service_name in managed_service_names:
         service_config = services.setdefault(service_name, {})
+        if container_dns_server:
+            dns = service_config.setdefault("dns", [])
+            if container_dns_server not in dns:
+                dns.append(container_dns_server)
         service_environment = service_config.setdefault("environment", {})
         service_environment.update(environment)
-    return {
+    override: dict[str, Any] = {
         "services": services,
-        "networks": {
+    }
+    if gateway_service_names:
+        override["networks"] = {
             gateway_network: {
                 "external": True,
                 "name": gateway_network,
             }
-        },
-    }
+        }
+    return override
 
 
 def portmap_environment(planned: tuple[PlannedEndpoint, ...]) -> dict[str, str]:
@@ -405,13 +458,7 @@ def service_networks_with_gateway(
 
 
 def build_traefik_static(planned: tuple[PlannedEndpoint, ...]) -> dict[str, Any]:
-    entrypoints: dict[str, Any] = {}
-    for endpoint in planned:
-        if endpoint.kind in {EndpointKind.HTTP, EndpointKind.RANGE} or endpoint.entrypoint is None or endpoint.host_port is None:
-            continue
-        suffix = "/udp" if endpoint.kind == EndpointKind.UDP else "/tcp"
-        entrypoints[endpoint.entrypoint] = {"address": f":{endpoint.host_port}{suffix}"}
-    return {"entryPoints": entrypoints}
+    return {"entryPoints": {}}
 
 
 def build_registry(
@@ -455,7 +502,7 @@ def build_registry(
                 "instances": {
                     branch: {
                         "worktree": str(request.project_directory.resolve()),
-                        "compose_project": compose.name,
+                        "compose_project": request.compose_project or default_compose_project(identity, branch, request.project_directory),
                         "endpoints": endpoint_entries,
                     }
                 },

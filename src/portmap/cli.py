@@ -8,12 +8,24 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .compose_takeover import plan_docker_compose_command, shell_hook
+from .broker import allocation_state_file as env_allocation_state_file
+from .broker import domain_suffix as env_domain_suffix
+from .broker import ensure_generated_override, host_ip as env_host_ip
+from .broker import int_env
+from .broker_shim import (
+    broker_shim_status,
+    docker_config_dir,
+    install_compose_plugin_shim,
+    uninstall_compose_plugin_shim,
+)
+from .compose_takeover import plan_docker_compose_command
 from .errors import PortmapError
+from .host_dns import DEFAULT_RESOLVED_CONF_DIR, set_resolved_dropin, unset_resolved_dropin
 from .model import GenerateRequest
 from .planner import generate_plan
 from .registry import get_instance, list_repos, read_catalog, read_registry
 from .scaffold import ensure_portmap_support_files, init_portmap
+from .settings import load_portmap_settings
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -54,13 +66,82 @@ def build_parser() -> argparse.ArgumentParser:
     docker_compose.add_argument("compose_args", nargs=argparse.REMAINDER)
     docker_compose.set_defaults(func=cmd_docker_compose)
 
-    hook = subparsers.add_parser("shell-hook", help="print shell functions for optional host docker compose takeover")
-    hook.add_argument(
-        "--compose-takeover",
-        action="store_true",
-        help="enable docker compose takeover by default in the emitted shell hook",
+    gateway = subparsers.add_parser(
+        "gateway",
+        help="run the shared gateway compose from portmap.toml settings",
     )
-    hook.set_defaults(func=cmd_shell_hook)
+    gateway.add_argument(
+        "compose_args",
+        nargs=argparse.REMAINDER,
+        help="docker compose arguments; defaults to 'up -d'",
+    )
+    gateway.set_defaults(func=cmd_gateway)
+
+    dns = subparsers.add_parser("dns", help="manage host split DNS for portmap domains")
+    dns_subparsers = dns.add_subparsers(dest="dns_command", required=True)
+
+    dns_set = dns_subparsers.add_parser("set", help="install systemd-resolved split DNS drop-in")
+    dns_set.add_argument("--dns-server", help="DNS server IP; defaults to the effective portmap DNS bind")
+    dns_set.add_argument("--domain", help="DNS domain; defaults to the configured portmap DNS domain")
+    dns_set.add_argument(
+        "--resolved-conf-dir",
+        "--config-dir",
+        dest="config_dir",
+        type=Path,
+        default=DEFAULT_RESOLVED_CONF_DIR,
+        help="systemd-resolved drop-in directory",
+    )
+    dns_set.add_argument("--no-restart", action="store_true", help="do not restart systemd-resolved")
+    dns_set.add_argument("--no-sudo", action="store_true", help="write directly instead of invoking sudo")
+    dns_set.set_defaults(func=cmd_dns_set)
+
+    dns_unset = dns_subparsers.add_parser("unset", help="remove systemd-resolved split DNS drop-in")
+    dns_unset.add_argument("--domain", help="DNS domain; defaults to the configured portmap DNS domain")
+    dns_unset.add_argument(
+        "--resolved-conf-dir",
+        "--config-dir",
+        dest="config_dir",
+        type=Path,
+        default=DEFAULT_RESOLVED_CONF_DIR,
+        help="systemd-resolved drop-in directory",
+    )
+    dns_unset.add_argument("--no-restart", action="store_true", help="do not restart systemd-resolved")
+    dns_unset.add_argument("--no-sudo", action="store_true", help="remove directly instead of invoking sudo")
+    dns_unset.set_defaults(func=cmd_dns_unset)
+
+    broker = subparsers.add_parser("broker", help="manage non-shell docker compose broker integration")
+    broker_subparsers = broker.add_subparsers(dest="broker_command", required=True)
+
+    broker_install = broker_subparsers.add_parser("install", help="install docker compose plugin shim")
+    broker_install.add_argument(
+        "--method",
+        choices=("docker-plugin",),
+        default="docker-plugin",
+        help="broker integration method",
+    )
+    broker_install.add_argument("--docker-config", type=Path, default=docker_config_dir())
+    broker_install.add_argument("--real-compose", type=Path)
+    broker_install.add_argument("--portmap-root", type=Path)
+    broker_install.add_argument("--force", action="store_true", help="overwrite an existing non-portmap plugin shim")
+    broker_install.set_defaults(func=cmd_broker_install)
+
+    broker_uninstall = broker_subparsers.add_parser("uninstall", help="remove docker compose plugin shim")
+    broker_uninstall.add_argument(
+        "--method",
+        choices=("docker-plugin",),
+        default="docker-plugin",
+        help="broker integration method",
+    )
+    broker_uninstall.add_argument("--docker-config", type=Path, default=docker_config_dir())
+    broker_uninstall.set_defaults(func=cmd_broker_uninstall)
+
+    broker_status = broker_subparsers.add_parser("status", help="print docker compose plugin shim status")
+    broker_status.add_argument("--docker-config", type=Path, default=docker_config_dir())
+    broker_status.set_defaults(func=cmd_broker_status)
+
+    broker_doctor = broker_subparsers.add_parser("doctor", help="print broker diagnostic status")
+    broker_doctor.add_argument("--docker-config", type=Path, default=docker_config_dir())
+    broker_doctor.set_defaults(func=cmd_broker_status)
 
     generate = subparsers.add_parser("generate", help="generate compose override and registry files")
     generate.add_argument("--compose-file", type=Path, default=Path("docker-compose.yml"))
@@ -72,13 +153,16 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--repo-root", type=Path)
     generate.add_argument("--repo-id")
     generate.add_argument("--repo-name")
-    generate.add_argument("--http-port", type=int, default=8080)
-    generate.add_argument("--tcp-port-start", type=int, default=18000)
-    generate.add_argument("--udp-port-start", type=int, default=19000)
-    generate.add_argument("--range-port-start", type=int, default=49160)
-    generate.add_argument("--host-ip", default="127.0.0.1")
-    generate.add_argument("--domain-suffix", default="debug.local")
-    generate.add_argument("--gateway-network", default="portmap_gateway")
+    generate_defaults = env_generate_defaults()
+    generate.add_argument("--http-port", type=int, default=generate_defaults["http_port"])
+    generate.add_argument("--tcp-port-start", type=int, default=generate_defaults["tcp_port_start"])
+    generate.add_argument("--udp-port-start", type=int, default=generate_defaults["udp_port_start"])
+    generate.add_argument("--range-port-start", type=int, default=generate_defaults["range_port_start"])
+    generate.add_argument("--host-ip", default=generate_defaults["host_ip"])
+    generate.add_argument("--domain-suffix", default=generate_defaults["domain_suffix"])
+    generate.add_argument("--gateway-network", default=generate_defaults["gateway_network"])
+    generate.add_argument("--allocation-state-file", type=Path, default=generate_defaults["allocation_state_file"])
+    generate.add_argument("--compose-project")
     generate.set_defaults(func=cmd_generate)
 
     list_cmd = subparsers.add_parser("list", help="list repos in a registry")
@@ -119,18 +203,89 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_docker_compose(args: argparse.Namespace) -> int:
-    plan = plan_docker_compose_command(args.compose_args, cwd=Path.cwd())
-    if plan.injected:
+    ensure_result = ensure_generated_override(args.compose_args, cwd=Path.cwd(), environ=os.environ)
+    if ensure_result.generated:
         print(
-            "portmap: docker compose takeover active; using "
-            f"-f {plan.compose_file} -f {plan.override_file}",
+            "portmap: generated compose override "
+            f"out_dir={ensure_result.out_dir} compose_project={ensure_result.compose_project}",
             file=sys.stderr,
         )
-    return subprocess.run(plan.command, check=False).returncode
+    plan = plan_docker_compose_command(args.compose_args, cwd=Path.cwd())
+    if plan.injected:
+        project_hint = f" -p {plan.compose_project}" if plan.compose_project else ""
+        print(
+            "portmap: docker compose takeover active; using"
+            f"{project_hint} -f {plan.compose_file} -f {plan.override_file}",
+            file=sys.stderr,
+        )
+    env = os.environ.copy()
+    env["PORTMAP_BROKER_BYPASS"] = "1"
+    return subprocess.run(plan.command, check=False, env=env).returncode
 
 
-def cmd_shell_hook(args: argparse.Namespace) -> int:
-    print(shell_hook(compose_takeover=args.compose_takeover, env_file=Path.cwd() / ".env"), end="")
+def cmd_gateway(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    compose_args = strip_remainder(args.compose_args) or ["up", "-d"]
+    env = os.environ.copy()
+    env.update(settings.gateway_env())
+    env["PORTMAP_ROOT"] = str(settings.root)
+    env["PORTMAP_BROKER_BYPASS"] = "1"
+    command = [
+        "docker",
+        "compose",
+        "-f",
+        str(settings.root / "docker-compose.yml"),
+        *compose_args,
+    ]
+    return subprocess.run(command, check=False, env=env).returncode
+
+
+def cmd_dns_set(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    result = set_resolved_dropin(
+        dns_server=args.dns_server or settings.effective_dns_bind,
+        dns_domain=args.domain or settings.dns_domain,
+        dns_port=settings.dns_port,
+        config_dir=args.config_dir,
+        restart=not args.no_restart,
+        use_sudo=not args.no_sudo,
+    )
+    print_json(result.as_dict())
+    return 0
+
+
+def cmd_dns_unset(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    result = unset_resolved_dropin(
+        dns_domain=args.domain or settings.dns_domain,
+        config_dir=args.config_dir,
+        restart=not args.no_restart,
+        use_sudo=not args.no_sudo,
+    )
+    print_json(result.as_dict())
+    return 0
+
+
+def cmd_broker_install(args: argparse.Namespace) -> int:
+    status = install_compose_plugin_shim(
+        docker_config=args.docker_config.expanduser(),
+        real_compose=args.real_compose.expanduser() if args.real_compose else None,
+        portmap_root=args.portmap_root.expanduser() if args.portmap_root else None,
+        force=args.force,
+    )
+    print_json(status.as_dict())
+    return 0
+
+
+def cmd_broker_uninstall(args: argparse.Namespace) -> int:
+    status = uninstall_compose_plugin_shim(docker_config=args.docker_config.expanduser())
+    print_json(status.as_dict())
+    return 0
+
+
+def cmd_broker_status(args: argparse.Namespace) -> int:
+    status = broker_shim_status(docker_config=args.docker_config.expanduser())
+    print_json(status.as_dict())
     return 0
 
 
@@ -159,6 +314,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
         host_ip=args.host_ip,
         domain_suffix=args.domain_suffix,
         gateway_network=args.gateway_network,
+        container_dns_server=load_portmap_settings(environ=os.environ).effective_dns_bind,
+        allocation_state_file=args.allocation_state_file,
+        compose_project=args.compose_project,
     )
     plan = generate_plan(request)
     plan.write(out_dir)
@@ -226,6 +384,26 @@ def resolve_compose_file(project_dir: Path, compose_file: Path | None) -> Path:
         if candidate.exists():
             return candidate
     return project_dir / "docker-compose.yml"
+
+
+def env_generate_defaults() -> dict[str, Any]:
+    settings = load_portmap_settings(environ=os.environ)
+    return {
+        "http_port": int_env(os.environ, "PORTMAP_HTTP_PORT", settings.http_port),
+        "tcp_port_start": int_env(os.environ, "PORTMAP_TCP_PORT_START", settings.tcp_port_start),
+        "udp_port_start": int_env(os.environ, "PORTMAP_UDP_PORT_START", settings.udp_port_start),
+        "range_port_start": int_env(os.environ, "PORTMAP_RANGE_PORT_START", settings.range_port_start),
+        "host_ip": env_host_ip(os.environ),
+        "domain_suffix": env_domain_suffix(os.environ),
+        "gateway_network": settings.gateway_network,
+        "allocation_state_file": env_allocation_state_file(os.environ),
+    }
+
+
+def strip_remainder(args: list[str]) -> list[str]:
+    if args and args[0] == "--":
+        return args[1:]
+    return args
 
 
 if __name__ == "__main__":

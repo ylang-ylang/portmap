@@ -1,0 +1,34 @@
+# Portmap endpoint declarations.
+#
+# This file is the project-local source of truth for the services that portmap
+# may expose. Replace the examples below with real docker-compose service names
+# and container-internal ports.
+#
+# Endpoint kinds:
+# - http: HTTP, WebSocket, SSE, CDP, WebRTC signaling
+# - tcp: raw TCP such as MQTT, Redis, Postgres
+# - udp: raw UDP with one fixed port
+# - range: one entry port plus a runtime-selected data/media port range
+#
+# HTTP example:
+#
+# [endpoints.frontend]
+# kind = "http"
+# service = "frontend"
+# container_port = 5173
+#
+# Raw TCP example:
+#
+# [endpoints.mqtt]
+# kind = "tcp"
+# service = "mqtt"
+# container_port = 1883
+#
+# Dynamic range example, such as project-owned coturn:
+#
+# [endpoints.turn]
+# kind = "range"
+# service = "coturn"
+# container_port = 3478
+# protocol = "udp"
+# range_size = 40

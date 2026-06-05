@@ -6,7 +6,8 @@ The tool is a control plane, not a traffic proxy. Its default data plane is
 Traefik.
 
 It maps branch/worktree instances to generated Docker Compose overlays,
-Traefik labels, Traefik entrypoints, and a CLI-queryable endpoint registry.
+Traefik HTTP labels, Docker direct port mappings, and a CLI-queryable endpoint
+registry.
 
 It deliberately does not manage project runtime capability such as GPU,
 browser image contents, Playwright workflows, MCP business tools, frontend
@@ -19,9 +20,11 @@ Those belong to the project or the agent workflow.
 
 - inspect rendered Docker Compose services, ports, expose entries, and labels
 - generate branch-scoped Docker Compose override files
-- generate Traefik labels for HTTP/TCP/UDP endpoints
-- generate Traefik entrypoints for raw TCP/UDP endpoints
+- generate Traefik labels for HTTP endpoints
+- generate Docker direct port mappings for raw TCP/UDP and range endpoints
 - allocate non-conflicting raw TCP/UDP host ports
+- keep per-worktree generated state in `.portmap/state.json`
+- keep host-wide raw/range port allocation state in an allocation pool
 - write a local endpoint registry for CLI queries
 - clean up generated routes, ports, and instance state
 
@@ -68,8 +71,8 @@ container_port = 3478
 From that declaration the tool can generate:
 
 - `docker-compose.override.generated.yml`
+- `state.json` for this branch/worktree's generated compose project and endpoints
 - raw TCP/UDP allocation state only when raw endpoints need host ports
-- extra Traefik static data only when raw TCP/UDP entrypoints are needed
 
 For HTTP-only projects, `.portmap/` can stay minimal:
 
@@ -77,6 +80,7 @@ For HTTP-only projects, `.portmap/` can stay minimal:
 .portmap/
   endpoints.toml
   docker-compose.override.generated.yml
+  state.json
 ```
 
 The running service catalog is derived from Docker labels at the shared
@@ -91,30 +95,48 @@ that endpoint. If a service needs a specific upstream Host, set
 
 ## CLI
 
+Install the local checkout as a `uv` tool so other repos can call the short
+`portmap` command:
+
+```bash
+uv tool install --editable /home/ylang/ylangs_ws/portmap@wt/portmap@dev --force
+```
+
 Start the shared gateway once:
 
 ```bash
-cp .env.example .env
-docker compose -f docker-compose.gateway.yml up -d
+portmap gateway up -d
 ```
 
 This creates the `portmap_gateway` Docker network and exposes:
 
 ```text
-Catalog: http://192.168.201.52
-Traefik: http://192.168.201.52:8080
-DNS:     192.168.201.52:53
+Catalog: http://<detected-host-ip>
+Traefik: http://<detected-host-ip>:8080
+DNS:     <detected-host-ip>:53
 ```
 
-CoreDNS answers every `*.debug.lan` A record with `192.168.201.52`.
-Configure development machines with split DNS so only `debug.lan` queries go
-to this DNS server.
+CoreDNS answers every `*.debug.lan` A record with the detected host LAN IP.
+Other DNS queries are forwarded to the configured upstream resolver, defaulting
+to `/etc/resolv.conf`, so portmap-managed containers can still resolve public
+domains after their DNS is pointed at portmap. Configure development machines
+with split DNS so only `debug.lan` queries go to this DNS server.
+
+Gateway runtime settings are tracked in the portmap repo root:
+
+```text
+portmap.toml
+```
+
+`portmap gateway` reads that file directly and detects the current host LAN IP
+at runtime. The detected IP is used for DNS answers and raw/range endpoint
+advertisement, so the LAN IP does not need to be stored in config.
 
 Configure split DNS on a Linux development machine without manually looking up
 the network interface:
 
 ```bash
-DNS_SERVER=192.168.201.52
+DNS_SERVER=<detected-host-ip>
 DNS_DOMAIN=debug.lan
 DNS_IFACE="$(ip route get "$DNS_SERVER" | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
 
@@ -124,11 +146,53 @@ resolvectl query "portmap.$DNS_DOMAIN"
 curl -I "http://portmap.$DNS_DOMAIN/"
 ```
 
-The catalog page lists currently visible `portmap`/Traefik-managed services and
-their generated endpoints. The JSON form is available at:
+On machines where the active network stack is not managed by
+`systemd-networkd`, the per-link `resolvectl dns` and `resolvectl domain`
+commands may fail with:
 
 ```text
-http://192.168.201.52/registry.json
+Failed to set DNS configuration: Unit dbus-org.freedesktop.network1.service not found.
+Failed to set domain configuration: Unit dbus-org.freedesktop.network1.service not found.
+```
+
+That failure does not mean portmap DNS is broken. It means the host cannot
+accept per-link DNS settings through `resolvectl`. Do not install or enable
+`systemd-networkd` solely for portmap on a machine already managed by another
+network stack, such as NetworkManager. Configure a host-level
+`systemd-resolved` drop-in instead. The CLI can install and remove this drop-in:
+
+```bash
+portmap dns set
+portmap dns unset
+```
+
+The equivalent manual setup is:
+
+```bash
+DNS_SERVER=<detected-host-ip>
+DNS_DOMAIN=debug.lan
+
+sudo mkdir -p /etc/systemd/resolved.conf.d
+
+sudo tee /etc/systemd/resolved.conf.d/90-portmap-debug-lan.conf >/dev/null <<EOF
+[Resolve]
+DNS=$DNS_SERVER
+Domains=~$DNS_DOMAIN
+EOF
+
+sudo systemctl restart systemd-resolved
+resolvectl query "portmap.$DNS_DOMAIN"
+curl -I "http://portmap.$DNS_DOMAIN/"
+```
+
+The catalog page lists currently visible `portmap`/Traefik-managed services and
+their generated endpoints. Each visible compose project also has a `Down`
+button that removes its portmap-managed Docker Compose containers and networks
+by compose project label, which is useful when a worktree/repo path has moved.
+The JSON form is available at:
+
+```text
+http://<detected-host-ip>/registry.json
 ```
 
 Generate files for an external compose project:
@@ -153,58 +217,79 @@ use Docker bridge networking for managed services, declare endpoint kinds in
 with that override, and query the shared catalog for the assigned URLs and raw
 ports.
 
-After editing `.portmap/endpoints.toml`, generate files for the current
-branch/worktree:
+After editing `.portmap/endpoints.toml`, the recommended path is to let the
+Docker Compose broker regenerate files automatically:
 
 ```bash
-portmap generate \
-  --project-dir /path/to/project \
-  --compose-file /path/to/project/docker-compose.yml \
-  --config /path/to/project/.portmap/endpoints.toml \
-  --out-dir /path/to/project/.portmap \
-  --branch dev \
-  --repo-id my-repo \
-  --repo-name my-repo \
-  --domain-suffix debug.lan \
-  --gateway-network portmap_gateway
-```
-
-Then start the project with the generated override:
-
-```bash
-docker compose \
-  -f docker-compose.yml \
-  -f .portmap/docker-compose.override.generated.yml \
-  up -d
-```
-
-Optionally, let portmap broker host `docker compose` calls in the current
-shell:
-
-```bash
-source <(portmap shell-hook --compose-takeover)
 docker compose up -d
-docker compose ps
 ```
 
-The hook only intercepts `docker compose` when `PORTMAP_COMPOSE_TAKEOVER=1`.
-It does not affect `docker ps`, `docker run`, or compose commands that already
-specify `-f/--file`. Disable it in the current shell with:
-
-```bash
-portmap_compose_takeover_off
-```
-
-The main repo `.env.example` includes `PORTMAP_COMPOSE_TAKEOVER=0` as the
-default switch. When `portmap shell-hook` is run from the portmap repo, it reads
-the local `.env` and uses that value. The gateway containers do not consume it;
-it is for the optional shell hook only.
-
-Without a shell hook, the same broker can be called explicitly:
+The broker can also be called explicitly without shell integration:
 
 ```bash
 portmap docker-compose -- up -d
 ```
+
+For manual generation, `portmap generate` defaults to the current directory
+when paths are omitted:
+
+```bash
+portmap generate \
+  --compose-file docker-compose.yml \
+  --config .portmap/endpoints.toml \
+  --out-dir .portmap \
+  --branch "$(git branch --show-current)"
+```
+
+For transparent `docker compose ...` takeover, install the Docker Compose
+plugin shim. This works for interactive shells, scripts, and non-interactive
+agents such as Codex because it does not rely on `.zshrc` or shell functions:
+
+```bash
+portmap broker install --method docker-plugin
+docker compose up -d
+docker compose ps
+```
+
+The shim is installed at:
+
+```text
+~/.docker/cli-plugins/docker-compose
+```
+
+Docker CLI will call that plugin for `docker compose ...`. The shim forwards
+Docker plugin metadata to the real Compose plugin, strips Docker's plugin
+environment before forwarding, and calls `portmap docker-compose -- ...` only
+when takeover is enabled and the current directory contains `.portmap`.
+
+Inspect or remove the shim:
+
+```bash
+portmap broker status
+portmap broker uninstall
+```
+
+Safety switches:
+
+```text
+PORTMAP_COMPOSE_TAKEOVER=0  # disable takeover, forward to real compose
+PORTMAP_BROKER_BYPASS=1     # internal bypass to avoid recursive shim calls
+```
+
+The broker auto-generates `.portmap/docker-compose.override.generated.yml` and
+`.portmap/state.json` when `.portmap/endpoints.toml` exists. It also injects a
+branch/worktree-scoped compose project name unless the command already provides
+`-p/--project-name`.
+
+`state.json` is local to this worktree. The host-wide raw/range port pool is a
+separate file, defaulting to:
+
+```text
+~/.local/state/portmap/allocations.json
+```
+
+That allocation pool is shared so two branches cannot automatically pick the
+same host port before either container has bound it.
 
 The generated override adds managed services to `portmap_gateway` and writes
 Traefik Docker labels. The shared Traefik container discovers those labels
@@ -213,8 +298,111 @@ through the Docker socket.
 Query the shared catalog:
 
 ```bash
-curl http://192.168.201.52/registry.json
+curl http://<detected-host-ip>/registry.json
 portmap list
 portmap status
 portmap endpoints my-repo dev
 ```
+
+## Catalog Frontend
+
+The catalog UI is a Vite + React app. Source files live under:
+
+```text
+frontend/
+```
+
+Install frontend dependencies once:
+
+```bash
+npm install
+```
+
+Run the frontend dev server with hot reload:
+
+```bash
+npm run dev
+```
+
+Run the frontend with built-in mock catalog data:
+
+```bash
+PORTMAP_CATALOG_MOCK=1 npm run dev
+```
+
+Run the same mock UI from Docker Compose on host port `81`:
+
+```bash
+docker compose -f docker-compose.mock.yml up
+```
+
+Then open:
+
+```text
+http://<host-ip>:81/
+```
+
+By default the Vite server proxies `/registry.json`, `/actions/*`, `/healthz`,
+and `/readyz` to the catalog service at `http://127.0.0.1:80`. Override that
+target when the catalog is exposed somewhere else:
+
+```bash
+PORTMAP_CATALOG_TARGET=http://127.0.0.1:8081 npm run dev
+```
+
+Build the frontend into the Python package static directory:
+
+```bash
+npm run build
+```
+
+The build output is tracked in:
+
+```text
+src/portmap/catalog_static/
+```
+
+Mock mode serves `frontend/public/*` through Vite. Production mode serves the
+built files from `src/portmap/catalog_static/` through the Python catalog
+server. Root-level public assets such as `/favicon.svg`,
+`/manifest.webmanifest`, and `/robots.txt` must therefore be present in the
+built static directory and served by the Python catalog handler as root static
+assets, not only by the Vite dev server.
+
+## Integration Test Repo
+
+The repo includes a Python-managed integration fixture that creates a real Git
+worktree-style compose repo under the ignored `test_repo/` directory:
+
+```text
+test_repo/
+  mock-compose-app@wt/
+    mock-compose-app@main
+    mock-compose-app@dev
+    mock-compose-app@feat-all-endpoints
+  gateway/
+```
+
+The generated mock app has separate branches/worktrees and endpoint kinds:
+
+```text
+dev                -> HTTP endpoint
+feat/all-endpoints -> HTTP, TCP, UDP, and range endpoints
+```
+
+Run ordinary unit tests:
+
+```bash
+uv run --with pytest pytest
+```
+
+Run the real Docker response test:
+
+```bash
+PORTMAP_RUN_INTEGRATION=1 uv run --with pytest pytest tests/test_integration_test_repo.py -q
+```
+
+That integration test starts a temporary Traefik gateway and both worktree
+instances, then verifies actual HTTP, TCP, UDP, and range UDP responses with
+Python clients. The generated `test_repo/` directory is ignored by git and can
+be deleted at any time; the test will recreate it.

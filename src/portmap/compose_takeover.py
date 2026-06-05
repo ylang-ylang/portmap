@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ COMPOSE_FILENAMES = (
 )
 
 GENERATED_OVERRIDE = ".portmap/docker-compose.override.generated.yml"
+GENERATED_STATE = ".portmap/state.json"
 
 PASSTHROUGH_COMMANDS = {
     "completion",
@@ -26,6 +28,7 @@ class ComposeBrokerPlan:
     injected: bool
     compose_file: Path | None = None
     override_file: Path | None = None
+    compose_project: str | None = None
 
 
 def plan_docker_compose_command(args: list[str], *, cwd: Path) -> ComposeBrokerPlan:
@@ -38,10 +41,16 @@ def plan_docker_compose_command(args: list[str], *, cwd: Path) -> ComposeBrokerP
     if compose_file is None or not override_file.exists():
         return ComposeBrokerPlan(command=["docker", "compose", *clean_args], injected=False)
 
+    compose_project = generated_compose_project(cwd)
+    project_args = []
+    if compose_project and not has_explicit_project_name(clean_args):
+        project_args = ["-p", compose_project]
+
     return ComposeBrokerPlan(
         command=[
             "docker",
             "compose",
+            *project_args,
             "-f",
             str(compose_file),
             "-f",
@@ -51,6 +60,7 @@ def plan_docker_compose_command(args: list[str], *, cwd: Path) -> ComposeBrokerP
         injected=True,
         compose_file=compose_file,
         override_file=override_file,
+        compose_project=compose_project if project_args else None,
     )
 
 
@@ -84,6 +94,19 @@ def has_explicit_compose_file(args: list[str]) -> bool:
     return False
 
 
+def has_explicit_project_name(args: list[str]) -> bool:
+    for index, arg in enumerate(args):
+        if arg in {"-p", "--project-name"}:
+            return True
+        if arg.startswith("--project-name="):
+            return True
+        if arg.startswith("-p") and arg != "-p":
+            return True
+        if index > 0 and args[index - 1] in {"-p", "--project-name"}:
+            return True
+    return False
+
+
 def first_compose_command(args: list[str]) -> str | None:
     skip_next = False
     for arg in args:
@@ -107,54 +130,15 @@ def find_compose_file(cwd: Path) -> Path | None:
     return None
 
 
-def shell_hook(*, compose_takeover: bool, env_file: Path | None = None) -> str:
-    env_takeover = read_env_switch(env_file, "PORTMAP_COMPOSE_TAKEOVER") if env_file is not None else None
-    if compose_takeover:
-        default_value = "1"
-    elif env_takeover is not None:
-        default_value = env_takeover
-    else:
-        default_value = "${PORTMAP_COMPOSE_TAKEOVER:-0}"
-    return f"""# portmap shell hook
-# Source this in bash/zsh to optionally route `docker compose` through portmap.
-#
-# Enable:
-#   source <(portmap shell-hook --compose-takeover)
-#
-# Disable in the current shell:
-#   portmap_compose_takeover_off
-
-export PORTMAP_COMPOSE_TAKEOVER={default_value}
-
-portmap_compose_takeover_on() {{
-  export PORTMAP_COMPOSE_TAKEOVER=1
-}}
-
-portmap_compose_takeover_off() {{
-  export PORTMAP_COMPOSE_TAKEOVER=0
-}}
-
-docker() {{
-  if [ "$#" -gt 0 ] && [ "$1" = "compose" ] && [ "${{PORTMAP_COMPOSE_TAKEOVER:-0}}" = "1" ]; then
-    shift
-    portmap docker-compose -- "$@"
-    return $?
-  fi
-  command docker "$@"
-}}
-"""
-
-
-def read_env_switch(path: Path, name: str) -> str | None:
-    if not path.exists():
+def generated_compose_project(cwd: Path) -> str | None:
+    state_file = cwd / GENERATED_STATE
+    if not state_file.exists():
         return None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, raw_value = stripped.split("=", 1)
-        if key.strip() != name:
-            continue
-        value = raw_value.strip().strip('"').strip("'")
-        return "1" if value.lower() in {"1", "true", "yes", "on"} else "0"
+    try:
+        payload = json.loads(state_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    value = payload.get("compose_project")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
