@@ -1,6 +1,11 @@
+import http.client
+import threading
+from http.server import ThreadingHTTPServer
+
 import pytest
 
 from portmap.catalog import (
+    CatalogHandler,
     compose_down_project,
     compose_restart_project,
     container_to_service,
@@ -8,6 +13,22 @@ from portmap.catalog import (
     read_static_asset,
     select_dns_server,
 )
+
+
+def request_catalog(path: str, *, method: str = "GET") -> tuple[int, http.client.HTTPMessage, bytes]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CatalogHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        connection.request(method, path)
+        response = connection.getresponse()
+        return response.status, response.headers, response.read()
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 def test_container_to_service_uses_portmap_labels() -> None:
@@ -143,6 +164,22 @@ def test_catalog_static_asset_rejects_unknown_paths() -> None:
     assert read_static_asset("../catalog.py") is None
     assert read_static_asset("assets/../catalog.py") is None
     assert read_static_asset("missing.js") is None
+
+
+def test_catalog_http_serves_vite_public_root_static_assets() -> None:
+    status, headers, body = request_catalog("/favicon.svg")
+
+    assert status == 200
+    assert headers["content-type"] == "image/svg+xml"
+    assert b"pM" in body
+
+
+def test_catalog_http_rejects_missing_public_root_static_assets() -> None:
+    status, headers, body = request_catalog("/missing.svg")
+
+    assert status == 404
+    assert headers["content-type"] == "text/plain; charset=utf-8"
+    assert body == b"not found\n"
 
 
 def test_compose_down_project_removes_portmap_managed_project(monkeypatch) -> None:
