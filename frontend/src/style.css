@@ -802,6 +802,24 @@ pre {
     border-color: #52606d;
   }
 
+  .dns-status-ok {
+    background: #12331f;
+    color: #bbf7d0;
+    border-color: #16a34a;
+  }
+
+  .dns-status-failed {
+    background: #3b1717;
+    color: #fecaca;
+    border-color: #b42318;
+  }
+
+  .dns-status-checking {
+    background: #172554;
+    color: #bfdbfe;
+    border-color: #1d4ed8;
+  }
+
   table {
     background: #171d23;
   }

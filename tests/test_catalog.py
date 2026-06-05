@@ -92,22 +92,27 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     script = read_static_asset("assets/catalog.js")
     stylesheet = read_static_asset("assets/catalog.css")
     dns_check = read_static_asset("assets/dns-check.svg")
+    favicon = read_static_asset("favicon.svg")
 
     assert index is not None
     assert script is not None
     assert stylesheet is not None
     assert dns_check is not None
+    assert favicon is not None
 
     index_body, index_type = index
     script_body, script_type = script
     stylesheet_body, stylesheet_type = stylesheet
     dns_body, dns_type = dns_check
+    favicon_body, favicon_type = favicon
 
     assert index_type == "text/html; charset=utf-8"
     assert script_type == "application/javascript; charset=utf-8"
     assert stylesheet_type == "text/css; charset=utf-8"
     assert dns_type == "image/svg+xml"
+    assert favicon_type == "image/svg+xml"
     assert b'id="root"' in index_body
+    assert b'/favicon.svg' in index_body
     assert b'/assets/catalog.js' in index_body
     assert b'Test command' not in index_body
     assert b'/registry.json' in script_body
@@ -123,11 +128,15 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'/actions/compose-' in script_body
     assert b'resolvectl revert "$DNS_IFACE"' in script_body
     assert b'split-dns-test' not in script_body
+    assert b'succ' in script_body
     assert b'.project-group' in stylesheet_body
     assert b'.branch-group' in stylesheet_body
     assert b'.dns-status' in stylesheet_body
+    assert b'.dns-status-ok' in stylesheet_body
+    assert b'.dns-status-failed' in stylesheet_body
     assert b'.action-log' in stylesheet_body
     assert b'<svg ' in dns_body
+    assert b'pM' in favicon_body
 
 
 def test_catalog_static_asset_rejects_unknown_paths() -> None:

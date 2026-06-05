@@ -24,3 +24,5 @@
   remains separate.
 - Merge `feat/host-dns-cli` so portmap can install and remove host-level
   systemd-resolved split DNS drop-ins with `portmap dns set/unset`.
+- Merge `feat/fronted` so the catalog DNS status keeps red/green state colors
+  in dark mode and the browser tab shows the `pM` favicon.
