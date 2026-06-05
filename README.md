@@ -146,6 +146,45 @@ resolvectl query "portmap.$DNS_DOMAIN"
 curl -I "http://portmap.$DNS_DOMAIN/"
 ```
 
+On machines where the active network stack is not managed by
+`systemd-networkd`, the per-link `resolvectl dns` and `resolvectl domain`
+commands may fail with:
+
+```text
+Failed to set DNS configuration: Unit dbus-org.freedesktop.network1.service not found.
+Failed to set domain configuration: Unit dbus-org.freedesktop.network1.service not found.
+```
+
+That failure does not mean portmap DNS is broken. It means the host cannot
+accept per-link DNS settings through `resolvectl`. Do not install or enable
+`systemd-networkd` solely for portmap on a machine already managed by another
+network stack, such as NetworkManager. Configure a host-level
+`systemd-resolved` drop-in instead. The CLI can install and remove this drop-in:
+
+```bash
+portmap dns set
+portmap dns unset
+```
+
+The equivalent manual setup is:
+
+```bash
+DNS_SERVER=<detected-host-ip>
+DNS_DOMAIN=debug.lan
+
+sudo mkdir -p /etc/systemd/resolved.conf.d
+
+sudo tee /etc/systemd/resolved.conf.d/90-portmap-debug-lan.conf >/dev/null <<EOF
+[Resolve]
+DNS=$DNS_SERVER
+Domains=~$DNS_DOMAIN
+EOF
+
+sudo systemctl restart systemd-resolved
+resolvectl query "portmap.$DNS_DOMAIN"
+curl -I "http://portmap.$DNS_DOMAIN/"
+```
+
 The catalog page lists currently visible `portmap`/Traefik-managed services and
 their generated endpoints. Each visible compose project also has a `Down`
 button that removes its portmap-managed Docker Compose containers and networks

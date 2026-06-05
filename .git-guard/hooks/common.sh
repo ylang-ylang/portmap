@@ -23,6 +23,10 @@ git_guard_exec_runtime() {
 git_guard_runtime_sync() {
   [ "${GG_RUNTIME_SYNC_ACTIVE:-}" != "1" ] || return 0
   [ -f "$GG_CONFIG_JSON" ] || return 0
+  current_ref="$(git symbolic-ref -q HEAD 2>/dev/null || true)"
+  if [ -n "$current_ref" ] && [ -f "$GG_POLICY_JSON" ]; then
+    python3 -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); protected=data.get("protected_refs", []); sys.exit(0 if sys.argv[2] in protected else 1)' "$GG_POLICY_JSON" "$current_ref" && return 0
+  fi
   python3 -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); runtime=data.get("runtime", {}); value=runtime.get("auto_sync", True) if isinstance(runtime, dict) else True; sys.exit(0 if value is not False else 1)' "$GG_CONFIG_JSON" || return 0
   git_guard_command="${GIT_GUARD_BIN:-git-guard}"
   read -r -a git_guard_args <<< "$git_guard_command"

@@ -22,3 +22,5 @@
 - Merge `feat/default-compose-name` so the main portmap gateway compose uses
   Docker Compose's default `docker-compose.yml` filename while the mock compose
   remains separate.
+- Merge `feat/host-dns-cli` so portmap can install and remove host-level
+  systemd-resolved split DNS drop-ins with `portmap dns set/unset`.

@@ -10,7 +10,8 @@
     "enabled": true
   },
   "runtime": {
-    "auto_sync": true
+    "auto_sync": true,
+    "require_managed_files_staged": true
   },
   "submodules": {
     "allowed_branches": [

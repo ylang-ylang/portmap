@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     },
     "runtime": {
         "auto_sync": True,
+        "require_managed_files_staged": True,
     },
     "submodules": {
         "allowed_branches": ["main", "case/*/*"],

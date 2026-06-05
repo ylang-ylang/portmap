@@ -20,6 +20,7 @@ from .broker_shim import (
 )
 from .compose_takeover import plan_docker_compose_command
 from .errors import PortmapError
+from .host_dns import DEFAULT_RESOLVED_CONF_DIR, set_resolved_dropin, unset_resolved_dropin
 from .model import GenerateRequest
 from .planner import generate_plan
 from .registry import get_instance, list_repos, read_catalog, read_registry
@@ -75,6 +76,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="docker compose arguments; defaults to 'up -d'",
     )
     gateway.set_defaults(func=cmd_gateway)
+
+    dns = subparsers.add_parser("dns", help="manage host split DNS for portmap domains")
+    dns_subparsers = dns.add_subparsers(dest="dns_command", required=True)
+
+    dns_set = dns_subparsers.add_parser("set", help="install systemd-resolved split DNS drop-in")
+    dns_set.add_argument("--dns-server", help="DNS server IP; defaults to the effective portmap DNS bind")
+    dns_set.add_argument("--domain", help="DNS domain; defaults to the configured portmap DNS domain")
+    dns_set.add_argument(
+        "--resolved-conf-dir",
+        "--config-dir",
+        dest="config_dir",
+        type=Path,
+        default=DEFAULT_RESOLVED_CONF_DIR,
+        help="systemd-resolved drop-in directory",
+    )
+    dns_set.add_argument("--no-restart", action="store_true", help="do not restart systemd-resolved")
+    dns_set.add_argument("--no-sudo", action="store_true", help="write directly instead of invoking sudo")
+    dns_set.set_defaults(func=cmd_dns_set)
+
+    dns_unset = dns_subparsers.add_parser("unset", help="remove systemd-resolved split DNS drop-in")
+    dns_unset.add_argument("--domain", help="DNS domain; defaults to the configured portmap DNS domain")
+    dns_unset.add_argument(
+        "--resolved-conf-dir",
+        "--config-dir",
+        dest="config_dir",
+        type=Path,
+        default=DEFAULT_RESOLVED_CONF_DIR,
+        help="systemd-resolved drop-in directory",
+    )
+    dns_unset.add_argument("--no-restart", action="store_true", help="do not restart systemd-resolved")
+    dns_unset.add_argument("--no-sudo", action="store_true", help="remove directly instead of invoking sudo")
+    dns_unset.set_defaults(func=cmd_dns_unset)
 
     broker = subparsers.add_parser("broker", help="manage non-shell docker compose broker integration")
     broker_subparsers = broker.add_subparsers(dest="broker_command", required=True)
@@ -205,6 +238,32 @@ def cmd_gateway(args: argparse.Namespace) -> int:
         *compose_args,
     ]
     return subprocess.run(command, check=False, env=env).returncode
+
+
+def cmd_dns_set(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    result = set_resolved_dropin(
+        dns_server=args.dns_server or settings.effective_dns_bind,
+        dns_domain=args.domain or settings.dns_domain,
+        dns_port=settings.dns_port,
+        config_dir=args.config_dir,
+        restart=not args.no_restart,
+        use_sudo=not args.no_sudo,
+    )
+    print_json(result.as_dict())
+    return 0
+
+
+def cmd_dns_unset(args: argparse.Namespace) -> int:
+    settings = load_portmap_settings(environ=os.environ)
+    result = unset_resolved_dropin(
+        dns_domain=args.domain or settings.dns_domain,
+        config_dir=args.config_dir,
+        restart=not args.no_restart,
+        use_sudo=not args.no_sudo,
+    )
+    print_json(result.as_dict())
+    return 0
 
 
 def cmd_broker_install(args: argparse.Namespace) -> int:
