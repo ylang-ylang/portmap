@@ -17,3 +17,5 @@
   label fit without overflow.
 - Increase spacing between restart/down action buttons so branch controls do
   not feel visually cramped.
+- Sync the current `dev` merge commit before merging the spacing follow-up back
+  to `dev`.
