@@ -7,3 +7,5 @@
   tie-breaker.
 - Update mock catalog data, built frontend assets, and tests for tip-based
   branch ordering.
+- Preserve `.portmap/endpoints.toml` declaration order through generated labels,
+  catalog service ordering, endpoint table ordering, mock data, and tests.

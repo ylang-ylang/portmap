@@ -48,6 +48,7 @@ STATIC_CONTENT_TYPES_BY_SUFFIX = {
     ".txt": "text/plain; charset=utf-8",
     ".webmanifest": "application/manifest+json",
 }
+MISSING_ORDER = 1_000_000
 
 
 def select_dns_server(bind_ip: str, target_ip: str) -> str:
@@ -121,6 +122,7 @@ def collect_catalog() -> dict[str, Any]:
         key=lambda item: (
             item.get("repo_name") or "",
             item.get("branch") or "",
+            endpoint_sort_order(item),
             item.get("compose_service") or "",
             item.get("container") or "",
         )
@@ -187,6 +189,7 @@ def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
         "compose_project": labels.get("com.docker.compose.project"),
         "compose_service": labels.get("com.docker.compose.service"),
         "docker_network": labels.get("traefik.docker.network"),
+        "portmap_order": endpoint_sort_order({"endpoints": endpoints}),
         "endpoints": endpoints,
     }
 
@@ -208,17 +211,32 @@ def parse_portmap_endpoints(labels: dict[str, str]) -> list[dict[str, Any]]:
         grouped.setdefault(endpoint_id, {"id": endpoint_id})[field] = normalize_label_value(field, value)
 
     endpoints = list(grouped.values())
-    endpoints.sort(key=lambda item: str(item.get("name") or item.get("id") or ""))
+    endpoints.sort(key=endpoint_sort_key)
     return endpoints
 
 
 def normalize_label_value(field: str, value: str) -> Any:
-    if field in {"container_port", "host_port", "range_start", "range_end", "range_size"}:
+    if field in {"container_port", "host_port", "order", "range_start", "range_end", "range_size"}:
         try:
             return int(value)
         except ValueError:
             return value
     return value
+
+
+def endpoint_sort_key(endpoint: dict[str, Any]) -> tuple[int, str, str]:
+    order = endpoint.get("order")
+    numeric_order = order if isinstance(order, int) else MISSING_ORDER
+    return (numeric_order, str(endpoint.get("name") or ""), str(endpoint.get("id") or ""))
+
+
+def endpoint_sort_order(service: dict[str, Any]) -> int:
+    orders = [
+        endpoint.get("order")
+        for endpoint in service.get("endpoints", [])
+        if isinstance(endpoint.get("order"), int)
+    ]
+    return min(orders) if orders else MISSING_ORDER
 
 
 def parse_traefik_endpoints(labels: dict[str, str]) -> list[dict[str, Any]]:

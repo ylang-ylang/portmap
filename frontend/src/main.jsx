@@ -23,6 +23,13 @@ function numberValue(value) {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+const MISSING_ORDER = 1000000;
+
+function orderValue(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : MISSING_ORDER;
+}
+
 function branchTipEpoch(value) {
   return numberValue(value?.branch_tip_epoch);
 }
@@ -70,6 +77,25 @@ resolvectl query "portmap.$DNS_DOMAIN"
 
 function endpointCount(service) {
   return (service.endpoints || []).length;
+}
+
+function compareEndpointOrder(left, right) {
+  const orderDelta = orderValue(left.order) - orderValue(right.order);
+  if (orderDelta !== 0) return orderDelta;
+  return text(left.name).localeCompare(text(right.name)) || text(left.id).localeCompare(text(right.id));
+}
+
+function serviceOrder(service) {
+  const explicitOrder = orderValue(service.portmap_order);
+  if (explicitOrder !== MISSING_ORDER) return explicitOrder;
+  const endpointOrders = (service.endpoints || []).map((endpoint) => orderValue(endpoint.order));
+  return endpointOrders.length ? Math.min(...endpointOrders) : MISSING_ORDER;
+}
+
+function compareServiceOrder(left, right) {
+  const orderDelta = serviceOrder(left) - serviceOrder(right);
+  if (orderDelta !== 0) return orderDelta;
+  return text(left.compose_service).localeCompare(text(right.compose_service)) || text(left.container).localeCompare(text(right.container));
 }
 
 function uniqueSorted(values) {
@@ -229,7 +255,7 @@ function buildCatalogTree(catalog) {
             .sort(compareBranchTip)
             .map((branch) => ({
               ...branch,
-              services: branch.services.sort((left, right) => text(left.compose_service).localeCompare(text(right.compose_service)) || text(left.container).localeCompare(text(right.container))),
+              services: branch.services.sort(compareServiceOrder),
             })),
         })),
     }));
@@ -507,7 +533,7 @@ function EndpointTable({ services }) {
         </thead>
         <tbody>
           {services.flatMap((service) =>
-            (service.endpoints || []).map((endpoint) => (
+            [...(service.endpoints || [])].sort(compareEndpointOrder).map((endpoint) => (
               <tr key={`${service.container}-${endpoint.id || endpoint.name}`}>
                 <td><CodeText value={service.compose_service || ""} /></td>
                 <td><CodeText value={endpoint.name || endpoint.id || ""} /></td>
