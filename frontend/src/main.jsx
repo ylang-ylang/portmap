@@ -18,6 +18,30 @@ function text(value) {
   return value == null ? "" : String(value);
 }
 
+function numberValue(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+const MISSING_ORDER = 1000000;
+
+function orderValue(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : MISSING_ORDER;
+}
+
+function branchTipEpoch(value) {
+  return numberValue(value?.branch_tip_epoch);
+}
+
+function compareBranchTip(left, right) {
+  const tipDelta = branchTipEpoch(right) - branchTipEpoch(left);
+  if (tipDelta !== 0) return tipDelta;
+  return text(left.branch).localeCompare(text(right.branch))
+    || text(left.worktree_title).localeCompare(text(right.worktree_title))
+    || text(left.worktree).localeCompare(text(right.worktree));
+}
+
 function shellSingleQuote(value) {
   return "'" + text(value).replace(/'/g, "'\"'\"'") + "'";
 }
@@ -53,6 +77,25 @@ resolvectl query "portmap.$DNS_DOMAIN"
 
 function endpointCount(service) {
   return (service.endpoints || []).length;
+}
+
+function compareEndpointOrder(left, right) {
+  const orderDelta = orderValue(left.order) - orderValue(right.order);
+  if (orderDelta !== 0) return orderDelta;
+  return text(left.name).localeCompare(text(right.name)) || text(left.id).localeCompare(text(right.id));
+}
+
+function serviceOrder(service) {
+  const explicitOrder = orderValue(service.portmap_order);
+  if (explicitOrder !== MISSING_ORDER) return explicitOrder;
+  const endpointOrders = (service.endpoints || []).map((endpoint) => orderValue(endpoint.order));
+  return endpointOrders.length ? Math.min(...endpointOrders) : MISSING_ORDER;
+}
+
+function compareServiceOrder(left, right) {
+  const orderDelta = serviceOrder(left) - serviceOrder(right);
+  if (orderDelta !== 0) return orderDelta;
+  return text(left.compose_service).localeCompare(text(right.compose_service)) || text(left.container).localeCompare(text(right.container));
 }
 
 function uniqueSorted(values) {
@@ -140,12 +183,20 @@ function buildCatalogTree(catalog) {
         branch: cleanBranch,
         worktree: text(seed.worktree || ""),
         worktree_title: text(seed.worktree_title || pathTitle(seed.worktree) || cleanBranch),
+        branch_tip_epoch: numberValue(seed.branch_tip_epoch),
+        branch_tip_time: text(seed.branch_tip_time || ""),
+        branch_tip_sha: text(seed.branch_tip_sha || ""),
         services: [],
       });
     }
     const branch = worktree.branches.get(cleanBranch);
     branch.worktree = branch.worktree || text(seed.worktree || "");
     branch.worktree_title = branch.worktree_title || text(seed.worktree_title || pathTitle(seed.worktree) || cleanBranch);
+    if (numberValue(seed.branch_tip_epoch) > numberValue(branch.branch_tip_epoch)) {
+      branch.branch_tip_epoch = numberValue(seed.branch_tip_epoch);
+      branch.branch_tip_time = text(seed.branch_tip_time || "");
+      branch.branch_tip_sha = text(seed.branch_tip_sha || "");
+    }
     return branch;
   }
 
@@ -174,6 +225,9 @@ function buildCatalogTree(catalog) {
       worktree_root: service.worktree_root,
       worktree_root_title: service.worktree_root_title,
       compose_project: service.compose_project,
+      branch_tip_epoch: service.branch_tip_epoch,
+      branch_tip_time: service.branch_tip_time,
+      branch_tip_sha: service.branch_tip_sha,
       running: true,
       status: "running",
       startable: true,
@@ -182,6 +236,9 @@ function buildCatalogTree(catalog) {
     ensureBranch(worktree, branchName, {
       worktree: service.worktree,
       worktree_title: pathTitle(service.worktree),
+      branch_tip_epoch: service.branch_tip_epoch,
+      branch_tip_time: service.branch_tip_time,
+      branch_tip_sha: service.branch_tip_sha,
     }).services.push(service);
   }
 
@@ -193,15 +250,12 @@ function buildCatalogTree(catalog) {
         .sort((left, right) => text(left.worktree_title).localeCompare(text(right.worktree_title)) || text(left.worktree).localeCompare(text(right.worktree)))
         .map((worktree) => ({
           ...worktree,
-          dead_instances: worktree.dead_instances.sort((left, right) => (
-            text(left.branch).localeCompare(text(right.branch))
-            || text(left.compose_project).localeCompare(text(right.compose_project))
-          )),
+          dead_instances: worktree.dead_instances.sort(compareBranchTip),
           branches: Array.from(worktree.branches.values())
-            .sort((left, right) => left.branch.localeCompare(right.branch))
+            .sort(compareBranchTip)
             .map((branch) => ({
               ...branch,
-              services: branch.services.sort((left, right) => text(left.compose_service).localeCompare(text(right.compose_service)) || text(left.container).localeCompare(text(right.container))),
+              services: branch.services.sort(compareServiceOrder),
             })),
         })),
     }));
@@ -479,7 +533,7 @@ function EndpointTable({ services }) {
         </thead>
         <tbody>
           {services.flatMap((service) =>
-            (service.endpoints || []).map((endpoint) => (
+            [...(service.endpoints || [])].sort(compareEndpointOrder).map((endpoint) => (
               <tr key={`${service.container}-${endpoint.id || endpoint.name}`}>
                 <td><CodeText value={service.compose_service || ""} /></td>
                 <td><CodeText value={endpoint.name || endpoint.id || ""} /></td>

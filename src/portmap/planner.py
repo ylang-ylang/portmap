@@ -18,6 +18,7 @@ from .yaml_writer import dump_yaml
 @dataclass(frozen=True)
 class PlannedEndpoint:
     name: str
+    order: int
     kind: EndpointKind
     service: str
     container_port: int
@@ -172,6 +173,7 @@ def plan_endpoint(
         )
         return PlannedEndpoint(
             name=endpoint.name,
+            order=endpoint.order,
             kind=endpoint.kind,
             service=endpoint.service,
             container_port=endpoint.container_port,
@@ -214,6 +216,7 @@ def plan_endpoint(
         )
         return PlannedEndpoint(
             name=endpoint.name,
+            order=endpoint.order,
             kind=endpoint.kind,
             service=endpoint.service,
             container_port=endpoint.container_port,
@@ -252,6 +255,7 @@ def plan_endpoint(
     )
     return PlannedEndpoint(
         name=endpoint.name,
+        order=endpoint.order,
         kind=endpoint.kind,
         service=endpoint.service,
         container_port=endpoint.container_port,
@@ -304,6 +308,7 @@ def portmap_endpoint_labels(
 ) -> tuple[str, ...]:
     base = {
         "name": endpoint.name,
+        "order": str(endpoint.order),
         "kind": endpoint.kind.value,
         "service": endpoint.service,
         "container_port": str(endpoint.container_port),
@@ -325,6 +330,7 @@ def default_http_host(endpoint: str, branch: str, repo_name: str, domain_suffix:
 
 def endpoint_state(endpoint: PlannedEndpoint) -> dict[str, Any]:
     state: dict[str, Any] = {
+        "order": endpoint.order,
         "kind": endpoint.kind.value,
         "service": endpoint.service,
         "container_port": endpoint.container_port,
@@ -473,6 +479,7 @@ def build_registry(
     for endpoint in planned:
         if endpoint.kind == EndpointKind.HTTP:
             endpoint_entries[endpoint.name] = {
+                "order": endpoint.order,
                 "kind": endpoint.kind.value,
                 "service": endpoint.service,
                 "container_port": endpoint.container_port,
@@ -481,6 +488,7 @@ def build_registry(
             }
         else:
             endpoint_entries[endpoint.name] = {
+                "order": endpoint.order,
                 "kind": endpoint.kind.value,
                 "service": endpoint.service,
                 "container_port": endpoint.container_port,

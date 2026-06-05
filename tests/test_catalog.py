@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import subprocess
 import threading
 from http.server import ThreadingHTTPServer
@@ -80,10 +81,14 @@ container_port = 8000
     run(["git", "commit", "-m", "init sample compose repo"], cwd=path)
 
 
-def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+def run(args: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
     result = subprocess.run(
         args,
         cwd=cwd,
+        env=process_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -116,6 +121,7 @@ def test_container_to_service_uses_portmap_labels() -> None:
                 "portmap.branch": "feat-example",
                 "portmap.worktree": "/repo/sample",
                 "portmap.endpoints.sample-feat-example-frontend.name": "frontend",
+                "portmap.endpoints.sample-feat-example-frontend.order": "0",
                 "portmap.endpoints.sample-feat-example-frontend.kind": "http",
                 "portmap.endpoints.sample-feat-example-frontend.container_port": "5173",
                 "portmap.endpoints.sample-feat-example-frontend.url": (
@@ -129,15 +135,51 @@ def test_container_to_service_uses_portmap_labels() -> None:
     assert service["repo_name"] == "sample"
     assert service["branch"] == "feat-example"
     assert service["compose_service"] == "frontend"
+    assert service["portmap_order"] == 0
     assert service["endpoints"] == [
         {
             "id": "sample-feat-example-frontend",
             "name": "frontend",
+            "order": 0,
             "kind": "http",
             "container_port": 5173,
             "url": "http://frontend.feat-example.sample.debug.lan:8080",
         }
     ]
+
+
+def test_container_to_service_orders_portmap_endpoints_by_toml_order() -> None:
+    service = container_to_service(
+        {
+            "Names": ["/sample-api-1"],
+            "Image": "sample:latest",
+            "Labels": {
+                "com.docker.compose.project": "sample",
+                "com.docker.compose.service": "api",
+                "traefik.enable": "true",
+                "portmap.managed": "true",
+                "portmap.repo_name": "sample",
+                "portmap.branch": "dev",
+                "portmap.worktree": "/repo/sample",
+                "portmap.endpoints.sample-dev-zeta.name": "zeta",
+                "portmap.endpoints.sample-dev-zeta.order": "2",
+                "portmap.endpoints.sample-dev-zeta.kind": "http",
+                "portmap.endpoints.sample-dev-zeta.container_port": "9002",
+                "portmap.endpoints.sample-dev-alpha.name": "alpha",
+                "portmap.endpoints.sample-dev-alpha.order": "0",
+                "portmap.endpoints.sample-dev-alpha.kind": "http",
+                "portmap.endpoints.sample-dev-alpha.container_port": "9000",
+                "portmap.endpoints.sample-dev-beta.name": "beta",
+                "portmap.endpoints.sample-dev-beta.order": "1",
+                "portmap.endpoints.sample-dev-beta.kind": "http",
+                "portmap.endpoints.sample-dev-beta.container_port": "9001",
+            },
+        }
+    )
+
+    assert service is not None
+    assert service["portmap_order"] == 0
+    assert [endpoint["name"] for endpoint in service["endpoints"]] == ["alpha", "beta", "zeta"]
 
 
 def test_container_to_service_can_fallback_to_traefik_labels() -> None:
@@ -193,6 +235,7 @@ def test_collect_catalog_uses_agent_worktrees_to_enrich_running_services(monkeyp
                         "portmap.branch": "dev",
                         "portmap.worktree": "/repo/sample@dev",
                         "portmap.endpoints.sample-dev-frontend.name": "frontend",
+                        "portmap.endpoints.sample-dev-frontend.order": "0",
                         "portmap.endpoints.sample-dev-frontend.kind": "http",
                         "portmap.endpoints.sample-dev-frontend.container_port": "5173",
                     },
@@ -243,6 +286,57 @@ def test_collect_catalog_uses_agent_worktrees_to_enrich_running_services(monkeyp
     assert catalog["services"][0]["worktree_root_title"] == "sample linked .git"
 
 
+def test_collect_catalog_orders_services_by_portmap_endpoint_order(monkeypatch) -> None:
+    def fake_docker_get(path: str):
+        if path == "/containers/json?all=0":
+            return [
+                {
+                    "Names": ["/sample-worker-1"],
+                    "Image": "sample:latest",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_dev",
+                        "com.docker.compose.service": "worker",
+                        "traefik.enable": "true",
+                        "portmap.managed": "true",
+                        "portmap.repo_id": "sample-repo",
+                        "portmap.repo_name": "sample",
+                        "portmap.branch": "dev",
+                        "portmap.worktree": "/repo/sample@dev",
+                        "portmap.endpoints.sample-dev-worker.name": "worker",
+                        "portmap.endpoints.sample-dev-worker.order": "2",
+                        "portmap.endpoints.sample-dev-worker.kind": "http",
+                        "portmap.endpoints.sample-dev-worker.container_port": "9002",
+                    },
+                },
+                {
+                    "Names": ["/sample-frontend-1"],
+                    "Image": "sample:latest",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_dev",
+                        "com.docker.compose.service": "frontend",
+                        "traefik.enable": "true",
+                        "portmap.managed": "true",
+                        "portmap.repo_id": "sample-repo",
+                        "portmap.repo_name": "sample",
+                        "portmap.branch": "dev",
+                        "portmap.worktree": "/repo/sample@dev",
+                        "portmap.endpoints.sample-dev-frontend.name": "frontend",
+                        "portmap.endpoints.sample-dev-frontend.order": "0",
+                        "portmap.endpoints.sample-dev-frontend.kind": "http",
+                        "portmap.endpoints.sample-dev-frontend.container_port": "9000",
+                    },
+                },
+            ]
+        raise AssertionError(path)
+
+    monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
+
+    catalog = collect_catalog()
+
+    assert [service["compose_service"] for service in catalog["services"]] == ["frontend", "worker"]
+    assert [service["portmap_order"] for service in catalog["services"]] == [0, 2]
+
+
 def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     index = read_static_asset("index.html")
     script = read_static_asset("assets/catalog.js")
@@ -280,6 +374,8 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'data-dead-panel' in script_body
     assert b'dead-menu' in script_body
     assert b'running-menu' in script_body
+    assert b'branch_tip_epoch' in script_body
+    assert b'portmap_order' in script_body
     assert b'is-empty' in script_body
     assert b'has-items' in script_body
     assert b'History' not in script_body
@@ -382,6 +478,44 @@ def test_collect_catalog_includes_running_worktree_and_writes_history(tmp_path: 
     payload = json.loads(history.read_text(encoding="utf-8"))
     assert payload["worktrees"][0]["worktree"] == str(repo)
     assert payload["worktrees"][0]["worktree_root"] == str(repo / ".git")
+
+
+def test_collect_catalog_orders_worktrees_by_branch_tip_descending(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "sample@dev"
+    feat = tmp_path / "sample@feat-new"
+    write_git_compose_repo(repo)
+
+    (repo / "dev.txt").write_text("dev\n", encoding="utf-8")
+    run(["git", "add", "dev.txt"], cwd=repo)
+    run(
+        ["git", "commit", "-m", "dev tip"],
+        cwd=repo,
+        env={
+            "GIT_AUTHOR_DATE": "2026-01-01T00:00:00+00:00",
+            "GIT_COMMITTER_DATE": "2026-01-01T00:00:00+00:00",
+        },
+    )
+    run(["git", "worktree", "add", "-b", "feat-new", str(feat)], cwd=repo)
+    (feat / "feat.txt").write_text("feat\n", encoding="utf-8")
+    run(["git", "add", "feat.txt"], cwd=feat)
+    run(
+        ["git", "commit", "-m", "feat tip"],
+        cwd=feat,
+        env={
+            "GIT_AUTHOR_DATE": "2026-02-01T00:00:00+00:00",
+            "GIT_COMMITTER_DATE": "2026-02-01T00:00:00+00:00",
+        },
+    )
+
+    monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", str(tmp_path))
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(tmp_path / "history.json"))
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+
+    catalog = collect_catalog()
+
+    assert [worktree["branch"] for worktree in catalog["worktrees"]] == ["feat-new", "dev"]
+    assert catalog["worktrees"][0]["branch_tip_epoch"] > catalog["worktrees"][1]["branch_tip_epoch"]
+    assert catalog["worktrees"][0]["branch_tip_time"] == "2026-02-01T00:00:00+00:00"
 
 
 def test_collect_catalog_restores_existing_worktree_from_history(tmp_path: Path, monkeypatch) -> None:

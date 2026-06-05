@@ -43,3 +43,6 @@
   and visually muted when their counts are zero.
 - Merge `feat/fronted` spacing follow-up so fixed branch controls do not clip
   icons and restart/down actions have clearer separation.
+- Merge `feat/branch-tip-order` so catalog branches are ordered by newest Git
+  tip first and endpoint/service tables preserve `.portmap/endpoints.toml`
+  declaration order.
