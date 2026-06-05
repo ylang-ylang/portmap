@@ -41,3 +41,5 @@
   behavior.
 - Merge `feat/fronted` so empty running/dead branch controls are fixed-width
   and visually muted when their counts are zero.
+- Merge `feat/fronted` spacing follow-up so fixed branch controls do not clip
+  icons and restart/down actions have clearer separation.
