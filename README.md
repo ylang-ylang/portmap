@@ -362,6 +362,13 @@ The build output is tracked in:
 src/portmap/catalog_static/
 ```
 
+Mock mode serves `frontend/public/*` through Vite. Production mode serves the
+built files from `src/portmap/catalog_static/` through the Python catalog
+server. Root-level public assets such as `/favicon.svg`,
+`/manifest.webmanifest`, and `/robots.txt` must therefore be present in the
+built static directory and served by the Python catalog handler as root static
+assets, not only by the Vite dev server.
+
 ## Integration Test Repo
 
 The repo includes a Python-managed integration fixture that creates a real Git

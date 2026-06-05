@@ -31,8 +31,12 @@ STATIC_ROOT = Path(__file__).with_name("catalog_static")
 STATIC_CONTENT_TYPES_BY_SUFFIX = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
+    ".ico": "image/x-icon",
     ".js": "application/javascript; charset=utf-8",
+    ".png": "image/png",
     ".svg": "image/svg+xml",
+    ".txt": "text/plain; charset=utf-8",
+    ".webmanifest": "application/manifest+json",
 }
 
 
@@ -363,6 +367,20 @@ def read_static_asset(asset_path: str) -> tuple[bytes, str] | None:
         return None
 
 
+def vite_public_root_asset(request_path: str) -> str | None:
+    if not request_path.startswith("/"):
+        return None
+    normalized = PurePosixPath(request_path.removeprefix("/"))
+    if len(normalized.parts) != 1:
+        return None
+    asset_path = normalized.as_posix()
+    if asset_path in {"", ".", "index.html"}:
+        return None
+    if static_content_type(asset_path) is None:
+        return None
+    return asset_path
+
+
 class CatalogHandler(BaseHTTPRequestHandler):
     server_version = "portmap-catalog/0.1"
 
@@ -413,6 +431,16 @@ class CatalogHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f"failed to read Docker catalog: {exc}\n".encode("utf-8"))
                 return
             self.write_json(catalog, send_body=send_body)
+            return
+
+        public_asset = vite_public_root_asset(parsed.path)
+        if public_asset is not None:
+            # Vite serves files from frontend/public at the site root in mock
+            # mode; the packaged Python server must expose the same build
+            # output shape for production.
+            if self.write_static(public_asset, send_body=send_body):
+                return
+            self.write_not_found(send_body=send_body)
             return
 
         self.write_not_found(send_body=send_body)
