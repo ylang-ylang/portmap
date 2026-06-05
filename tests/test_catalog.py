@@ -280,6 +280,8 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'data-dead-panel' in script_body
     assert b'dead-menu' in script_body
     assert b'running-menu' in script_body
+    assert b'is-empty' in script_body
+    assert b'has-items' in script_body
     assert b'History' not in script_body
     assert b'dns-status' in script_body
     assert b'Action log' in script_body
@@ -297,6 +299,9 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'.branch-group' in stylesheet_body
     assert b'.dead-menu' in stylesheet_body
     assert b'.running-menu' in stylesheet_body
+    assert b'.running-menu-button.is-empty' in stylesheet_body
+    assert b'.dead-menu-button.is-empty' in stylesheet_body
+    assert b'inline-size: 108px' in stylesheet_body
     assert b'.branch-running-name' in stylesheet_body
     assert b'.history-panel' not in stylesheet_body
     assert stylesheet_body.count(b"\n") > 20

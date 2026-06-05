@@ -631,7 +631,8 @@ a {
   border: 1px solid #9aa7b4;
   background: #f8fafc;
   color: #18202a;
-  min-width: 104px;
+  inline-size: 108px;
+  min-width: 108px;
   min-height: 32px;
   padding: 7px 10px;
   font-size: 13px;
@@ -649,6 +650,12 @@ a {
   color: #15803d;
 }
 
+.dead-menu-button.has-items {
+  border-color: #c2410c;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
 .running-menu-button:focus,
 .dead-menu-button:focus {
   outline: 2px solid #0ea5e9;
@@ -658,7 +665,14 @@ a {
 .running-menu-button:disabled,
 .dead-menu-button:disabled {
   cursor: default;
-  opacity: 0.58;
+}
+
+.running-menu-button.is-empty,
+.dead-menu-button.is-empty {
+  border-color: #cbd5e1;
+  background: #eef2f6;
+  color: #7b8794;
+  opacity: 1;
 }
 
 .running-menu-button span,
@@ -671,6 +685,13 @@ a {
   font-size: 11px;
   font-weight: 700;
   text-align: center;
+}
+
+.running-menu-button.is-empty span,
+.dead-menu-button.is-empty span {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #697586;
 }
 
 .running-list,
@@ -1154,6 +1175,19 @@ pre {
     border-color: #16a34a;
   }
 
+  .dead-menu-button.has-items {
+    background: #3a2112;
+    color: #fed7aa;
+    border-color: #c2410c;
+  }
+
+  .running-menu-button.is-empty,
+  .dead-menu-button.is-empty {
+    background: #202832;
+    color: #7d8997;
+    border-color: #3b4652;
+  }
+
   .running-menu-button span,
   .running-list,
   .running-row,
@@ -1162,6 +1196,13 @@ pre {
   .dead-list,
   .dead-row {
     background: #151b22;
+  }
+
+  .running-menu-button.is-empty span,
+  .dead-menu-button.is-empty span {
+    background: #151b22;
+    color: #7d8997;
+    border-color: #3b4652;
   }
 
   .dns-status {
