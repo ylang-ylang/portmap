@@ -150,6 +150,9 @@ def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: li
             "repo_id",
             "repo_name",
             "branch",
+            "branch_tip_epoch",
+            "branch_tip_time",
+            "branch_tip_sha",
             "worktree_root",
             "worktree_root_title",
             "compose_project",
@@ -291,15 +294,7 @@ def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str,
         if not worktree.get("running") and not worktree.get("startable"):
             continue
         worktrees.append(worktree)
-    worktrees.sort(
-        key=lambda item: (
-            item.get("repo_name") or "",
-            item.get("repo_id") or "",
-            item.get("worktree_title") or "",
-            item.get("branch") or "",
-            item.get("worktree") or "",
-        )
-    )
+    worktrees.sort(key=catalog_worktree_sort_key)
     return worktrees
 
 
@@ -339,17 +334,27 @@ def merge_catalog_history(
         if worktree.get("source") == "current":
             worktree["last_seen_at"] = generated_at
 
-    worktrees.sort(
-        key=lambda item: (
-            item.get("repo_name") or "",
-            item.get("repo_id") or "",
-            item.get("worktree_title") or "",
-            item.get("branch") or "",
-            item.get("worktree") or "",
-        )
-    )
+    worktrees.sort(key=catalog_worktree_sort_key)
     write_catalog_history(worktrees, generated_at=generated_at)
     return worktrees
+
+
+def catalog_worktree_sort_key(item: dict[str, Any]) -> tuple[str, str, str, int, str, str]:
+    return (
+        str(item.get("repo_name") or ""),
+        str(item.get("repo_id") or ""),
+        str(item.get("worktree_root_title") or item.get("worktree_title") or ""),
+        -int_value(item.get("branch_tip_epoch")),
+        str(item.get("branch") or ""),
+        str(item.get("worktree") or ""),
+    )
+
+
+def int_value(value: Any) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def worktree_instance_key(worktree: dict[str, Any]) -> str:
@@ -568,6 +573,7 @@ def catalog_worktree_from_path(
         repo_name=None,
     )
     branch = worktree_branch(top_level)
+    tip = worktree_tip(top_level)
     worktree_root, worktree_root_title = worktree_root_from_top_level(top_level)
     running_services = running_by_worktree.get(str(top_level), [])
     compose_project = generated_compose_project(top_level) or first_service_value(running_services, "compose_project")
@@ -586,6 +592,9 @@ def catalog_worktree_from_path(
         "repo_id": identity.repo_id,
         "repo_name": identity.display_name,
         "branch": branch,
+        "branch_tip_epoch": tip["epoch"],
+        "branch_tip_time": tip["time"],
+        "branch_tip_sha": tip["sha"],
         "worktree": str(top_level),
         "worktree_title": top_level.name,
         "worktree_root": worktree_root,
@@ -598,6 +607,20 @@ def catalog_worktree_from_path(
         "service_count": len(running_services),
         "endpoint_count": endpoint_total,
     }
+
+
+def worktree_tip(path: Path) -> dict[str, int | str]:
+    result = git(path, "log", "-1", "--format=%ct%x00%cI%x00%H")
+    if result.returncode != 0:
+        return {"epoch": 0, "time": "", "sha": ""}
+    parts = result.stdout.rstrip("\n").split("\x00")
+    if len(parts) != 3:
+        return {"epoch": 0, "time": "", "sha": ""}
+    try:
+        epoch = int(parts[0])
+    except ValueError:
+        epoch = 0
+    return {"epoch": epoch, "time": parts[1], "sha": parts[2]}
 
 
 def worktree_branch(path: Path) -> str:

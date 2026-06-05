@@ -18,6 +18,23 @@ function text(value) {
   return value == null ? "" : String(value);
 }
 
+function numberValue(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function branchTipEpoch(value) {
+  return numberValue(value?.branch_tip_epoch);
+}
+
+function compareBranchTip(left, right) {
+  const tipDelta = branchTipEpoch(right) - branchTipEpoch(left);
+  if (tipDelta !== 0) return tipDelta;
+  return text(left.branch).localeCompare(text(right.branch))
+    || text(left.worktree_title).localeCompare(text(right.worktree_title))
+    || text(left.worktree).localeCompare(text(right.worktree));
+}
+
 function shellSingleQuote(value) {
   return "'" + text(value).replace(/'/g, "'\"'\"'") + "'";
 }
@@ -140,12 +157,20 @@ function buildCatalogTree(catalog) {
         branch: cleanBranch,
         worktree: text(seed.worktree || ""),
         worktree_title: text(seed.worktree_title || pathTitle(seed.worktree) || cleanBranch),
+        branch_tip_epoch: numberValue(seed.branch_tip_epoch),
+        branch_tip_time: text(seed.branch_tip_time || ""),
+        branch_tip_sha: text(seed.branch_tip_sha || ""),
         services: [],
       });
     }
     const branch = worktree.branches.get(cleanBranch);
     branch.worktree = branch.worktree || text(seed.worktree || "");
     branch.worktree_title = branch.worktree_title || text(seed.worktree_title || pathTitle(seed.worktree) || cleanBranch);
+    if (numberValue(seed.branch_tip_epoch) > numberValue(branch.branch_tip_epoch)) {
+      branch.branch_tip_epoch = numberValue(seed.branch_tip_epoch);
+      branch.branch_tip_time = text(seed.branch_tip_time || "");
+      branch.branch_tip_sha = text(seed.branch_tip_sha || "");
+    }
     return branch;
   }
 
@@ -174,6 +199,9 @@ function buildCatalogTree(catalog) {
       worktree_root: service.worktree_root,
       worktree_root_title: service.worktree_root_title,
       compose_project: service.compose_project,
+      branch_tip_epoch: service.branch_tip_epoch,
+      branch_tip_time: service.branch_tip_time,
+      branch_tip_sha: service.branch_tip_sha,
       running: true,
       status: "running",
       startable: true,
@@ -182,6 +210,9 @@ function buildCatalogTree(catalog) {
     ensureBranch(worktree, branchName, {
       worktree: service.worktree,
       worktree_title: pathTitle(service.worktree),
+      branch_tip_epoch: service.branch_tip_epoch,
+      branch_tip_time: service.branch_tip_time,
+      branch_tip_sha: service.branch_tip_sha,
     }).services.push(service);
   }
 
@@ -193,12 +224,9 @@ function buildCatalogTree(catalog) {
         .sort((left, right) => text(left.worktree_title).localeCompare(text(right.worktree_title)) || text(left.worktree).localeCompare(text(right.worktree)))
         .map((worktree) => ({
           ...worktree,
-          dead_instances: worktree.dead_instances.sort((left, right) => (
-            text(left.branch).localeCompare(text(right.branch))
-            || text(left.compose_project).localeCompare(text(right.compose_project))
-          )),
+          dead_instances: worktree.dead_instances.sort(compareBranchTip),
           branches: Array.from(worktree.branches.values())
-            .sort((left, right) => left.branch.localeCompare(right.branch))
+            .sort(compareBranchTip)
             .map((branch) => ({
               ...branch,
               services: branch.services.sort((left, right) => text(left.compose_service).localeCompare(text(right.compose_service)) || text(left.container).localeCompare(text(right.container))),

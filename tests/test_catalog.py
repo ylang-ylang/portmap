@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import subprocess
 import threading
 from http.server import ThreadingHTTPServer
@@ -80,10 +81,14 @@ container_port = 8000
     run(["git", "commit", "-m", "init sample compose repo"], cwd=path)
 
 
-def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+def run(args: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
     result = subprocess.run(
         args,
         cwd=cwd,
+        env=process_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -280,6 +285,7 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'data-dead-panel' in script_body
     assert b'dead-menu' in script_body
     assert b'running-menu' in script_body
+    assert b'branch_tip_epoch' in script_body
     assert b'is-empty' in script_body
     assert b'has-items' in script_body
     assert b'History' not in script_body
@@ -382,6 +388,44 @@ def test_collect_catalog_includes_running_worktree_and_writes_history(tmp_path: 
     payload = json.loads(history.read_text(encoding="utf-8"))
     assert payload["worktrees"][0]["worktree"] == str(repo)
     assert payload["worktrees"][0]["worktree_root"] == str(repo / ".git")
+
+
+def test_collect_catalog_orders_worktrees_by_branch_tip_descending(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "sample@dev"
+    feat = tmp_path / "sample@feat-new"
+    write_git_compose_repo(repo)
+
+    (repo / "dev.txt").write_text("dev\n", encoding="utf-8")
+    run(["git", "add", "dev.txt"], cwd=repo)
+    run(
+        ["git", "commit", "-m", "dev tip"],
+        cwd=repo,
+        env={
+            "GIT_AUTHOR_DATE": "2026-01-01T00:00:00+00:00",
+            "GIT_COMMITTER_DATE": "2026-01-01T00:00:00+00:00",
+        },
+    )
+    run(["git", "worktree", "add", "-b", "feat-new", str(feat)], cwd=repo)
+    (feat / "feat.txt").write_text("feat\n", encoding="utf-8")
+    run(["git", "add", "feat.txt"], cwd=feat)
+    run(
+        ["git", "commit", "-m", "feat tip"],
+        cwd=feat,
+        env={
+            "GIT_AUTHOR_DATE": "2026-02-01T00:00:00+00:00",
+            "GIT_COMMITTER_DATE": "2026-02-01T00:00:00+00:00",
+        },
+    )
+
+    monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", str(tmp_path))
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(tmp_path / "history.json"))
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+
+    catalog = collect_catalog()
+
+    assert [worktree["branch"] for worktree in catalog["worktrees"]] == ["feat-new", "dev"]
+    assert catalog["worktrees"][0]["branch_tip_epoch"] > catalog["worktrees"][1]["branch_tip_epoch"]
+    assert catalog["worktrees"][0]["branch_tip_time"] == "2026-02-01T00:00:00+00:00"
 
 
 def test_collect_catalog_restores_existing_worktree_from_history(tmp_path: Path, monkeypatch) -> None:
