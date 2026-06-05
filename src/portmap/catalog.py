@@ -155,12 +155,20 @@ def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: li
             "branch_tip_epoch",
             "branch_tip_time",
             "branch_tip_sha",
+            "worktree_exists",
             "worktree_root",
             "worktree_root_title",
+            "worktree_status",
+            "worktree_status_message",
+            "worktree_superproject",
             "compose_project",
         ):
-            if not service.get(key) and worktree.get(key):
+            if missing_catalog_value(service.get(key)) and not missing_catalog_value(worktree.get(key)):
                 service[key] = worktree[key]
+
+
+def missing_catalog_value(value: Any) -> bool:
+    return value is None or value == ""
 
 
 def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
@@ -177,6 +185,7 @@ def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
     container_name = first_container_name(container)
     worktree = labels.get("portmap.worktree") or labels.get("com.docker.compose.project.working_dir")
     root, root_title = worktree_root_from_raw(worktree)
+    status = worktree_status_from_raw(worktree)
     return {
         "container": container_name,
         "image": container.get("Image"),
@@ -184,6 +193,7 @@ def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
         "repo_name": labels.get("portmap.repo_name"),
         "branch": labels.get("portmap.branch"),
         "worktree": worktree,
+        **status,
         "worktree_root": root,
         "worktree_root_title": root_title,
         "compose_project": labels.get("com.docker.compose.project"),
@@ -540,6 +550,18 @@ def git_common_dir(path: Path) -> Path | None:
         return common_dir
 
 
+def git_superproject(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    result = git(path, "rev-parse", "--show-superproject-working-tree")
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value:
+        return None
+    return Path(value).expanduser().resolve()
+
+
 def worktree_root_from_raw(raw_worktree: str | None) -> tuple[str | None, str | None]:
     if not raw_worktree:
         return None, None
@@ -555,6 +577,42 @@ def worktree_root_from_top_level(top_level: Path) -> tuple[str, str]:
         return str(top_level), top_level.name
     title = common_dir.parent.name if common_dir.name == ".git" else common_dir.name
     return str(common_dir), title
+
+
+def worktree_status_from_raw(raw_worktree: str | None, *, top_level: Path | None = None) -> dict[str, Any]:
+    if not raw_worktree:
+        return {
+            "worktree_exists": None,
+            "worktree_status": "",
+            "worktree_status_message": "",
+            "worktree_superproject": None,
+        }
+
+    path = Path(raw_worktree).expanduser()
+    if not path.exists():
+        return {
+            "worktree_exists": False,
+            "worktree_status": "deleted",
+            "worktree_status_message": "worktree directory not found",
+            "worktree_superproject": None,
+        }
+
+    resolved_top_level = top_level or git_top_level(path)
+    superproject = git_superproject(resolved_top_level or path)
+    if superproject is not None:
+        return {
+            "worktree_exists": True,
+            "worktree_status": "submodule",
+            "worktree_status_message": f"submodule under {superproject}",
+            "worktree_superproject": str(superproject),
+        }
+
+    return {
+        "worktree_exists": True,
+        "worktree_status": "ok",
+        "worktree_status_message": "",
+        "worktree_superproject": None,
+    }
 
 
 def git_worktree_paths(path: Path) -> list[Path]:
@@ -593,6 +651,7 @@ def catalog_worktree_from_path(
     branch = worktree_branch(top_level)
     tip = worktree_tip(top_level)
     worktree_root, worktree_root_title = worktree_root_from_top_level(top_level)
+    status = worktree_status_from_raw(str(top_level), top_level=top_level)
     running_services = running_by_worktree.get(str(top_level), [])
     compose_project = generated_compose_project(top_level) or first_service_value(running_services, "compose_project")
     compose_file = find_compose_file(top_level)
@@ -615,6 +674,7 @@ def catalog_worktree_from_path(
         "branch_tip_sha": tip["sha"],
         "worktree": str(top_level),
         "worktree_title": top_level.name,
+        **status,
         "worktree_root": worktree_root,
         "worktree_root_title": worktree_root_title,
         "compose_project": compose_project,

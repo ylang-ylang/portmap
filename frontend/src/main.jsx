@@ -119,6 +119,50 @@ function repoKey(entry) {
   return text(entry.repo_id || entry.repo_name || "unknown");
 }
 
+function worktreeDeleted(entry) {
+  return entry?.worktree_exists === false || text(entry?.worktree_status) === "deleted";
+}
+
+function worktreeSubmodule(entry) {
+  return text(entry?.worktree_status) === "submodule";
+}
+
+function statusRank(entry) {
+  if (worktreeDeleted(entry)) return 2;
+  if (worktreeSubmodule(entry)) return 1;
+  return 0;
+}
+
+function statusPayload(seed) {
+  if (worktreeDeleted(seed)) {
+    return {
+      worktree_exists: false,
+      worktree_status: "deleted",
+      worktree_status_message: text(seed.worktree_status_message || "worktree directory not found"),
+      worktree_superproject: text(seed.worktree_superproject || ""),
+    };
+  }
+  if (worktreeSubmodule(seed)) {
+    return {
+      worktree_exists: true,
+      worktree_status: "submodule",
+      worktree_status_message: text(seed.worktree_status_message || "git submodule checkout"),
+      worktree_superproject: text(seed.worktree_superproject || ""),
+    };
+  }
+  return {
+    worktree_exists: seed.worktree_exists === false ? false : seed.worktree_exists === true ? true : null,
+    worktree_status: text(seed.worktree_status || ""),
+    worktree_status_message: text(seed.worktree_status_message || ""),
+    worktree_superproject: text(seed.worktree_superproject || ""),
+  };
+}
+
+function applyWorktreeStatus(target, seed) {
+  if (statusRank(seed) < statusRank(target)) return;
+  Object.assign(target, statusPayload(seed));
+}
+
 function buildCatalogTree(catalog) {
   const projects = new Map();
 
@@ -155,6 +199,7 @@ function buildCatalogTree(catalog) {
         status: text(seed.status || (seed.running ? "running" : "stopped")),
         startable: Boolean(seed.startable),
         start_error: text(seed.start_error || ""),
+        ...statusPayload(seed),
         source: text(seed.source || "current"),
         last_seen_at: text(seed.last_seen_at || ""),
         branches: new Map(),
@@ -171,6 +216,7 @@ function buildCatalogTree(catalog) {
     worktree.worktree_title = worktree.worktree_title || rootTitle;
     worktree.worktree_root = worktree.worktree_root || rootPath;
     worktree.worktree_root_title = worktree.worktree_root_title || rootTitle;
+    applyWorktreeStatus(worktree, seed);
     worktree.source = worktree.source === "current" || seed.source === "current" ? "current" : worktree.source;
     worktree.last_seen_at = text(seed.last_seen_at || worktree.last_seen_at || "");
     return worktree;
@@ -186,6 +232,7 @@ function buildCatalogTree(catalog) {
         branch_tip_epoch: numberValue(seed.branch_tip_epoch),
         branch_tip_time: text(seed.branch_tip_time || ""),
         branch_tip_sha: text(seed.branch_tip_sha || ""),
+        ...statusPayload(seed),
         services: [],
       });
     }
@@ -197,6 +244,7 @@ function buildCatalogTree(catalog) {
       branch.branch_tip_time = text(seed.branch_tip_time || "");
       branch.branch_tip_sha = text(seed.branch_tip_sha || "");
     }
+    applyWorktreeStatus(branch, seed);
     return branch;
   }
 
@@ -228,6 +276,10 @@ function buildCatalogTree(catalog) {
       branch_tip_epoch: service.branch_tip_epoch,
       branch_tip_time: service.branch_tip_time,
       branch_tip_sha: service.branch_tip_sha,
+      worktree_exists: service.worktree_exists,
+      worktree_status: service.worktree_status,
+      worktree_status_message: service.worktree_status_message,
+      worktree_superproject: service.worktree_superproject,
       running: true,
       status: "running",
       startable: true,
@@ -239,6 +291,10 @@ function buildCatalogTree(catalog) {
       branch_tip_epoch: service.branch_tip_epoch,
       branch_tip_time: service.branch_tip_time,
       branch_tip_sha: service.branch_tip_sha,
+      worktree_exists: service.worktree_exists,
+      worktree_status: service.worktree_status,
+      worktree_status_message: service.worktree_status_message,
+      worktree_superproject: service.worktree_superproject,
     }).services.push(service);
   }
 
@@ -357,6 +413,43 @@ function StatPill({ label }) {
 
 function CodeText({ value }) {
   return <code>{text(value)}</code>;
+}
+
+function BranchName({ entry, className = "" }) {
+  const classes = ["branch-name-label", className, worktreeDeleted(entry) ? "branch-name-deleted" : ""]
+    .filter(Boolean)
+    .join(" ");
+  return <span className={classes}>{text(entry.branch || "")}</span>;
+}
+
+function WorktreeStatusBadges({ entry }) {
+  const badges = [];
+  if (worktreeDeleted(entry)) {
+    badges.push({
+      key: "deleted",
+      label: "deleted",
+      title: text(entry.worktree_status_message || "worktree directory not found"),
+      className: "worktree-status-deleted",
+    });
+  }
+  if (worktreeSubmodule(entry)) {
+    badges.push({
+      key: "submodule",
+      label: "submodule",
+      title: text(entry.worktree_status_message || entry.worktree_superproject || "git submodule checkout"),
+      className: "worktree-status-submodule",
+    });
+  }
+  if (!badges.length) return null;
+  return (
+    <span className="worktree-status-badges">
+      {badges.map((badge) => (
+        <span className={`worktree-status-badge ${badge.className}`} title={badge.title} key={badge.key}>
+          {badge.label}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function OpenLink({ href, children }) {
@@ -488,7 +581,8 @@ function RunningBranchesMenu({ branches, onAction }) {
           {branches.map((branch) => (
             <div className="running-row" key={branch.branch}>
               <div className="running-main">
-                <CodeText value={branch.branch || ""} />
+                <BranchName entry={branch} />
+                <WorktreeStatusBadges entry={branch} />
                 <span className="branch-path-note" title={branch.worktree}>{branch.worktree_title}</span>
               </div>
               <BranchActions branch={branch} onAction={onAction} />
@@ -561,7 +655,8 @@ function BranchPanel({ branch, onAction }) {
         <button className="branch-toggle" type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
           <Chevron className="toggle-icon" aria-hidden="true" />
           <GitBranch className="entity-icon" aria-hidden="true" />
-          <span className="branch-name branch-running-name">{branch.branch}</span>
+          <BranchName entry={branch} className="branch-name branch-running-name" />
+          <WorktreeStatusBadges entry={branch} />
           <span className="branch-path-note" title={branch.worktree}>{branch.worktree_title}</span>
         </button>
         <div className="branch-header-right">
@@ -617,7 +712,8 @@ function DeadInstancesMenu({ instances, onStart }) {
           {instances.map((instance) => (
             <div className="dead-row" key={`${instance.worktree}-${instance.branch}-${instance.compose_project || ""}`}>
               <div className="dead-main">
-                <CodeText value={instance.branch || ""} />
+                <BranchName entry={instance} />
+                <WorktreeStatusBadges entry={instance} />
                 <span className="branch-path-note" title={instance.worktree}>{instance.worktree_title}</span>
                 {instance.source === "history" ? <span className="dead-note">history</span> : null}
               </div>
