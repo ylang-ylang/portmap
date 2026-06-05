@@ -28,3 +28,7 @@
   in dark mode and the browser tab shows the `pM` favicon.
 - Merge `feat/catalog-public-static` so the production Python catalog server
   serves Vite public root static assets such as `/favicon.svg`.
+- Merge `feat/catalog-worktree-start` so the catalog groups entries by repo
+  identity and linked `.git` wt root, exposes running/dead branch controls,
+  and keeps startable history as dead branch discovery instead of a separate UI
+  level.

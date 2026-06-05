@@ -30,11 +30,13 @@ services:
       PORTMAP_DNS_BIND: "${PORTMAP_DNS_BIND:?run portmap gateway up}"
       PORTMAP_DNS_DOMAIN: "${PORTMAP_DNS_DOMAIN:?run portmap gateway up}"
       PORTMAP_DNS_TARGET_IP: "${PORTMAP_DNS_TARGET_IP:?run portmap gateway up}"
+      PORTMAP_STATE_DIR: "${PORTMAP_STATE_DIR:?run portmap gateway up}"
     ports:
       - "${PORTMAP_CATALOG_BIND:?run portmap gateway up}:${PORTMAP_CATALOG_PORT:?run portmap gateway up}:8081"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src:/workspace/src:ro
+      - "${PORTMAP_STATE_DIR:?run portmap gateway up}:${PORTMAP_STATE_DIR:?run portmap gateway up}"
     networks:
       - portmap_gateway
 
