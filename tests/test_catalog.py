@@ -1,13 +1,19 @@
 import http.client
+import json
+import subprocess
 import threading
 from http.server import ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from portmap.catalog import (
     CatalogHandler,
+    collect_catalog,
     compose_down_project,
     compose_restart_project,
+    compose_up_worktree,
     container_to_service,
     parse_host_rule,
     read_static_asset,
@@ -29,6 +35,57 @@ def request_catalog(path: str, *, method: str = "GET") -> tuple[int, http.client
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+def write_git_compose_repo(path: Path, *, with_compose: bool = True, with_endpoints: bool = True) -> None:
+    path.mkdir(parents=True)
+    run(["git", "init", "-b", "dev"], cwd=path)
+    run(["git", "config", "user.email", "portmap-test@example.invalid"], cwd=path)
+    run(["git", "config", "user.name", "portmap test"], cwd=path)
+    (path / "README.md").write_text("sample\n", encoding="utf-8")
+    if with_compose:
+        (path / "docker-compose.yml").write_text(
+            """
+services:
+  frontend:
+    image: python:3.12-alpine
+    expose:
+      - "8000"
+""".lstrip(),
+            encoding="utf-8",
+        )
+    if with_endpoints:
+        (path / ".portmap").mkdir()
+        (path / ".portmap" / "endpoints.toml").write_text(
+            """
+[endpoints.frontend]
+kind = "http"
+service = "frontend"
+container_port = 8000
+""".lstrip(),
+            encoding="utf-8",
+        )
+    run(["git", "add", "."], cwd=path)
+    run(["git", "commit", "-m", "init sample compose repo"], cwd=path)
+
+
+def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        args,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"command failed: {' '.join(args)}\n"
+            f"cwd: {cwd}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    return result
 
 
 def test_container_to_service_uses_portmap_labels() -> None:
@@ -140,7 +197,12 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'/assets/dns-check.svg' in script_body
     assert b'data-catalog-tree' in script_body
     assert b'data-project-group' in script_body
+    assert b'data-worktree-group' in script_body
     assert b'data-branch-group' in script_body
+    assert b'data-dead-panel' in script_body
+    assert b'dead-menu' in script_body
+    assert b'running-menu' in script_body
+    assert b'History' not in script_body
     assert b'dns-status' in script_body
     assert b'Action log' in script_body
     assert b'action-log' in script_body
@@ -150,8 +212,16 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'resolvectl revert "$DNS_IFACE"' in script_body
     assert b'split-dns-test' not in script_body
     assert b'succ' in script_body
+    assert b'/actions/compose-up' in script_body
+    assert b'Start' in script_body
     assert b'.project-group' in stylesheet_body
+    assert b'.worktree-group' in stylesheet_body
     assert b'.branch-group' in stylesheet_body
+    assert b'.dead-menu' in stylesheet_body
+    assert b'.running-menu' in stylesheet_body
+    assert b'.branch-running-name' in stylesheet_body
+    assert b'.history-panel' not in stylesheet_body
+    assert stylesheet_body.count(b"\n") > 20
     assert b'.dns-status' in stylesheet_body
     assert b'.dns-status-ok' in stylesheet_body
     assert b'.dns-status-failed' in stylesheet_body
@@ -180,6 +250,226 @@ def test_catalog_http_rejects_missing_public_root_static_assets() -> None:
     assert status == 404
     assert headers["content-type"] == "text/plain; charset=utf-8"
     assert body == b"not found\n"
+
+
+def test_collect_catalog_includes_running_worktree_and_writes_history(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "sample@dev"
+    history = tmp_path / "history.json"
+    write_git_compose_repo(repo)
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(history))
+
+    def fake_docker_get(path: str):
+        if path == "/containers/json?all=0":
+            return [
+                {
+                    "Names": ["/sample-frontend-1"],
+                    "Image": "sample:latest",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_dev",
+                        "com.docker.compose.service": "frontend",
+                        "traefik.enable": "true",
+                        "portmap.managed": "true",
+                        "portmap.repo_name": "sample",
+                        "portmap.branch": "dev",
+                        "portmap.worktree": str(repo),
+                        "portmap.endpoints.frontend.name": "frontend",
+                        "portmap.endpoints.frontend.kind": "http",
+                        "portmap.endpoints.frontend.container_port": "8000",
+                        "portmap.endpoints.frontend.url": "http://frontend.dev.sample.debug.lan:8080",
+                    },
+                }
+            ]
+        raise AssertionError(path)
+
+    monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
+
+    catalog = collect_catalog()
+
+    assert catalog["services"][0]["worktree"] == str(repo)
+    assert catalog["services"][0]["worktree_root"] == str(repo / ".git")
+    assert catalog["worktrees"][0]["worktree"] == str(repo)
+    assert catalog["worktrees"][0]["worktree_root"] == str(repo / ".git")
+    assert catalog["worktrees"][0]["branch"] == "dev"
+    assert catalog["worktrees"][0]["running"] is True
+    assert catalog["worktrees"][0]["startable"] is True
+    assert catalog["worktrees"][0]["source"] == "current"
+
+    payload = json.loads(history.read_text(encoding="utf-8"))
+    assert payload["worktrees"][0]["worktree"] == str(repo)
+    assert payload["worktrees"][0]["worktree_root"] == str(repo / ".git")
+
+
+def test_collect_catalog_restores_existing_worktree_from_history(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "sample@dev"
+    history = tmp_path / "history.json"
+    write_git_compose_repo(repo)
+    history.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "updated_at": "2026-06-01T00:00:00+00:00",
+                "worktrees": [
+                    {
+                        "repo_id": "old",
+                        "repo_name": "sample",
+                        "branch": "dev",
+                        "worktree": str(repo),
+                        "worktree_title": repo.name,
+                        "last_seen_at": "2026-06-01T00:00:00+00:00",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(history))
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+
+    catalog = collect_catalog()
+
+    assert catalog["services"] == []
+    assert catalog["worktrees"][0]["worktree"] == str(repo)
+    assert catalog["worktrees"][0]["running"] is False
+    assert catalog["worktrees"][0]["startable"] is True
+    assert catalog["worktrees"][0]["source"] == "history"
+
+
+def test_collect_catalog_drops_history_branches_not_checked_out(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "sample@dev"
+    history = tmp_path / "history.json"
+    write_git_compose_repo(repo)
+    history.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "updated_at": "2026-06-01T00:00:00+00:00",
+                "worktrees": [
+                    {
+                        "repo_name": "sample",
+                        "branch": "dev",
+                        "worktree": str(repo),
+                        "worktree_title": repo.name,
+                        "last_seen_at": "2026-06-01T00:00:00+00:00",
+                    },
+                    {
+                        "repo_name": "sample",
+                        "branch": "feat-old",
+                        "worktree": str(repo),
+                        "worktree_title": repo.name,
+                        "last_seen_at": "2026-06-02T00:00:00+00:00",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(history))
+    monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", str(tmp_path))
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+
+    catalog = collect_catalog()
+
+    by_branch = {worktree["branch"]: worktree for worktree in catalog["worktrees"]}
+    assert set(by_branch) == {"dev"}
+    assert by_branch["dev"]["source"] == "current"
+    assert by_branch["dev"]["startable"] is True
+
+    payload = json.loads(history.read_text(encoding="utf-8"))
+    assert [entry["branch"] for entry in payload["worktrees"]] == ["dev"]
+
+
+def test_collect_catalog_drops_non_startable_history(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "sample@dev"
+    history = tmp_path / "history.json"
+    write_git_compose_repo(repo, with_endpoints=False)
+    history.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "updated_at": "2026-06-01T00:00:00+00:00",
+                "worktrees": [
+                    {
+                        "repo_name": "sample",
+                        "branch": "dev",
+                        "worktree": str(repo),
+                        "worktree_title": repo.name,
+                        "last_seen_at": "2026-06-01T00:00:00+00:00",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(history))
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+
+    catalog = collect_catalog()
+
+    assert catalog["services"] == []
+    assert catalog["worktrees"] == []
+
+
+def test_compose_up_worktree_runs_generated_compose_command(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "sample@dev"
+    write_git_compose_repo(repo)
+    calls = {}
+    real_run = subprocess.run
+
+    def fake_ensure(args, *, cwd, environ):
+        calls["ensure"] = (args, cwd, environ)
+
+    def fake_plan(args, *, cwd):
+        calls["plan"] = (args, cwd)
+        return SimpleNamespace(
+            command=["docker", "compose", "-f", str(repo / "docker-compose.yml"), "up", "-d"],
+            injected=True,
+            compose_project="sample_dev",
+        )
+
+    def fake_run(command, *, cwd, env=None, text=True, stdout=None, stderr=None, check=False):
+        if command and command[0] == "git":
+            return real_run(
+                command,
+                cwd=cwd,
+                env=env,
+                text=text,
+                stdout=stdout,
+                stderr=stderr,
+                check=check,
+            )
+        calls["run"] = {
+            "command": command,
+            "cwd": cwd,
+            "env": env,
+            "text": text,
+            "stdout": stdout,
+            "stderr": stderr,
+            "check": check,
+        }
+        return SimpleNamespace(returncode=0, stdout="started\n", stderr="")
+
+    monkeypatch.setattr("portmap.catalog.ensure_generated_override", fake_ensure)
+    monkeypatch.setattr("portmap.catalog.plan_docker_compose_command", fake_plan)
+    monkeypatch.setattr("portmap.catalog.subprocess.run", fake_run)
+
+    result = compose_up_worktree(str(repo))
+
+    assert calls["ensure"][0] == ["up", "-d"]
+    assert calls["ensure"][1] == repo
+    assert calls["plan"] == (["up", "-d"], repo)
+    assert calls["run"]["command"] == ["docker", "compose", "-f", str(repo / "docker-compose.yml"), "up", "-d"]
+    assert calls["run"]["cwd"] == repo
+    assert calls["run"]["env"]["PORTMAP_BROKER_BYPASS"] == "1"
+    assert result["ok"] is True
+    assert result["compose_project"] == "sample_dev"
+
+
+def test_compose_up_worktree_rejects_non_startable_repo(tmp_path: Path) -> None:
+    repo = tmp_path / "sample@dev"
+    write_git_compose_repo(repo, with_endpoints=False)
+
+    with pytest.raises(ValueError, match="missing .portmap/endpoints.toml"):
+        compose_up_worktree(str(repo))
 
 
 def test_compose_down_project_removes_portmap_managed_project(monkeypatch) -> None:
