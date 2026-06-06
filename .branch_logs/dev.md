@@ -46,3 +46,6 @@
 - Merge `feat/branch-tip-order` so catalog branches are ordered by newest Git
   tip first and endpoint/service tables preserve `.portmap/endpoints.toml`
   declaration order.
+- Merge `feat/worktree-status-badges` so running containers with deleted
+  worktree directories show red deleted branch badges, and submodule checkouts
+  show submodule badges beside branch names.

@@ -13,3 +13,4 @@
 - Treat host agent worktree metadata as authoritative when enriching service
   records, so the catalog container does not mark existing host paths as deleted
   just because they are not mounted inside the catalog container.
+- Sync current `dev` before merging this follow-up back to `dev`.
