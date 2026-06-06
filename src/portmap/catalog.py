@@ -328,6 +328,8 @@ def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str,
             for sibling in git_worktree_paths(candidate):
                 add_existing_worktree_candidate(candidates, sibling)
 
+    add_submodule_worktree_candidates(candidates)
+
     worktrees = []
     for path in candidates.values():
         worktree = catalog_worktree_from_path(path, running_by_worktree)
@@ -522,6 +524,101 @@ def add_existing_worktree_candidate(candidates: dict[str, Path], path: Path) -> 
     if top_level is None or not top_level.exists():
         return
     candidates[str(top_level)] = top_level
+
+
+def add_submodule_worktree_candidates(candidates: dict[str, Path]) -> None:
+    seed_paths = list(candidates.values())
+    for path in seed_paths:
+        for candidate in submodule_worktree_candidates(path):
+            add_existing_worktree_candidate(candidates, candidate)
+
+
+def submodule_worktree_candidates(path: Path) -> list[Path]:
+    top_level = git_top_level(path)
+    if top_level is None:
+        return []
+
+    superproject = git_superproject(top_level)
+    if superproject is not None:
+        relative = relative_path_under(top_level, superproject)
+        if relative is None:
+            return []
+        return [
+            sibling / relative
+            for sibling in worktree_self_and_siblings(superproject)
+            if (sibling / relative).exists()
+        ]
+
+    candidates: list[Path] = []
+    for superproject_worktree in worktree_self_and_siblings(top_level):
+        for submodule_path in git_submodule_paths(superproject_worktree):
+            candidate = superproject_worktree / submodule_path
+            if candidate.exists():
+                candidates.append(candidate)
+    return candidates
+
+
+def worktree_self_and_siblings(path: Path) -> list[Path]:
+    top_level = git_top_level(path)
+    if top_level is None:
+        return []
+    siblings = [top_level, *git_worktree_paths(top_level)]
+    deduped: dict[str, Path] = {}
+    for sibling in siblings:
+        sibling_top_level = git_top_level(sibling)
+        if sibling_top_level is not None:
+            deduped[str(sibling_top_level)] = sibling_top_level
+    return list(deduped.values())
+
+
+def git_submodule_paths(path: Path) -> list[Path]:
+    top_level = git_top_level(path)
+    if top_level is None:
+        return []
+    gitmodules = top_level / ".gitmodules"
+    if not gitmodules.exists():
+        return []
+    result = git(top_level, "config", "--file", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$")
+    if result.returncode != 0:
+        return []
+    return parse_git_submodule_paths(result.stdout)
+
+
+def parse_git_submodule_paths(output: str) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        relative = clean_submodule_path(parts[1].strip())
+        if relative is None:
+            continue
+        key = relative.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(relative)
+    return paths
+
+
+def clean_submodule_path(value: str) -> Path | None:
+    if not value:
+        return None
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return Path(*path.parts)
+
+
+def relative_path_under(child: Path, parent: Path) -> Path | None:
+    try:
+        relative = child.relative_to(parent)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    return relative
 
 
 def canonical_worktree_path(path: Path) -> str:

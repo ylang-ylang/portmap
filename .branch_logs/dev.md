@@ -52,3 +52,5 @@
 - Merge `feat/worktree-status-badges` follow-up so host agent worktree metadata
   overrides catalog-container path checks and avoids false deleted badges for
   existing host worktrees.
+- Merge `feat/submodule-worktrees` so the host agent can discover startable
+  portmap-ready submodules across sibling superproject worktrees.

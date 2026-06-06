@@ -612,6 +612,67 @@ def test_collect_catalog_orders_worktrees_by_branch_tip_descending(tmp_path: Pat
     assert catalog["worktrees"][0]["branch_tip_time"] == "2026-02-01T00:00:00+00:00"
 
 
+def test_collect_catalog_discovers_startable_submodules_across_superproject_worktrees(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    child_source = tmp_path / "browserdeck-source"
+    parent = tmp_path / "comap@dev"
+    sibling = tmp_path / "comap@feat"
+    submodule_relative = Path("3rdparty/browserdeck")
+
+    write_git_compose_repo(child_source)
+
+    parent.mkdir()
+    run(["git", "init", "-b", "dev"], cwd=parent)
+    run(["git", "config", "user.email", "portmap-test@example.invalid"], cwd=parent)
+    run(["git", "config", "user.name", "portmap test"], cwd=parent)
+    (parent / "README.md").write_text("parent\n", encoding="utf-8")
+    run(["git", "add", "."], cwd=parent)
+    run(["git", "commit", "-m", "init parent"], cwd=parent)
+    run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            str(child_source),
+            submodule_relative.as_posix(),
+        ],
+        cwd=parent,
+    )
+    run(["git", "commit", "-m", "add browserdeck submodule"], cwd=parent)
+    run(["git", "worktree", "add", "-b", "feat-sibling", str(sibling)], cwd=parent)
+    run(["git", "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], cwd=sibling)
+
+    monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", str(parent))
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(tmp_path / "history.json"))
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+
+    catalog = collect_catalog()
+
+    submodule_worktrees = {
+        worktree["worktree"]: worktree
+        for worktree in catalog["worktrees"]
+        if worktree["repo_name"] == "browserdeck"
+    }
+    expected_paths = {
+        str((parent / submodule_relative).resolve()),
+        str((sibling / submodule_relative).resolve()),
+    }
+    assert set(submodule_worktrees) == expected_paths
+    assert {worktree["repo_id"] for worktree in submodule_worktrees.values()} == {
+        next(iter(submodule_worktrees.values()))["repo_id"]
+    }
+    assert all(worktree["startable"] is True for worktree in submodule_worktrees.values())
+    assert all(worktree["worktree_status"] == "submodule" for worktree in submodule_worktrees.values())
+    assert {
+        worktree["worktree_superproject"]
+        for worktree in submodule_worktrees.values()
+    } == {str(parent.resolve()), str(sibling.resolve())}
+
+
 def test_collect_catalog_restores_existing_worktree_from_history(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "sample@dev"
     history = tmp_path / "history.json"
