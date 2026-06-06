@@ -213,6 +213,67 @@ button {
   color: #16a34a;
 }
 
+.branch-name-label {
+  min-width: 0;
+  display: inline-block;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.running-main .branch-name-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: #14532d;
+}
+
+.dead-main .branch-name-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.branch-name-deleted,
+.branch-running-name.branch-name-deleted,
+.running-main .branch-name-deleted,
+.dead-main .branch-name-deleted {
+  color: #dc2626;
+}
+
+.worktree-status-badges {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.worktree-status-badge {
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+  padding: 2px 5px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.worktree-status-deleted {
+  border-color: #dc2626;
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.worktree-status-submodule {
+  border-color: #64748b;
+  background: #f1f5f9;
+  color: #334155;
+}
+
 .branch-path-note {
   min-width: 0;
   max-width: 280px;

@@ -182,6 +182,87 @@ def test_container_to_service_orders_portmap_endpoints_by_toml_order() -> None:
     assert [endpoint["name"] for endpoint in service["endpoints"]] == ["alpha", "beta", "zeta"]
 
 
+def test_container_to_service_marks_deleted_worktree(tmp_path: Path) -> None:
+    missing_worktree = tmp_path / "deleted-worktree"
+
+    service = container_to_service(
+        {
+            "Names": ["/sample-api-1"],
+            "Image": "sample:latest",
+            "Labels": {
+                "com.docker.compose.project": "sample",
+                "com.docker.compose.service": "api",
+                "traefik.enable": "true",
+                "portmap.managed": "true",
+                "portmap.repo_name": "sample",
+                "portmap.branch": "feat-deleted",
+                "portmap.worktree": str(missing_worktree),
+                "portmap.endpoints.sample-feat-deleted-api.name": "api",
+                "portmap.endpoints.sample-feat-deleted-api.order": "0",
+                "portmap.endpoints.sample-feat-deleted-api.kind": "http",
+                "portmap.endpoints.sample-feat-deleted-api.container_port": "9000",
+            },
+        }
+    )
+
+    assert service is not None
+    assert service["worktree"] == str(missing_worktree)
+    assert service["worktree_exists"] is False
+    assert service["worktree_status"] == "deleted"
+    assert service["worktree_status_message"] == "worktree directory not found"
+    assert service["worktree_root"] is None
+
+
+def test_container_to_service_marks_submodule_worktree(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    child_source = tmp_path / "browserdeck-source"
+    submodule_path = parent / "modules" / "browserdeck"
+
+    child_source.mkdir()
+    run(["git", "init", "-b", "main"], cwd=child_source)
+    run(["git", "config", "user.email", "portmap-test@example.invalid"], cwd=child_source)
+    run(["git", "config", "user.name", "portmap test"], cwd=child_source)
+    (child_source / "README.md").write_text("child\n", encoding="utf-8")
+    run(["git", "add", "."], cwd=child_source)
+    run(["git", "commit", "-m", "init child"], cwd=child_source)
+
+    parent.mkdir()
+    run(["git", "init", "-b", "main"], cwd=parent)
+    run(["git", "config", "user.email", "portmap-test@example.invalid"], cwd=parent)
+    run(["git", "config", "user.name", "portmap test"], cwd=parent)
+    (parent / "README.md").write_text("parent\n", encoding="utf-8")
+    run(["git", "add", "."], cwd=parent)
+    run(["git", "commit", "-m", "init parent"], cwd=parent)
+    run(["git", "-c", "protocol.file.allow=always", "submodule", "add", str(child_source), "modules/browserdeck"], cwd=parent)
+    run(["git", "commit", "-m", "add browserdeck submodule"], cwd=parent)
+
+    service = container_to_service(
+        {
+            "Names": ["/browserdeck-api-1"],
+            "Image": "sample:latest",
+            "Labels": {
+                "com.docker.compose.project": "browserdeck",
+                "com.docker.compose.service": "api",
+                "traefik.enable": "true",
+                "portmap.managed": "true",
+                "portmap.repo_name": "browserdeck",
+                "portmap.branch": "case-comap-frontend-debug",
+                "portmap.worktree": str(submodule_path),
+                "portmap.endpoints.browserdeck-case-api.name": "api",
+                "portmap.endpoints.browserdeck-case-api.order": "0",
+                "portmap.endpoints.browserdeck-case-api.kind": "http",
+                "portmap.endpoints.browserdeck-case-api.container_port": "9000",
+            },
+        }
+    )
+
+    assert service is not None
+    assert service["worktree_exists"] is True
+    assert service["worktree_status"] == "submodule"
+    assert service["worktree_superproject"] == str(parent.resolve())
+    assert service["worktree_status_message"] == f"submodule under {parent.resolve()}"
+
+
 def test_container_to_service_can_fallback_to_traefik_labels() -> None:
     service = container_to_service(
         {
@@ -376,6 +457,10 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'running-menu' in script_body
     assert b'branch_tip_epoch' in script_body
     assert b'portmap_order' in script_body
+    assert b'worktree-status-badge' in script_body
+    assert b'branch-name-deleted' in script_body
+    assert b'deleted' in script_body
+    assert b'submodule' in script_body
     assert b'is-empty' in script_body
     assert b'has-items' in script_body
     assert b'History' not in script_body
@@ -401,6 +486,9 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'.dead-menu-button.is-empty' in stylesheet_body
     assert b'inline-size: 144px' in stylesheet_body
     assert b'.branch-running-name' in stylesheet_body
+    assert b'.branch-name-deleted' in stylesheet_body
+    assert b'.worktree-status-deleted' in stylesheet_body
+    assert b'.worktree-status-submodule' in stylesheet_body
     assert b'.history-panel' not in stylesheet_body
     assert stylesheet_body.count(b"\n") > 20
     assert b'.dns-status' in stylesheet_body
