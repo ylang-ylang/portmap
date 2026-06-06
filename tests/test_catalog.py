@@ -371,6 +371,7 @@ def test_collect_catalog_uses_agent_worktrees_to_enrich_running_services(monkeyp
     assert catalog["services"][0]["worktree_root_title"] == "sample linked .git"
     assert catalog["services"][0]["worktree_exists"] is True
     assert catalog["services"][0]["worktree_status"] == "ok"
+    assert catalog["services"][0]["worktree_status_message"] == ""
 
 
 def test_collect_catalog_orders_services_by_portmap_endpoint_order(monkeypatch) -> None:
@@ -671,6 +672,16 @@ def test_collect_catalog_discovers_startable_submodules_across_superproject_work
         worktree["worktree_superproject"]
         for worktree in submodule_worktrees.values()
     } == {str(parent.resolve()), str(sibling.resolve())}
+    assert {worktree["display_worktree_root"] for worktree in submodule_worktrees.values()} == {
+        next(iter(submodule_worktrees.values()))["display_worktree_root"]
+    }
+    assert {worktree["display_worktree_root_title"] for worktree in submodule_worktrees.values()} == {
+        "comap / 3rdparty/browserdeck"
+    }
+    assert submodule_worktrees[str((parent / submodule_relative).resolve())]["display_branch"] == "dev"
+    assert submodule_worktrees[str((sibling / submodule_relative).resolve())]["display_branch"] == "feat-sibling"
+    assert all(worktree["submodule_branch"] for worktree in submodule_worktrees.values())
+    assert all(worktree["submodule_sha"] for worktree in submodule_worktrees.values())
 
 
 def test_collect_catalog_restores_existing_worktree_from_history(tmp_path: Path, monkeypatch) -> None:

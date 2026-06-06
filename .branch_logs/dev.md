@@ -54,3 +54,5 @@
   existing host worktrees.
 - Merge `feat/submodule-worktrees` so the host agent can discover startable
   portmap-ready submodules across sibling superproject worktrees.
+- Merge `feat/submodule-display-group` so submodule instances group by parent
+  repo path and show the superproject branch as the primary branch label.

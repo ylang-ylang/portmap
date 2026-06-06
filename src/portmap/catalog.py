@@ -53,6 +53,16 @@ AGENT_AUTHORITATIVE_WORKTREE_KEYS = {
     "branch_tip_epoch",
     "branch_tip_time",
     "branch_tip_sha",
+    "display_branch",
+    "display_worktree_root",
+    "display_worktree_root_title",
+    "submodule_branch",
+    "submodule_relative_path",
+    "submodule_sha",
+    "superproject_branch",
+    "superproject_repo_id",
+    "superproject_repo_name",
+    "superproject_worktree",
     "worktree_exists",
     "worktree_root",
     "worktree_root_title",
@@ -166,6 +176,16 @@ def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: li
             "branch_tip_epoch",
             "branch_tip_time",
             "branch_tip_sha",
+            "display_branch",
+            "display_worktree_root",
+            "display_worktree_root_title",
+            "submodule_branch",
+            "submodule_relative_path",
+            "submodule_sha",
+            "superproject_branch",
+            "superproject_repo_id",
+            "superproject_repo_name",
+            "superproject_worktree",
             "worktree_exists",
             "worktree_root",
             "worktree_root_title",
@@ -174,8 +194,9 @@ def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: li
             "worktree_superproject",
             "compose_project",
         ):
-            if key in AGENT_AUTHORITATIVE_WORKTREE_KEYS and not missing_catalog_value(worktree.get(key)):
-                service[key] = worktree[key]
+            if key in AGENT_AUTHORITATIVE_WORKTREE_KEYS:
+                if key in worktree:
+                    service[key] = worktree[key]
                 continue
             if missing_catalog_value(service.get(key)) and not missing_catalog_value(worktree.get(key)):
                 service[key] = worktree[key]
@@ -726,6 +747,44 @@ def worktree_status_from_raw(raw_worktree: str | None, *, top_level: Path | None
     }
 
 
+def submodule_display_metadata(
+    *,
+    top_level: Path,
+    child_repo_id: str,
+    branch: str,
+    tip: dict[str, int | str],
+) -> dict[str, Any]:
+    superproject = git_superproject(top_level)
+    if superproject is None:
+        return {}
+
+    relative = relative_path_under(top_level, superproject)
+    if relative is None:
+        return {}
+
+    superproject_identity = resolve_repo_identity(
+        project_directory=superproject,
+        repo_root=superproject,
+        repo_id=None,
+        repo_name=None,
+    )
+    superproject_branch = worktree_branch(superproject)
+    relative_text = relative.as_posix()
+    display_root = f"submodule:{child_repo_id}:{superproject_identity.repo_id}:{relative_text}"
+    return {
+        "display_branch": superproject_branch,
+        "display_worktree_root": display_root,
+        "display_worktree_root_title": f"{superproject_identity.display_name} / {relative_text}",
+        "submodule_branch": branch,
+        "submodule_relative_path": relative_text,
+        "submodule_sha": str(tip.get("sha") or ""),
+        "superproject_branch": superproject_branch,
+        "superproject_repo_id": superproject_identity.repo_id,
+        "superproject_repo_name": superproject_identity.display_name,
+        "superproject_worktree": str(superproject),
+    }
+
+
 def git_worktree_paths(path: Path) -> list[Path]:
     if git_top_level(path) is None:
         return []
@@ -763,6 +822,12 @@ def catalog_worktree_from_path(
     tip = worktree_tip(top_level)
     worktree_root, worktree_root_title = worktree_root_from_top_level(top_level)
     status = worktree_status_from_raw(str(top_level), top_level=top_level)
+    display = submodule_display_metadata(
+        top_level=top_level,
+        child_repo_id=identity.repo_id,
+        branch=branch,
+        tip=tip,
+    )
     running_services = running_by_worktree.get(str(top_level), [])
     compose_project = generated_compose_project(top_level) or first_service_value(running_services, "compose_project")
     compose_file = find_compose_file(top_level)
@@ -780,12 +845,14 @@ def catalog_worktree_from_path(
         "repo_id": identity.repo_id,
         "repo_name": identity.display_name,
         "branch": branch,
+        "display_branch": display.get("display_branch", branch),
         "branch_tip_epoch": tip["epoch"],
         "branch_tip_time": tip["time"],
         "branch_tip_sha": tip["sha"],
         "worktree": str(top_level),
         "worktree_title": top_level.name,
         **status,
+        **display,
         "worktree_root": worktree_root,
         "worktree_root_title": worktree_root_title,
         "compose_project": compose_project,
