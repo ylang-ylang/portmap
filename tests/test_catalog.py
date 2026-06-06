@@ -337,6 +337,10 @@ def test_collect_catalog_uses_agent_worktrees_to_enrich_running_services(monkeyp
                     "worktree_title": "sample@dev",
                     "worktree_root": "/repo/linked-git/sample.git",
                     "worktree_root_title": "sample linked .git",
+                    "worktree_exists": True,
+                    "worktree_status": "ok",
+                    "worktree_status_message": "",
+                    "worktree_superproject": None,
                     "compose_project": "sample_dev",
                     "running": True,
                     "startable": True,
@@ -365,6 +369,8 @@ def test_collect_catalog_uses_agent_worktrees_to_enrich_running_services(monkeyp
     assert len(catalog["worktrees"]) == 2
     assert catalog["services"][0]["worktree_root"] == "/repo/linked-git/sample.git"
     assert catalog["services"][0]["worktree_root_title"] == "sample linked .git"
+    assert catalog["services"][0]["worktree_exists"] is True
+    assert catalog["services"][0]["worktree_status"] == "ok"
 
 
 def test_collect_catalog_orders_services_by_portmap_endpoint_order(monkeypatch) -> None:

@@ -49,3 +49,6 @@
 - Merge `feat/worktree-status-badges` so running containers with deleted
   worktree directories show red deleted branch badges, and submodule checkouts
   show submodule badges beside branch names.
+- Merge `feat/worktree-status-badges` follow-up so host agent worktree metadata
+  overrides catalog-container path checks and avoids false deleted badges for
+  existing host worktrees.

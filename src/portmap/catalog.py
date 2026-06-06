@@ -49,6 +49,17 @@ STATIC_CONTENT_TYPES_BY_SUFFIX = {
     ".webmanifest": "application/manifest+json",
 }
 MISSING_ORDER = 1_000_000
+AGENT_AUTHORITATIVE_WORKTREE_KEYS = {
+    "branch_tip_epoch",
+    "branch_tip_time",
+    "branch_tip_sha",
+    "worktree_exists",
+    "worktree_root",
+    "worktree_root_title",
+    "worktree_status",
+    "worktree_status_message",
+    "worktree_superproject",
+}
 
 
 def select_dns_server(bind_ip: str, target_ip: str) -> str:
@@ -163,6 +174,9 @@ def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: li
             "worktree_superproject",
             "compose_project",
         ):
+            if key in AGENT_AUTHORITATIVE_WORKTREE_KEYS and not missing_catalog_value(worktree.get(key)):
+                service[key] = worktree[key]
+                continue
             if missing_catalog_value(service.get(key)) and not missing_catalog_value(worktree.get(key)):
                 service[key] = worktree[key]
 
