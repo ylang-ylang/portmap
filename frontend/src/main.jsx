@@ -108,11 +108,27 @@ function pathTitle(value) {
 }
 
 function worktreeRootPath(seed) {
-  return text(seed.worktree_root || seed.worktree || "");
+  return text(seed.display_worktree_root || seed.worktree_root || seed.worktree || "");
 }
 
 function worktreeRootTitle(seed) {
-  return text(seed.worktree_root_title || pathTitle(worktreeRootPath(seed)) || pathTitle(seed.worktree) || "wt root");
+  return text(seed.display_worktree_root_title || seed.worktree_root_title || pathTitle(worktreeRootPath(seed)) || pathTitle(seed.worktree) || "wt root");
+}
+
+function branchName(seed) {
+  return text(seed.display_branch || seed.branch || "unknown");
+}
+
+function branchNote(seed) {
+  if (worktreeSubmodule(seed)) {
+    const submoduleBranch = text(seed.submodule_branch || seed.branch || "");
+    const submoduleSha = text(seed.submodule_sha || seed.branch_tip_sha || "").slice(0, 7);
+    if (submoduleBranch && submoduleSha && !submoduleBranch.includes(submoduleSha)) {
+      return `${submoduleBranch} ${submoduleSha}`;
+    }
+    return submoduleBranch || (submoduleSha ? `submodule ${submoduleSha}` : pathTitle(seed.worktree));
+  }
+  return text(seed.worktree_title || pathTitle(seed.worktree));
 }
 
 function repoKey(entry) {
@@ -134,8 +150,21 @@ function statusRank(entry) {
 }
 
 function statusPayload(seed) {
+  const displayPayload = {
+    display_branch: text(seed.display_branch || ""),
+    display_worktree_root: text(seed.display_worktree_root || ""),
+    display_worktree_root_title: text(seed.display_worktree_root_title || ""),
+    submodule_branch: text(seed.submodule_branch || ""),
+    submodule_relative_path: text(seed.submodule_relative_path || ""),
+    submodule_sha: text(seed.submodule_sha || ""),
+    superproject_branch: text(seed.superproject_branch || ""),
+    superproject_repo_id: text(seed.superproject_repo_id || ""),
+    superproject_repo_name: text(seed.superproject_repo_name || ""),
+    superproject_worktree: text(seed.superproject_worktree || ""),
+  };
   if (worktreeDeleted(seed)) {
     return {
+      ...displayPayload,
       worktree_exists: false,
       worktree_status: "deleted",
       worktree_status_message: text(seed.worktree_status_message || "worktree directory not found"),
@@ -144,6 +173,7 @@ function statusPayload(seed) {
   }
   if (worktreeSubmodule(seed)) {
     return {
+      ...displayPayload,
       worktree_exists: true,
       worktree_status: "submodule",
       worktree_status_message: text(seed.worktree_status_message || "git submodule checkout"),
@@ -151,6 +181,7 @@ function statusPayload(seed) {
     };
   }
   return {
+    ...displayPayload,
     worktree_exists: seed.worktree_exists === false ? false : seed.worktree_exists === true ? true : null,
     worktree_status: text(seed.worktree_status || ""),
     worktree_status_message: text(seed.worktree_status_message || ""),
@@ -227,8 +258,9 @@ function buildCatalogTree(catalog) {
     if (!worktree.branches.has(cleanBranch)) {
       worktree.branches.set(cleanBranch, {
         branch: cleanBranch,
+        raw_branch: text(seed.branch || cleanBranch),
         worktree: text(seed.worktree || ""),
-        worktree_title: text(seed.worktree_title || pathTitle(seed.worktree) || cleanBranch),
+        worktree_title: text(branchNote(seed) || cleanBranch),
         branch_tip_epoch: numberValue(seed.branch_tip_epoch),
         branch_tip_time: text(seed.branch_tip_time || ""),
         branch_tip_sha: text(seed.branch_tip_sha || ""),
@@ -238,7 +270,7 @@ function buildCatalogTree(catalog) {
     }
     const branch = worktree.branches.get(cleanBranch);
     branch.worktree = branch.worktree || text(seed.worktree || "");
-    branch.worktree_title = branch.worktree_title || text(seed.worktree_title || pathTitle(seed.worktree) || cleanBranch);
+    branch.worktree_title = branch.worktree_title || text(branchNote(seed) || cleanBranch);
     if (numberValue(seed.branch_tip_epoch) > numberValue(branch.branch_tip_epoch)) {
       branch.branch_tip_epoch = numberValue(seed.branch_tip_epoch);
       branch.branch_tip_time = text(seed.branch_tip_time || "");
@@ -253,23 +285,26 @@ function buildCatalogTree(catalog) {
     const project = ensureProject(record.repo_id, record.repo_name);
     const worktree = ensureWorktree(project, record);
     if (!record.running) {
-      worktree.dead_instances.push({ ...record, dead: true });
+      worktree.dead_instances.push({ ...record, branch: branchName(record), raw_branch: text(record.branch || ""), dead: true });
       continue;
     }
-    ensureBranch(worktree, record.branch, record);
+    ensureBranch(worktree, branchName(record), record);
   }
 
   for (const service of catalog?.services || []) {
     const repoId = text(service.repo_id || "unknown");
     const repoName = text(service.repo_name || repoId);
-    const branchName = text(service.branch || "unknown");
+    const cleanBranchName = branchName(service);
     const project = ensureProject(repoId, repoName);
     const worktree = ensureWorktree(project, {
       repo_id: repoId,
       repo_name: repoName,
-      branch: branchName,
+      branch: service.branch,
+      display_branch: service.display_branch,
       worktree: service.worktree,
-      worktree_title: pathTitle(service.worktree),
+      worktree_title: branchNote(service),
+      display_worktree_root: service.display_worktree_root,
+      display_worktree_root_title: service.display_worktree_root_title,
       worktree_root: service.worktree_root,
       worktree_root_title: service.worktree_root_title,
       compose_project: service.compose_project,
@@ -280,14 +315,23 @@ function buildCatalogTree(catalog) {
       worktree_status: service.worktree_status,
       worktree_status_message: service.worktree_status_message,
       worktree_superproject: service.worktree_superproject,
+      submodule_branch: service.submodule_branch,
+      submodule_relative_path: service.submodule_relative_path,
+      submodule_sha: service.submodule_sha,
+      superproject_branch: service.superproject_branch,
+      superproject_repo_id: service.superproject_repo_id,
+      superproject_repo_name: service.superproject_repo_name,
+      superproject_worktree: service.superproject_worktree,
       running: true,
       status: "running",
       startable: true,
       source: "current",
     });
-    ensureBranch(worktree, branchName, {
+    ensureBranch(worktree, cleanBranchName, {
+      branch: service.branch,
+      display_branch: service.display_branch,
       worktree: service.worktree,
-      worktree_title: pathTitle(service.worktree),
+      worktree_title: branchNote(service),
       branch_tip_epoch: service.branch_tip_epoch,
       branch_tip_time: service.branch_tip_time,
       branch_tip_sha: service.branch_tip_sha,
@@ -295,6 +339,13 @@ function buildCatalogTree(catalog) {
       worktree_status: service.worktree_status,
       worktree_status_message: service.worktree_status_message,
       worktree_superproject: service.worktree_superproject,
+      submodule_branch: service.submodule_branch,
+      submodule_relative_path: service.submodule_relative_path,
+      submodule_sha: service.submodule_sha,
+      superproject_branch: service.superproject_branch,
+      superproject_repo_id: service.superproject_repo_id,
+      superproject_repo_name: service.superproject_repo_name,
+      superproject_worktree: service.superproject_worktree,
     }).services.push(service);
   }
 
