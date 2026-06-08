@@ -772,7 +772,7 @@ def submodule_display_metadata(
     relative_text = relative.as_posix()
     display_root = f"submodule:{child_repo_id}:{superproject_identity.repo_id}:{relative_text}"
     return {
-        "display_branch": superproject_branch,
+        "display_branch": branch,
         "display_worktree_root": display_root,
         "display_worktree_root_title": f"{superproject_identity.display_name} / {relative_text}",
         "submodule_branch": branch,

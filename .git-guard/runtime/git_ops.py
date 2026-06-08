@@ -11,6 +11,27 @@ try:
 except ImportError:  # pragma: no cover - installed hook script mode
     from common import HookReject, PushUpdate, RefUpdate, ZERO
 
+GIT_LOCAL_ENV_VARS = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_NAMESPACE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_QUARANTINE_PATH",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+}
+
 def read_updates(stdin: Any) -> list[RefUpdate]:
     updates: list[RefUpdate] = []
     for raw_line in stdin:
@@ -102,9 +123,10 @@ def git_literal_pathspec(repo: Path, *args: str, check: bool = True) -> subproce
     return result
 
 def git_with_env(repo: Path, env: dict[str, str], *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    clean_env = clean_git_env(env)
     result = subprocess.run(
         ["git", "-C", str(repo), *args],
-        env=env,
+        env=clean_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -113,6 +135,12 @@ def git_with_env(repo: Path, env: dict[str, str], *args: str, check: bool = True
     if check and result.returncode != 0:
         raise HookReject("GIT_COMMAND_FAILED", command="git " + " ".join(args), stderr=result.stderr.strip())
     return result
+
+def clean_git_env(env: dict[str, str]) -> dict[str, str]:
+    clean_env = dict(env)
+    for name in GIT_LOCAL_ENV_VARS:
+        clean_env.pop(name, None)
+    return clean_env
 
 def required_env(name: str) -> str:
     value = os.environ.get(name)

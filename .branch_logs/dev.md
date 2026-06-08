@@ -56,3 +56,6 @@
   portmap-ready submodules across sibling superproject worktrees.
 - Merge `feat/submodule-display-group` so submodule instances group by parent
   repo path and show the superproject branch as the primary branch label.
+- Merge `feat/submodule-branch-display` so submodule branch labels show the
+  submodule repo branch while the superproject branch remains contextual
+  metadata.
