@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import subprocess
 import threading
 from http.server import ThreadingHTTPServer
@@ -21,13 +22,24 @@ from portmap.catalog import (
 )
 
 
-def request_catalog(path: str, *, method: str = "GET") -> tuple[int, http.client.HTTPMessage, bytes]:
+@pytest.fixture(autouse=True)
+def missing_agent_socket(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_AGENT_SOCKET", str(tmp_path / "missing-agent.sock"))
+
+
+def request_catalog(
+    path: str,
+    *,
+    method: str = "GET",
+    body: str | None = None,
+) -> tuple[int, http.client.HTTPMessage, bytes]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), CatalogHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
     try:
-        connection.request(method, path)
+        headers = {"content-type": "application/x-www-form-urlencoded"} if body is not None else {}
+        connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
         return response.status, response.headers, response.read()
     finally:
@@ -69,10 +81,14 @@ container_port = 8000
     run(["git", "commit", "-m", "init sample compose repo"], cwd=path)
 
 
-def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+def run(args: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
     result = subprocess.run(
         args,
         cwd=cwd,
+        env=process_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -105,6 +121,7 @@ def test_container_to_service_uses_portmap_labels() -> None:
                 "portmap.branch": "feat-example",
                 "portmap.worktree": "/repo/sample",
                 "portmap.endpoints.sample-feat-example-frontend.name": "frontend",
+                "portmap.endpoints.sample-feat-example-frontend.order": "0",
                 "portmap.endpoints.sample-feat-example-frontend.kind": "http",
                 "portmap.endpoints.sample-feat-example-frontend.container_port": "5173",
                 "portmap.endpoints.sample-feat-example-frontend.url": (
@@ -118,15 +135,132 @@ def test_container_to_service_uses_portmap_labels() -> None:
     assert service["repo_name"] == "sample"
     assert service["branch"] == "feat-example"
     assert service["compose_service"] == "frontend"
+    assert service["portmap_order"] == 0
     assert service["endpoints"] == [
         {
             "id": "sample-feat-example-frontend",
             "name": "frontend",
+            "order": 0,
             "kind": "http",
             "container_port": 5173,
             "url": "http://frontend.feat-example.sample.debug.lan:8080",
         }
     ]
+
+
+def test_container_to_service_orders_portmap_endpoints_by_toml_order() -> None:
+    service = container_to_service(
+        {
+            "Names": ["/sample-api-1"],
+            "Image": "sample:latest",
+            "Labels": {
+                "com.docker.compose.project": "sample",
+                "com.docker.compose.service": "api",
+                "traefik.enable": "true",
+                "portmap.managed": "true",
+                "portmap.repo_name": "sample",
+                "portmap.branch": "dev",
+                "portmap.worktree": "/repo/sample",
+                "portmap.endpoints.sample-dev-zeta.name": "zeta",
+                "portmap.endpoints.sample-dev-zeta.order": "2",
+                "portmap.endpoints.sample-dev-zeta.kind": "http",
+                "portmap.endpoints.sample-dev-zeta.container_port": "9002",
+                "portmap.endpoints.sample-dev-alpha.name": "alpha",
+                "portmap.endpoints.sample-dev-alpha.order": "0",
+                "portmap.endpoints.sample-dev-alpha.kind": "http",
+                "portmap.endpoints.sample-dev-alpha.container_port": "9000",
+                "portmap.endpoints.sample-dev-beta.name": "beta",
+                "portmap.endpoints.sample-dev-beta.order": "1",
+                "portmap.endpoints.sample-dev-beta.kind": "http",
+                "portmap.endpoints.sample-dev-beta.container_port": "9001",
+            },
+        }
+    )
+
+    assert service is not None
+    assert service["portmap_order"] == 0
+    assert [endpoint["name"] for endpoint in service["endpoints"]] == ["alpha", "beta", "zeta"]
+
+
+def test_container_to_service_marks_deleted_worktree(tmp_path: Path) -> None:
+    missing_worktree = tmp_path / "deleted-worktree"
+
+    service = container_to_service(
+        {
+            "Names": ["/sample-api-1"],
+            "Image": "sample:latest",
+            "Labels": {
+                "com.docker.compose.project": "sample",
+                "com.docker.compose.service": "api",
+                "traefik.enable": "true",
+                "portmap.managed": "true",
+                "portmap.repo_name": "sample",
+                "portmap.branch": "feat-deleted",
+                "portmap.worktree": str(missing_worktree),
+                "portmap.endpoints.sample-feat-deleted-api.name": "api",
+                "portmap.endpoints.sample-feat-deleted-api.order": "0",
+                "portmap.endpoints.sample-feat-deleted-api.kind": "http",
+                "portmap.endpoints.sample-feat-deleted-api.container_port": "9000",
+            },
+        }
+    )
+
+    assert service is not None
+    assert service["worktree"] == str(missing_worktree)
+    assert service["worktree_exists"] is False
+    assert service["worktree_status"] == "deleted"
+    assert service["worktree_status_message"] == "worktree directory not found"
+    assert service["worktree_root"] is None
+
+
+def test_container_to_service_marks_submodule_worktree(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    child_source = tmp_path / "browserdeck-source"
+    submodule_path = parent / "modules" / "browserdeck"
+
+    child_source.mkdir()
+    run(["git", "init", "-b", "main"], cwd=child_source)
+    run(["git", "config", "user.email", "portmap-test@example.invalid"], cwd=child_source)
+    run(["git", "config", "user.name", "portmap test"], cwd=child_source)
+    (child_source / "README.md").write_text("child\n", encoding="utf-8")
+    run(["git", "add", "."], cwd=child_source)
+    run(["git", "commit", "-m", "init child"], cwd=child_source)
+
+    parent.mkdir()
+    run(["git", "init", "-b", "main"], cwd=parent)
+    run(["git", "config", "user.email", "portmap-test@example.invalid"], cwd=parent)
+    run(["git", "config", "user.name", "portmap test"], cwd=parent)
+    (parent / "README.md").write_text("parent\n", encoding="utf-8")
+    run(["git", "add", "."], cwd=parent)
+    run(["git", "commit", "-m", "init parent"], cwd=parent)
+    run(["git", "-c", "protocol.file.allow=always", "submodule", "add", str(child_source), "modules/browserdeck"], cwd=parent)
+    run(["git", "commit", "-m", "add browserdeck submodule"], cwd=parent)
+
+    service = container_to_service(
+        {
+            "Names": ["/browserdeck-api-1"],
+            "Image": "sample:latest",
+            "Labels": {
+                "com.docker.compose.project": "browserdeck",
+                "com.docker.compose.service": "api",
+                "traefik.enable": "true",
+                "portmap.managed": "true",
+                "portmap.repo_name": "browserdeck",
+                "portmap.branch": "case-comap-frontend-debug",
+                "portmap.worktree": str(submodule_path),
+                "portmap.endpoints.browserdeck-case-api.name": "api",
+                "portmap.endpoints.browserdeck-case-api.order": "0",
+                "portmap.endpoints.browserdeck-case-api.kind": "http",
+                "portmap.endpoints.browserdeck-case-api.container_port": "9000",
+            },
+        }
+    )
+
+    assert service is not None
+    assert service["worktree_exists"] is True
+    assert service["worktree_status"] == "submodule"
+    assert service["worktree_superproject"] == str(parent.resolve())
+    assert service["worktree_status_message"] == f"submodule under {parent.resolve()}"
 
 
 def test_container_to_service_can_fallback_to_traefik_labels() -> None:
@@ -163,6 +297,132 @@ def test_select_dns_server_prefers_external_bind_ip() -> None:
     assert select_dns_server(external_bind, external_target) == external_bind
     assert select_dns_server("0.0.0.0", external_target) == external_target
     assert select_dns_server("127.0.0.1", external_target) == external_target
+
+
+def test_collect_catalog_uses_agent_worktrees_to_enrich_running_services(monkeypatch) -> None:
+    def fake_docker_get(path: str):
+        if path == "/containers/json?all=0":
+            return [
+                {
+                    "Names": ["/sample-frontend-1"],
+                    "Image": "sample:latest",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_dev",
+                        "com.docker.compose.service": "frontend",
+                        "traefik.enable": "true",
+                        "portmap.managed": "true",
+                        "portmap.repo_id": "sample-repo",
+                        "portmap.repo_name": "sample",
+                        "portmap.branch": "dev",
+                        "portmap.worktree": "/repo/sample@dev",
+                        "portmap.endpoints.sample-dev-frontend.name": "frontend",
+                        "portmap.endpoints.sample-dev-frontend.order": "0",
+                        "portmap.endpoints.sample-dev-frontend.kind": "http",
+                        "portmap.endpoints.sample-dev-frontend.container_port": "5173",
+                    },
+                }
+            ]
+        raise AssertionError(path)
+
+    def fake_agent_worktrees():
+        return {
+            "ok": True,
+            "generated_at": "now",
+            "worktrees": [
+                {
+                    "repo_id": "sample-repo",
+                    "repo_name": "sample",
+                    "branch": "dev",
+                    "worktree": "/repo/sample@dev",
+                    "worktree_title": "sample@dev",
+                    "worktree_root": "/repo/linked-git/sample.git",
+                    "worktree_root_title": "sample linked .git",
+                    "worktree_exists": True,
+                    "worktree_status": "ok",
+                    "worktree_status_message": "",
+                    "worktree_superproject": None,
+                    "compose_project": "sample_dev",
+                    "running": True,
+                    "startable": True,
+                },
+                {
+                    "repo_id": "sample-repo",
+                    "repo_name": "sample",
+                    "branch": "feat-example",
+                    "worktree": "/repo/sample@feat-example",
+                    "worktree_title": "sample@feat-example",
+                    "worktree_root": "/repo/linked-git/sample.git",
+                    "worktree_root_title": "sample linked .git",
+                    "compose_project": "sample_feat_example",
+                    "running": False,
+                    "startable": True,
+                },
+            ],
+        }
+
+    monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
+    monkeypatch.setattr("portmap.catalog.agent_worktrees", fake_agent_worktrees)
+
+    catalog = collect_catalog()
+
+    assert catalog["agent"]["available"] is True
+    assert len(catalog["worktrees"]) == 2
+    assert catalog["services"][0]["worktree_root"] == "/repo/linked-git/sample.git"
+    assert catalog["services"][0]["worktree_root_title"] == "sample linked .git"
+    assert catalog["services"][0]["worktree_exists"] is True
+    assert catalog["services"][0]["worktree_status"] == "ok"
+    assert catalog["services"][0]["worktree_status_message"] == ""
+
+
+def test_collect_catalog_orders_services_by_portmap_endpoint_order(monkeypatch) -> None:
+    def fake_docker_get(path: str):
+        if path == "/containers/json?all=0":
+            return [
+                {
+                    "Names": ["/sample-worker-1"],
+                    "Image": "sample:latest",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_dev",
+                        "com.docker.compose.service": "worker",
+                        "traefik.enable": "true",
+                        "portmap.managed": "true",
+                        "portmap.repo_id": "sample-repo",
+                        "portmap.repo_name": "sample",
+                        "portmap.branch": "dev",
+                        "portmap.worktree": "/repo/sample@dev",
+                        "portmap.endpoints.sample-dev-worker.name": "worker",
+                        "portmap.endpoints.sample-dev-worker.order": "2",
+                        "portmap.endpoints.sample-dev-worker.kind": "http",
+                        "portmap.endpoints.sample-dev-worker.container_port": "9002",
+                    },
+                },
+                {
+                    "Names": ["/sample-frontend-1"],
+                    "Image": "sample:latest",
+                    "Labels": {
+                        "com.docker.compose.project": "sample_dev",
+                        "com.docker.compose.service": "frontend",
+                        "traefik.enable": "true",
+                        "portmap.managed": "true",
+                        "portmap.repo_id": "sample-repo",
+                        "portmap.repo_name": "sample",
+                        "portmap.branch": "dev",
+                        "portmap.worktree": "/repo/sample@dev",
+                        "portmap.endpoints.sample-dev-frontend.name": "frontend",
+                        "portmap.endpoints.sample-dev-frontend.order": "0",
+                        "portmap.endpoints.sample-dev-frontend.kind": "http",
+                        "portmap.endpoints.sample-dev-frontend.container_port": "9000",
+                    },
+                },
+            ]
+        raise AssertionError(path)
+
+    monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
+
+    catalog = collect_catalog()
+
+    assert [service["compose_service"] for service in catalog["services"]] == ["frontend", "worker"]
+    assert [service["portmap_order"] for service in catalog["services"]] == [0, 2]
 
 
 def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
@@ -202,6 +462,14 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'data-dead-panel' in script_body
     assert b'dead-menu' in script_body
     assert b'running-menu' in script_body
+    assert b'branch_tip_epoch' in script_body
+    assert b'portmap_order' in script_body
+    assert b'worktree-status-badge' in script_body
+    assert b'branch-name-deleted' in script_body
+    assert b'deleted' in script_body
+    assert b'submodule' in script_body
+    assert b'is-empty' in script_body
+    assert b'has-items' in script_body
     assert b'History' not in script_body
     assert b'dns-status' in script_body
     assert b'Action log' in script_body
@@ -219,7 +487,15 @@ def test_catalog_static_frontend_uses_registry_and_dns_probe() -> None:
     assert b'.branch-group' in stylesheet_body
     assert b'.dead-menu' in stylesheet_body
     assert b'.running-menu' in stylesheet_body
+    assert b'.running-action' in stylesheet_body
+    assert b'gap: 8px' in stylesheet_body
+    assert b'.running-menu-button.is-empty' in stylesheet_body
+    assert b'.dead-menu-button.is-empty' in stylesheet_body
+    assert b'inline-size: 144px' in stylesheet_body
     assert b'.branch-running-name' in stylesheet_body
+    assert b'.branch-name-deleted' in stylesheet_body
+    assert b'.worktree-status-deleted' in stylesheet_body
+    assert b'.worktree-status-submodule' in stylesheet_body
     assert b'.history-panel' not in stylesheet_body
     assert stylesheet_body.count(b"\n") > 20
     assert b'.dns-status' in stylesheet_body
@@ -297,6 +573,119 @@ def test_collect_catalog_includes_running_worktree_and_writes_history(tmp_path: 
     payload = json.loads(history.read_text(encoding="utf-8"))
     assert payload["worktrees"][0]["worktree"] == str(repo)
     assert payload["worktrees"][0]["worktree_root"] == str(repo / ".git")
+
+
+def test_collect_catalog_orders_worktrees_by_branch_tip_descending(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "sample@dev"
+    feat = tmp_path / "sample@feat-new"
+    write_git_compose_repo(repo)
+
+    (repo / "dev.txt").write_text("dev\n", encoding="utf-8")
+    run(["git", "add", "dev.txt"], cwd=repo)
+    run(
+        ["git", "commit", "-m", "dev tip"],
+        cwd=repo,
+        env={
+            "GIT_AUTHOR_DATE": "2026-01-01T00:00:00+00:00",
+            "GIT_COMMITTER_DATE": "2026-01-01T00:00:00+00:00",
+        },
+    )
+    run(["git", "worktree", "add", "-b", "feat-new", str(feat)], cwd=repo)
+    (feat / "feat.txt").write_text("feat\n", encoding="utf-8")
+    run(["git", "add", "feat.txt"], cwd=feat)
+    run(
+        ["git", "commit", "-m", "feat tip"],
+        cwd=feat,
+        env={
+            "GIT_AUTHOR_DATE": "2026-02-01T00:00:00+00:00",
+            "GIT_COMMITTER_DATE": "2026-02-01T00:00:00+00:00",
+        },
+    )
+
+    monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", str(tmp_path))
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(tmp_path / "history.json"))
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+
+    catalog = collect_catalog()
+
+    assert [worktree["branch"] for worktree in catalog["worktrees"]] == ["feat-new", "dev"]
+    assert catalog["worktrees"][0]["branch_tip_epoch"] > catalog["worktrees"][1]["branch_tip_epoch"]
+    assert catalog["worktrees"][0]["branch_tip_time"] == "2026-02-01T00:00:00+00:00"
+
+
+def test_collect_catalog_discovers_startable_submodules_across_superproject_worktrees(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    child_source = tmp_path / "browserdeck-source"
+    parent = tmp_path / "comap@dev"
+    sibling = tmp_path / "comap@feat"
+    submodule_relative = Path("3rdparty/browserdeck")
+
+    write_git_compose_repo(child_source)
+
+    parent.mkdir()
+    run(["git", "init", "-b", "dev"], cwd=parent)
+    run(["git", "config", "user.email", "portmap-test@example.invalid"], cwd=parent)
+    run(["git", "config", "user.name", "portmap test"], cwd=parent)
+    (parent / "README.md").write_text("parent\n", encoding="utf-8")
+    run(["git", "add", "."], cwd=parent)
+    run(["git", "commit", "-m", "init parent"], cwd=parent)
+    run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            str(child_source),
+            submodule_relative.as_posix(),
+        ],
+        cwd=parent,
+    )
+    run(["git", "commit", "-m", "add browserdeck submodule"], cwd=parent)
+    run(["git", "worktree", "add", "-b", "feat-sibling", str(sibling)], cwd=parent)
+    run(["git", "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], cwd=sibling)
+
+    monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", str(parent))
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(tmp_path / "history.json"))
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+
+    catalog = collect_catalog()
+
+    submodule_worktrees = {
+        worktree["worktree"]: worktree
+        for worktree in catalog["worktrees"]
+        if worktree["repo_name"] == "browserdeck"
+    }
+    expected_paths = {
+        str((parent / submodule_relative).resolve()),
+        str((sibling / submodule_relative).resolve()),
+    }
+    assert set(submodule_worktrees) == expected_paths
+    assert {worktree["repo_id"] for worktree in submodule_worktrees.values()} == {
+        next(iter(submodule_worktrees.values()))["repo_id"]
+    }
+    assert all(worktree["startable"] is True for worktree in submodule_worktrees.values())
+    assert all(worktree["worktree_status"] == "submodule" for worktree in submodule_worktrees.values())
+    assert {
+        worktree["worktree_superproject"]
+        for worktree in submodule_worktrees.values()
+    } == {str(parent.resolve()), str(sibling.resolve())}
+    assert {worktree["display_worktree_root"] for worktree in submodule_worktrees.values()} == {
+        next(iter(submodule_worktrees.values()))["display_worktree_root"]
+    }
+    assert {worktree["display_worktree_root_title"] for worktree in submodule_worktrees.values()} == {
+        "comap / 3rdparty/browserdeck"
+    }
+    parent_submodule = submodule_worktrees[str((parent / submodule_relative).resolve())]
+    sibling_submodule = submodule_worktrees[str((sibling / submodule_relative).resolve())]
+    assert parent_submodule["display_branch"] == parent_submodule["submodule_branch"]
+    assert sibling_submodule["display_branch"] == sibling_submodule["submodule_branch"]
+    assert parent_submodule["superproject_branch"] == "dev"
+    assert sibling_submodule["superproject_branch"] == "feat-sibling"
+    assert all(worktree["submodule_branch"] for worktree in submodule_worktrees.values())
+    assert all(worktree["submodule_sha"] for worktree in submodule_worktrees.values())
 
 
 def test_collect_catalog_restores_existing_worktree_from_history(tmp_path: Path, monkeypatch) -> None:
@@ -407,6 +796,27 @@ def test_collect_catalog_drops_non_startable_history(tmp_path: Path, monkeypatch
 
     assert catalog["services"] == []
     assert catalog["worktrees"] == []
+
+
+def test_catalog_compose_up_action_uses_agent(monkeypatch) -> None:
+    calls = {}
+
+    def fake_agent_compose_up(worktree: str):
+        calls["worktree"] = worktree
+        return {"ok": True, "message": "started by agent", "worktree": worktree}
+
+    monkeypatch.setattr("portmap.catalog.agent_compose_up_worktree", fake_agent_compose_up)
+
+    status, _, body = request_catalog(
+        "/actions/compose-up",
+        method="POST",
+        body="worktree=%2Frepo%2Fsample%40dev",
+    )
+
+    payload = json.loads(body.decode("utf-8"))
+    assert status == 200
+    assert calls["worktree"] == "/repo/sample@dev"
+    assert payload["message"] == "started by agent"
 
 
 def test_compose_up_worktree_runs_generated_compose_command(tmp_path: Path, monkeypatch) -> None:

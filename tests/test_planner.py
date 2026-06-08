@@ -225,6 +225,7 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
         "headers.customrequestheaders.Host=127.0.0.1:5173"
     ) in frontend_labels
     assert "portmap.endpoints.sample-feat-example-frontend.name=frontend" in frontend_labels
+    assert "portmap.endpoints.sample-feat-example-frontend.order=0" in frontend_labels
     assert "portmap.endpoints.sample-feat-example-frontend.kind=http" in frontend_labels
     assert "portmap.endpoints.sample-feat-example-frontend.container_port=5173" in frontend_labels
     assert "portmap.endpoints.sample-feat-example-frontend.preserve_host=false" in frontend_labels
@@ -238,6 +239,7 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert "traefik.enable=true" not in mqtt_labels
     assert not any(label.startswith("traefik.tcp.") for label in mqtt_labels)
     assert "portmap.endpoints.sample-feat-example-mqtt.kind=tcp" in mqtt_labels
+    assert "portmap.endpoints.sample-feat-example-mqtt.order=1" in mqtt_labels
     assert "portmap.endpoints.sample-feat-example-mqtt.host_port=28831" in mqtt_labels
     assert plan.compose_override["services"]["mqtt"]["ports"] == ["28831:1883/tcp"]
 
@@ -245,6 +247,7 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert "traefik.enable=true" not in udp_labels
     assert not any(label.startswith("traefik.udp.") for label in udp_labels)
     assert "portmap.endpoints.sample-feat-example-udp-echo.kind=udp" in udp_labels
+    assert "portmap.endpoints.sample-feat-example-udp-echo.order=2" in udp_labels
     assert "portmap.endpoints.sample-feat-example-udp-echo.host_port=29991" in udp_labels
     assert plan.compose_override["services"]["udp-echo"]["ports"] == ["29991:9999/udp"]
 
@@ -254,6 +257,7 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert "traefik.docker.network=portmap_gateway" not in turn_labels
     assert "traefik.tcp.routers.sample-feat-example-turn.entrypoints" not in turn_labels
     assert "portmap.endpoints.sample-feat-example-turn.kind=range" in turn_labels
+    assert "portmap.endpoints.sample-feat-example-turn.order=3" in turn_labels
     assert "portmap.endpoints.sample-feat-example-turn.host_port=34781" in turn_labels
     assert "portmap.endpoints.sample-feat-example-turn.range_start=49160" in turn_labels
     assert "portmap.endpoints.sample-feat-example-turn.range_end=49199" in turn_labels
@@ -291,9 +295,13 @@ def test_generate_plan_builds_traefik_labels_and_registry(tmp_path: Path) -> Non
     assert plan.compose_project is not None
     assert plan.compose_project.startswith("sample_feat_example_")
     assert instance["endpoints"]["frontend"]["url"] == "http://frontend.feat-example.sample.debug.lan:28081"
+    assert instance["endpoints"]["frontend"]["order"] == 0
     assert instance["endpoints"]["mqtt"]["port"] == 28831
+    assert instance["endpoints"]["mqtt"]["order"] == 1
     assert instance["endpoints"]["udp_echo"]["port"] == 29991
+    assert instance["endpoints"]["udp_echo"]["order"] == 2
     assert instance["endpoints"]["turn"]["port"] == 34781
+    assert instance["endpoints"]["turn"]["order"] == 3
     assert instance["endpoints"]["turn"]["range"] == {
         "min_port": 49160,
         "max_port": 49199,

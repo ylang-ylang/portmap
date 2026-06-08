@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .agent_client import AgentUnavailable, agent_compose_up_worktree, agent_worktrees
 from .broker import ENDPOINT_CONFIG, ensure_generated_override
 from .compose_takeover import find_compose_file, generated_compose_project, plan_docker_compose_command
 from .repo_identity import git, git_branch, resolve_repo_identity, stable_hash
@@ -46,6 +47,28 @@ STATIC_CONTENT_TYPES_BY_SUFFIX = {
     ".svg": "image/svg+xml",
     ".txt": "text/plain; charset=utf-8",
     ".webmanifest": "application/manifest+json",
+}
+MISSING_ORDER = 1_000_000
+AGENT_AUTHORITATIVE_WORKTREE_KEYS = {
+    "branch_tip_epoch",
+    "branch_tip_time",
+    "branch_tip_sha",
+    "display_branch",
+    "display_worktree_root",
+    "display_worktree_root_title",
+    "submodule_branch",
+    "submodule_relative_path",
+    "submodule_sha",
+    "superproject_branch",
+    "superproject_repo_id",
+    "superproject_repo_name",
+    "superproject_worktree",
+    "worktree_exists",
+    "worktree_root",
+    "worktree_root_title",
+    "worktree_status",
+    "worktree_status_message",
+    "worktree_superproject",
 }
 
 
@@ -96,12 +119,31 @@ def collect_catalog() -> dict[str, Any]:
         if (service := container_to_service(container)) is not None
     ]
     generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
-    worktrees = discover_catalog_worktrees(services)
-    worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+    agent = {"available": False, "message": "agent unavailable"}
+    try:
+        agent_payload = agent_worktrees()
+    except AgentUnavailable as exc:
+        worktrees = discover_catalog_worktrees(services)
+        worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+        agent["message"] = str(exc)
+    except Exception as exc:
+        worktrees = discover_catalog_worktrees(services)
+        worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+        agent["message"] = str(exc)
+    else:
+        raw_worktrees = agent_payload.get("worktrees")
+        worktrees = raw_worktrees if isinstance(raw_worktrees, list) else []
+        agent = {
+            "available": True,
+            "message": str(agent_payload.get("message") or "agent ready"),
+            "generated_at": str(agent_payload.get("generated_at") or ""),
+        }
+    enrich_services_from_worktrees(services, worktrees)
     services.sort(
         key=lambda item: (
             item.get("repo_name") or "",
             item.get("branch") or "",
+            endpoint_sort_order(item),
             item.get("compose_service") or "",
             item.get("container") or "",
         )
@@ -111,9 +153,57 @@ def collect_catalog() -> dict[str, Any]:
         "http_port": HTTP_PORT,
         "dns_domain": DNS_DOMAIN,
         "dns_server": DNS_SERVER,
+        "agent": agent,
         "services": services,
         "worktrees": worktrees,
     }
+
+
+def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: list[dict[str, Any]]) -> None:
+    by_worktree = {
+        str(worktree.get("worktree") or ""): worktree
+        for worktree in worktrees
+        if str(worktree.get("worktree") or "").strip()
+    }
+    for service in services:
+        worktree = by_worktree.get(str(service.get("worktree") or ""))
+        if not worktree:
+            continue
+        for key in (
+            "repo_id",
+            "repo_name",
+            "branch",
+            "branch_tip_epoch",
+            "branch_tip_time",
+            "branch_tip_sha",
+            "display_branch",
+            "display_worktree_root",
+            "display_worktree_root_title",
+            "submodule_branch",
+            "submodule_relative_path",
+            "submodule_sha",
+            "superproject_branch",
+            "superproject_repo_id",
+            "superproject_repo_name",
+            "superproject_worktree",
+            "worktree_exists",
+            "worktree_root",
+            "worktree_root_title",
+            "worktree_status",
+            "worktree_status_message",
+            "worktree_superproject",
+            "compose_project",
+        ):
+            if key in AGENT_AUTHORITATIVE_WORKTREE_KEYS:
+                if key in worktree:
+                    service[key] = worktree[key]
+                continue
+            if missing_catalog_value(service.get(key)) and not missing_catalog_value(worktree.get(key)):
+                service[key] = worktree[key]
+
+
+def missing_catalog_value(value: Any) -> bool:
+    return value is None or value == ""
 
 
 def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
@@ -130,6 +220,7 @@ def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
     container_name = first_container_name(container)
     worktree = labels.get("portmap.worktree") or labels.get("com.docker.compose.project.working_dir")
     root, root_title = worktree_root_from_raw(worktree)
+    status = worktree_status_from_raw(worktree)
     return {
         "container": container_name,
         "image": container.get("Image"),
@@ -137,11 +228,13 @@ def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
         "repo_name": labels.get("portmap.repo_name"),
         "branch": labels.get("portmap.branch"),
         "worktree": worktree,
+        **status,
         "worktree_root": root,
         "worktree_root_title": root_title,
         "compose_project": labels.get("com.docker.compose.project"),
         "compose_service": labels.get("com.docker.compose.service"),
         "docker_network": labels.get("traefik.docker.network"),
+        "portmap_order": endpoint_sort_order({"endpoints": endpoints}),
         "endpoints": endpoints,
     }
 
@@ -163,17 +256,32 @@ def parse_portmap_endpoints(labels: dict[str, str]) -> list[dict[str, Any]]:
         grouped.setdefault(endpoint_id, {"id": endpoint_id})[field] = normalize_label_value(field, value)
 
     endpoints = list(grouped.values())
-    endpoints.sort(key=lambda item: str(item.get("name") or item.get("id") or ""))
+    endpoints.sort(key=endpoint_sort_key)
     return endpoints
 
 
 def normalize_label_value(field: str, value: str) -> Any:
-    if field in {"container_port", "host_port", "range_start", "range_end", "range_size"}:
+    if field in {"container_port", "host_port", "order", "range_start", "range_end", "range_size"}:
         try:
             return int(value)
         except ValueError:
             return value
     return value
+
+
+def endpoint_sort_key(endpoint: dict[str, Any]) -> tuple[int, str, str]:
+    order = endpoint.get("order")
+    numeric_order = order if isinstance(order, int) else MISSING_ORDER
+    return (numeric_order, str(endpoint.get("name") or ""), str(endpoint.get("id") or ""))
+
+
+def endpoint_sort_order(service: dict[str, Any]) -> int:
+    orders = [
+        endpoint.get("order")
+        for endpoint in service.get("endpoints", [])
+        if isinstance(endpoint.get("order"), int)
+    ]
+    return min(orders) if orders else MISSING_ORDER
 
 
 def parse_traefik_endpoints(labels: dict[str, str]) -> list[dict[str, Any]]:
@@ -241,6 +349,8 @@ def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str,
             for sibling in git_worktree_paths(candidate):
                 add_existing_worktree_candidate(candidates, sibling)
 
+    add_submodule_worktree_candidates(candidates)
+
     worktrees = []
     for path in candidates.values():
         worktree = catalog_worktree_from_path(path, running_by_worktree)
@@ -249,15 +359,7 @@ def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str,
         if not worktree.get("running") and not worktree.get("startable"):
             continue
         worktrees.append(worktree)
-    worktrees.sort(
-        key=lambda item: (
-            item.get("repo_name") or "",
-            item.get("repo_id") or "",
-            item.get("worktree_title") or "",
-            item.get("branch") or "",
-            item.get("worktree") or "",
-        )
-    )
+    worktrees.sort(key=catalog_worktree_sort_key)
     return worktrees
 
 
@@ -297,17 +399,27 @@ def merge_catalog_history(
         if worktree.get("source") == "current":
             worktree["last_seen_at"] = generated_at
 
-    worktrees.sort(
-        key=lambda item: (
-            item.get("repo_name") or "",
-            item.get("repo_id") or "",
-            item.get("worktree_title") or "",
-            item.get("branch") or "",
-            item.get("worktree") or "",
-        )
-    )
+    worktrees.sort(key=catalog_worktree_sort_key)
     write_catalog_history(worktrees, generated_at=generated_at)
     return worktrees
+
+
+def catalog_worktree_sort_key(item: dict[str, Any]) -> tuple[str, str, str, int, str, str]:
+    return (
+        str(item.get("repo_name") or ""),
+        str(item.get("repo_id") or ""),
+        str(item.get("worktree_root_title") or item.get("worktree_title") or ""),
+        -int_value(item.get("branch_tip_epoch")),
+        str(item.get("branch") or ""),
+        str(item.get("worktree") or ""),
+    )
+
+
+def int_value(value: Any) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def worktree_instance_key(worktree: dict[str, Any]) -> str:
@@ -435,6 +547,101 @@ def add_existing_worktree_candidate(candidates: dict[str, Path], path: Path) -> 
     candidates[str(top_level)] = top_level
 
 
+def add_submodule_worktree_candidates(candidates: dict[str, Path]) -> None:
+    seed_paths = list(candidates.values())
+    for path in seed_paths:
+        for candidate in submodule_worktree_candidates(path):
+            add_existing_worktree_candidate(candidates, candidate)
+
+
+def submodule_worktree_candidates(path: Path) -> list[Path]:
+    top_level = git_top_level(path)
+    if top_level is None:
+        return []
+
+    superproject = git_superproject(top_level)
+    if superproject is not None:
+        relative = relative_path_under(top_level, superproject)
+        if relative is None:
+            return []
+        return [
+            sibling / relative
+            for sibling in worktree_self_and_siblings(superproject)
+            if (sibling / relative).exists()
+        ]
+
+    candidates: list[Path] = []
+    for superproject_worktree in worktree_self_and_siblings(top_level):
+        for submodule_path in git_submodule_paths(superproject_worktree):
+            candidate = superproject_worktree / submodule_path
+            if candidate.exists():
+                candidates.append(candidate)
+    return candidates
+
+
+def worktree_self_and_siblings(path: Path) -> list[Path]:
+    top_level = git_top_level(path)
+    if top_level is None:
+        return []
+    siblings = [top_level, *git_worktree_paths(top_level)]
+    deduped: dict[str, Path] = {}
+    for sibling in siblings:
+        sibling_top_level = git_top_level(sibling)
+        if sibling_top_level is not None:
+            deduped[str(sibling_top_level)] = sibling_top_level
+    return list(deduped.values())
+
+
+def git_submodule_paths(path: Path) -> list[Path]:
+    top_level = git_top_level(path)
+    if top_level is None:
+        return []
+    gitmodules = top_level / ".gitmodules"
+    if not gitmodules.exists():
+        return []
+    result = git(top_level, "config", "--file", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$")
+    if result.returncode != 0:
+        return []
+    return parse_git_submodule_paths(result.stdout)
+
+
+def parse_git_submodule_paths(output: str) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        relative = clean_submodule_path(parts[1].strip())
+        if relative is None:
+            continue
+        key = relative.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(relative)
+    return paths
+
+
+def clean_submodule_path(value: str) -> Path | None:
+    if not value:
+        return None
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return Path(*path.parts)
+
+
+def relative_path_under(child: Path, parent: Path) -> Path | None:
+    try:
+        relative = child.relative_to(parent)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    return relative
+
+
 def canonical_worktree_path(path: Path) -> str:
     top_level = git_top_level(path)
     if top_level is not None:
@@ -475,6 +682,18 @@ def git_common_dir(path: Path) -> Path | None:
         return common_dir
 
 
+def git_superproject(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    result = git(path, "rev-parse", "--show-superproject-working-tree")
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value:
+        return None
+    return Path(value).expanduser().resolve()
+
+
 def worktree_root_from_raw(raw_worktree: str | None) -> tuple[str | None, str | None]:
     if not raw_worktree:
         return None, None
@@ -490,6 +709,80 @@ def worktree_root_from_top_level(top_level: Path) -> tuple[str, str]:
         return str(top_level), top_level.name
     title = common_dir.parent.name if common_dir.name == ".git" else common_dir.name
     return str(common_dir), title
+
+
+def worktree_status_from_raw(raw_worktree: str | None, *, top_level: Path | None = None) -> dict[str, Any]:
+    if not raw_worktree:
+        return {
+            "worktree_exists": None,
+            "worktree_status": "",
+            "worktree_status_message": "",
+            "worktree_superproject": None,
+        }
+
+    path = Path(raw_worktree).expanduser()
+    if not path.exists():
+        return {
+            "worktree_exists": False,
+            "worktree_status": "deleted",
+            "worktree_status_message": "worktree directory not found",
+            "worktree_superproject": None,
+        }
+
+    resolved_top_level = top_level or git_top_level(path)
+    superproject = git_superproject(resolved_top_level or path)
+    if superproject is not None:
+        return {
+            "worktree_exists": True,
+            "worktree_status": "submodule",
+            "worktree_status_message": f"submodule under {superproject}",
+            "worktree_superproject": str(superproject),
+        }
+
+    return {
+        "worktree_exists": True,
+        "worktree_status": "ok",
+        "worktree_status_message": "",
+        "worktree_superproject": None,
+    }
+
+
+def submodule_display_metadata(
+    *,
+    top_level: Path,
+    child_repo_id: str,
+    branch: str,
+    tip: dict[str, int | str],
+) -> dict[str, Any]:
+    superproject = git_superproject(top_level)
+    if superproject is None:
+        return {}
+
+    relative = relative_path_under(top_level, superproject)
+    if relative is None:
+        return {}
+
+    superproject_identity = resolve_repo_identity(
+        project_directory=superproject,
+        repo_root=superproject,
+        repo_id=None,
+        repo_name=None,
+    )
+    superproject_branch = worktree_branch(superproject)
+    relative_text = relative.as_posix()
+    display_root = f"submodule:{child_repo_id}:{superproject_identity.repo_id}:{relative_text}"
+    return {
+        "display_branch": branch,
+        "display_worktree_root": display_root,
+        "display_worktree_root_title": f"{superproject_identity.display_name} / {relative_text}",
+        "submodule_branch": branch,
+        "submodule_relative_path": relative_text,
+        "submodule_sha": str(tip.get("sha") or ""),
+        "superproject_branch": superproject_branch,
+        "superproject_repo_id": superproject_identity.repo_id,
+        "superproject_repo_name": superproject_identity.display_name,
+        "superproject_worktree": str(superproject),
+    }
 
 
 def git_worktree_paths(path: Path) -> list[Path]:
@@ -526,7 +819,15 @@ def catalog_worktree_from_path(
         repo_name=None,
     )
     branch = worktree_branch(top_level)
+    tip = worktree_tip(top_level)
     worktree_root, worktree_root_title = worktree_root_from_top_level(top_level)
+    status = worktree_status_from_raw(str(top_level), top_level=top_level)
+    display = submodule_display_metadata(
+        top_level=top_level,
+        child_repo_id=identity.repo_id,
+        branch=branch,
+        tip=tip,
+    )
     running_services = running_by_worktree.get(str(top_level), [])
     compose_project = generated_compose_project(top_level) or first_service_value(running_services, "compose_project")
     compose_file = find_compose_file(top_level)
@@ -544,8 +845,14 @@ def catalog_worktree_from_path(
         "repo_id": identity.repo_id,
         "repo_name": identity.display_name,
         "branch": branch,
+        "display_branch": display.get("display_branch", branch),
+        "branch_tip_epoch": tip["epoch"],
+        "branch_tip_time": tip["time"],
+        "branch_tip_sha": tip["sha"],
         "worktree": str(top_level),
         "worktree_title": top_level.name,
+        **status,
+        **display,
         "worktree_root": worktree_root,
         "worktree_root_title": worktree_root_title,
         "compose_project": compose_project,
@@ -556,6 +863,20 @@ def catalog_worktree_from_path(
         "service_count": len(running_services),
         "endpoint_count": endpoint_total,
     }
+
+
+def worktree_tip(path: Path) -> dict[str, int | str]:
+    result = git(path, "log", "-1", "--format=%ct%x00%cI%x00%H")
+    if result.returncode != 0:
+        return {"epoch": 0, "time": "", "sha": ""}
+    parts = result.stdout.rstrip("\n").split("\x00")
+    if len(parts) != 3:
+        return {"epoch": 0, "time": "", "sha": ""}
+    try:
+        epoch = int(parts[0])
+    except ValueError:
+        epoch = 0
+    return {"epoch": epoch, "time": parts[1], "sha": parts[2]}
 
 
 def worktree_branch(path: Path) -> str:
@@ -867,7 +1188,10 @@ class CatalogHandler(BaseHTTPRequestHandler):
         form = self.read_form()
         worktree = first_form_value(form, "worktree")
         try:
-            result = compose_up_worktree(worktree)
+            try:
+                result = agent_compose_up_worktree(worktree)
+            except AgentUnavailable:
+                result = compose_up_worktree(worktree)
             self.write_json(result, send_body=True)
         except Exception as exc:  # pragma: no cover - exercised through container runtime.
             self.write_json(

@@ -21,7 +21,6 @@ git_guard_exec_runtime() {
 }
 
 git_guard_runtime_sync() {
-  [ "${GG_RUNTIME_SYNC_ACTIVE:-}" != "1" ] || return 0
   [ -f "$GG_CONFIG_JSON" ] || return 0
   current_ref="$(git symbolic-ref -q HEAD 2>/dev/null || true)"
   if [ -n "$current_ref" ] && [ -f "$GG_POLICY_JSON" ]; then
@@ -36,7 +35,7 @@ git_guard_runtime_sync() {
     worktree|local|global) ;;
     *) scope="local" ;;
   esac
-  if ! GG_RUNTIME_SYNC_ACTIVE=1 "${git_guard_args[@]}" install --repo "$GG_REPO_ROOT" --config "$GG_REPO_ROOT/.git-guard/contribution.md" --scope "$scope" >/dev/null; then
+  if ! "${git_guard_args[@]}" install --repo "$GG_REPO_ROOT" --config "$GG_REPO_ROOT/.git-guard/contribution.md" --scope "$scope" >/dev/null; then
     printf "%s\n" "git-guard: runtime auto-sync failed; continuing with installed runtime" >&2
   fi
 }

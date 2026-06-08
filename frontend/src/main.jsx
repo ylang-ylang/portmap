@@ -8,6 +8,7 @@ import {
   ExternalLink,
   Folder,
   GitBranch,
+  GitFork,
   Play,
   Power,
   RefreshCw,
@@ -16,6 +17,30 @@ import "./style.css";
 
 function text(value) {
   return value == null ? "" : String(value);
+}
+
+function numberValue(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+const MISSING_ORDER = 1000000;
+
+function orderValue(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : MISSING_ORDER;
+}
+
+function branchTipEpoch(value) {
+  return numberValue(value?.branch_tip_epoch);
+}
+
+function compareBranchTip(left, right) {
+  const tipDelta = branchTipEpoch(right) - branchTipEpoch(left);
+  if (tipDelta !== 0) return tipDelta;
+  return text(left.branch).localeCompare(text(right.branch))
+    || text(left.worktree_title).localeCompare(text(right.worktree_title))
+    || text(left.worktree).localeCompare(text(right.worktree));
 }
 
 function shellSingleQuote(value) {
@@ -55,6 +80,25 @@ function endpointCount(service) {
   return (service.endpoints || []).length;
 }
 
+function compareEndpointOrder(left, right) {
+  const orderDelta = orderValue(left.order) - orderValue(right.order);
+  if (orderDelta !== 0) return orderDelta;
+  return text(left.name).localeCompare(text(right.name)) || text(left.id).localeCompare(text(right.id));
+}
+
+function serviceOrder(service) {
+  const explicitOrder = orderValue(service.portmap_order);
+  if (explicitOrder !== MISSING_ORDER) return explicitOrder;
+  const endpointOrders = (service.endpoints || []).map((endpoint) => orderValue(endpoint.order));
+  return endpointOrders.length ? Math.min(...endpointOrders) : MISSING_ORDER;
+}
+
+function compareServiceOrder(left, right) {
+  const orderDelta = serviceOrder(left) - serviceOrder(right);
+  if (orderDelta !== 0) return orderDelta;
+  return text(left.compose_service).localeCompare(text(right.compose_service)) || text(left.container).localeCompare(text(right.container));
+}
+
 function uniqueSorted(values) {
   return Array.from(new Set(values.filter(Boolean).map(text))).sort((left, right) => left.localeCompare(right));
 }
@@ -65,15 +109,116 @@ function pathTitle(value) {
 }
 
 function worktreeRootPath(seed) {
-  return text(seed.worktree_root || seed.worktree || "");
+  return text(seed.display_worktree_root || seed.worktree_root || seed.worktree || "");
 }
 
 function worktreeRootTitle(seed) {
-  return text(seed.worktree_root_title || pathTitle(worktreeRootPath(seed)) || pathTitle(seed.worktree) || "wt root");
+  return text(seed.display_worktree_root_title || seed.worktree_root_title || pathTitle(worktreeRootPath(seed)) || pathTitle(seed.worktree) || "wt root");
+}
+
+function worktreeDisplayPath(seed) {
+  if (worktreeSubmodule(seed)) {
+    const relative = text(seed.submodule_relative_path || "");
+    if (relative) return `submodule path ${relative}`;
+  }
+  return text(seed.worktree || seed.worktree_root || worktreeRootPath(seed));
+}
+
+function worktreeDisplayTitle(seed) {
+  if (worktreeSubmodule(seed)) {
+    const repo = text(seed.superproject_repo_name || "");
+    const relative = text(seed.submodule_relative_path || "");
+    if (repo && relative) return `${repo} submodule path ${relative}`;
+    if (relative) return `submodule path ${relative}`;
+  }
+  return text(seed.worktree || seed.worktree_root || worktreeRootPath(seed));
+}
+
+function branchName(seed) {
+  if (worktreeSubmodule(seed)) {
+    return text(seed.submodule_branch || seed.branch || seed.display_branch || "unknown");
+  }
+  return text(seed.display_branch || seed.branch || "unknown");
+}
+
+function submoduleContext(seed) {
+  const repo = text(seed.superproject_repo_name || "superproject");
+  const branch = text(seed.superproject_branch || seed.display_branch || "");
+  if (repo && branch) return `${repo}@${branch}`;
+  if (branch) return branch;
+  return pathTitle(seed.superproject_worktree || seed.worktree_superproject || seed.worktree);
+}
+
+function branchNote(seed) {
+  if (worktreeSubmodule(seed)) {
+    const submoduleSha = text(seed.submodule_sha || seed.branch_tip_sha || "").slice(0, 7);
+    const context = submoduleContext(seed);
+    return submoduleSha ? `in ${context} (${submoduleSha})` : `in ${context}`;
+  }
+  return text(seed.worktree_title || pathTitle(seed.worktree));
 }
 
 function repoKey(entry) {
   return text(entry.repo_id || entry.repo_name || "unknown");
+}
+
+function worktreeDeleted(entry) {
+  return entry?.worktree_exists === false || text(entry?.worktree_status) === "deleted";
+}
+
+function worktreeSubmodule(entry) {
+  return text(entry?.worktree_status) === "submodule";
+}
+
+function statusRank(entry) {
+  if (worktreeDeleted(entry)) return 2;
+  if (worktreeSubmodule(entry)) return 1;
+  return 0;
+}
+
+function statusPayload(seed) {
+  const displayPayload = {
+    display_branch: text(seed.display_branch || ""),
+    display_worktree_root: text(seed.display_worktree_root || ""),
+    display_worktree_root_title: text(seed.display_worktree_root_title || ""),
+    submodule_branch: text(seed.submodule_branch || ""),
+    submodule_relative_path: text(seed.submodule_relative_path || ""),
+    submodule_sha: text(seed.submodule_sha || ""),
+    superproject_branch: text(seed.superproject_branch || ""),
+    superproject_repo_id: text(seed.superproject_repo_id || ""),
+    superproject_repo_name: text(seed.superproject_repo_name || ""),
+    superproject_worktree: text(seed.superproject_worktree || ""),
+  };
+  if (worktreeDeleted(seed)) {
+    return {
+      ...displayPayload,
+      worktree_exists: false,
+      worktree_status: "deleted",
+      worktree_status_message: text(seed.worktree_status_message || "worktree directory not found"),
+      worktree_superproject: text(seed.worktree_superproject || ""),
+    };
+  }
+  if (worktreeSubmodule(seed)) {
+    return {
+      ...displayPayload,
+      worktree_exists: true,
+      worktree_status: "submodule",
+      worktree_status_message: text(seed.worktree_status_message || "git submodule checkout"),
+      worktree_superproject: text(seed.worktree_superproject || ""),
+    };
+  }
+  return {
+    ...displayPayload,
+    worktree_exists: seed.worktree_exists === false ? false : seed.worktree_exists === true ? true : null,
+    worktree_status: text(seed.worktree_status || ""),
+    worktree_status_message: text(seed.worktree_status_message || ""),
+    worktree_superproject: text(seed.worktree_superproject || ""),
+  };
+}
+
+function applyWorktreeStatus(target, seed) {
+  if (statusRank(seed) < statusRank(target)) return;
+  Object.assign(target, statusPayload(seed));
 }
 
 function buildCatalogTree(catalog) {
@@ -96,6 +241,8 @@ function buildCatalogTree(catalog) {
   function ensureWorktree(project, seed) {
     const rootPath = worktreeRootPath(seed);
     const rootTitle = worktreeRootTitle(seed);
+    const displayPath = worktreeDisplayPath(seed);
+    const displayTitle = worktreeDisplayTitle(seed);
     const key = text(rootPath || seed.id || seed.compose_project || `${seed.repo_id}:${seed.branch}`);
     if (!project.worktrees.has(key)) {
       project.worktrees.set(key, {
@@ -107,11 +254,14 @@ function buildCatalogTree(catalog) {
         worktree_title: rootTitle,
         worktree_root: rootPath,
         worktree_root_title: rootTitle,
+        worktree_path_label: displayPath,
+        worktree_path_title: displayTitle,
         compose_project: text(seed.compose_project || ""),
         running: Boolean(seed.running),
         status: text(seed.status || (seed.running ? "running" : "stopped")),
         startable: Boolean(seed.startable),
         start_error: text(seed.start_error || ""),
+        ...statusPayload(seed),
         source: text(seed.source || "current"),
         last_seen_at: text(seed.last_seen_at || ""),
         branches: new Map(),
@@ -128,6 +278,9 @@ function buildCatalogTree(catalog) {
     worktree.worktree_title = worktree.worktree_title || rootTitle;
     worktree.worktree_root = worktree.worktree_root || rootPath;
     worktree.worktree_root_title = worktree.worktree_root_title || rootTitle;
+    worktree.worktree_path_label = worktree.worktree_path_label || displayPath;
+    worktree.worktree_path_title = worktree.worktree_path_title || displayTitle;
+    applyWorktreeStatus(worktree, seed);
     worktree.source = worktree.source === "current" || seed.source === "current" ? "current" : worktree.source;
     worktree.last_seen_at = text(seed.last_seen_at || worktree.last_seen_at || "");
     return worktree;
@@ -138,14 +291,25 @@ function buildCatalogTree(catalog) {
     if (!worktree.branches.has(cleanBranch)) {
       worktree.branches.set(cleanBranch, {
         branch: cleanBranch,
+        raw_branch: text(seed.branch || cleanBranch),
         worktree: text(seed.worktree || ""),
-        worktree_title: text(seed.worktree_title || pathTitle(seed.worktree) || cleanBranch),
+        worktree_title: text(branchNote(seed) || cleanBranch),
+        branch_tip_epoch: numberValue(seed.branch_tip_epoch),
+        branch_tip_time: text(seed.branch_tip_time || ""),
+        branch_tip_sha: text(seed.branch_tip_sha || ""),
+        ...statusPayload(seed),
         services: [],
       });
     }
     const branch = worktree.branches.get(cleanBranch);
     branch.worktree = branch.worktree || text(seed.worktree || "");
-    branch.worktree_title = branch.worktree_title || text(seed.worktree_title || pathTitle(seed.worktree) || cleanBranch);
+    branch.worktree_title = branch.worktree_title || text(branchNote(seed) || cleanBranch);
+    if (numberValue(seed.branch_tip_epoch) > numberValue(branch.branch_tip_epoch)) {
+      branch.branch_tip_epoch = numberValue(seed.branch_tip_epoch);
+      branch.branch_tip_time = text(seed.branch_tip_time || "");
+      branch.branch_tip_sha = text(seed.branch_tip_sha || "");
+    }
+    applyWorktreeStatus(branch, seed);
     return branch;
   }
 
@@ -154,34 +318,73 @@ function buildCatalogTree(catalog) {
     const project = ensureProject(record.repo_id, record.repo_name);
     const worktree = ensureWorktree(project, record);
     if (!record.running) {
-      worktree.dead_instances.push({ ...record, dead: true });
+      worktree.dead_instances.push({
+        ...record,
+        branch: branchName(record),
+        raw_branch: text(record.branch || ""),
+        worktree_title: branchNote(record),
+        dead: true,
+      });
       continue;
     }
-    ensureBranch(worktree, record.branch, record);
+    ensureBranch(worktree, branchName(record), record);
   }
 
   for (const service of catalog?.services || []) {
     const repoId = text(service.repo_id || "unknown");
     const repoName = text(service.repo_name || repoId);
-    const branchName = text(service.branch || "unknown");
+    const cleanBranchName = branchName(service);
     const project = ensureProject(repoId, repoName);
     const worktree = ensureWorktree(project, {
       repo_id: repoId,
       repo_name: repoName,
-      branch: branchName,
+      branch: service.branch,
+      display_branch: service.display_branch,
       worktree: service.worktree,
-      worktree_title: pathTitle(service.worktree),
+      worktree_title: branchNote(service),
+      display_worktree_root: service.display_worktree_root,
+      display_worktree_root_title: service.display_worktree_root_title,
       worktree_root: service.worktree_root,
       worktree_root_title: service.worktree_root_title,
       compose_project: service.compose_project,
+      branch_tip_epoch: service.branch_tip_epoch,
+      branch_tip_time: service.branch_tip_time,
+      branch_tip_sha: service.branch_tip_sha,
+      worktree_exists: service.worktree_exists,
+      worktree_status: service.worktree_status,
+      worktree_status_message: service.worktree_status_message,
+      worktree_superproject: service.worktree_superproject,
+      submodule_branch: service.submodule_branch,
+      submodule_relative_path: service.submodule_relative_path,
+      submodule_sha: service.submodule_sha,
+      superproject_branch: service.superproject_branch,
+      superproject_repo_id: service.superproject_repo_id,
+      superproject_repo_name: service.superproject_repo_name,
+      superproject_worktree: service.superproject_worktree,
       running: true,
       status: "running",
       startable: true,
       source: "current",
     });
-    ensureBranch(worktree, branchName, {
+    ensureBranch(worktree, cleanBranchName, {
+      branch: service.branch,
+      display_branch: service.display_branch,
       worktree: service.worktree,
-      worktree_title: pathTitle(service.worktree),
+      worktree_title: branchNote(service),
+      branch_tip_epoch: service.branch_tip_epoch,
+      branch_tip_time: service.branch_tip_time,
+      branch_tip_sha: service.branch_tip_sha,
+      worktree_exists: service.worktree_exists,
+      worktree_status: service.worktree_status,
+      worktree_status_message: service.worktree_status_message,
+      worktree_superproject: service.worktree_superproject,
+      submodule_branch: service.submodule_branch,
+      submodule_relative_path: service.submodule_relative_path,
+      submodule_sha: service.submodule_sha,
+      superproject_branch: service.superproject_branch,
+      superproject_repo_id: service.superproject_repo_id,
+      superproject_repo_name: service.superproject_repo_name,
+      superproject_worktree: service.superproject_worktree,
     }).services.push(service);
   }
 
@@ -193,15 +396,12 @@ function buildCatalogTree(catalog) {
         .sort((left, right) => text(left.worktree_title).localeCompare(text(right.worktree_title)) || text(left.worktree).localeCompare(text(right.worktree)))
         .map((worktree) => ({
           ...worktree,
-          dead_instances: worktree.dead_instances.sort((left, right) => (
-            text(left.branch).localeCompare(text(right.branch))
-            || text(left.compose_project).localeCompare(text(right.compose_project))
-          )),
+          dead_instances: worktree.dead_instances.sort(compareBranchTip),
           branches: Array.from(worktree.branches.values())
-            .sort((left, right) => left.branch.localeCompare(right.branch))
+            .sort(compareBranchTip)
             .map((branch) => ({
               ...branch,
-              services: branch.services.sort((left, right) => text(left.compose_service).localeCompare(text(right.compose_service)) || text(left.container).localeCompare(text(right.container))),
+              services: branch.services.sort(compareServiceOrder),
             })),
         })),
     }));
@@ -303,6 +503,43 @@ function StatPill({ label }) {
 
 function CodeText({ value }) {
   return <code>{text(value)}</code>;
+}
+
+function BranchName({ entry, className = "" }) {
+  const classes = ["branch-name-label", className, worktreeDeleted(entry) ? "branch-name-deleted" : ""]
+    .filter(Boolean)
+    .join(" ");
+  return <span className={classes}>{text(entry.branch || "")}</span>;
+}
+
+function WorktreeStatusBadges({ entry }) {
+  const badges = [];
+  if (worktreeDeleted(entry)) {
+    badges.push({
+      key: "deleted",
+      label: "deleted",
+      title: text(entry.worktree_status_message || "worktree directory not found"),
+      className: "worktree-status-deleted",
+    });
+  }
+  if (worktreeSubmodule(entry)) {
+    badges.push({
+      key: "submodule",
+      label: "submodule",
+      title: text(entry.worktree_status_message || entry.worktree_superproject || "git submodule checkout"),
+      className: "worktree-status-submodule",
+    });
+  }
+  if (!badges.length) return null;
+  return (
+    <span className="worktree-status-badges">
+      {badges.map((badge) => (
+        <span className={`worktree-status-badge ${badge.className}`} title={badge.title} key={badge.key}>
+          {badge.label}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function OpenLink({ href, children }) {
@@ -415,7 +652,7 @@ function RunningBranchesMenu({ branches, onAction }) {
   return (
     <div className="running-menu" data-running-branch-menu>
       <button
-        className="running-menu-button"
+        className={`running-menu-button ${hasItems ? "has-items" : "is-empty"}`}
         type="button"
         title="running branches"
         disabled={!hasItems}
@@ -434,7 +671,8 @@ function RunningBranchesMenu({ branches, onAction }) {
           {branches.map((branch) => (
             <div className="running-row" key={branch.branch}>
               <div className="running-main">
-                <CodeText value={branch.branch || ""} />
+                <BranchName entry={branch} />
+                <WorktreeStatusBadges entry={branch} />
                 <span className="branch-path-note" title={branch.worktree}>{branch.worktree_title}</span>
               </div>
               <BranchActions branch={branch} onAction={onAction} />
@@ -479,7 +717,7 @@ function EndpointTable({ services }) {
         </thead>
         <tbody>
           {services.flatMap((service) =>
-            (service.endpoints || []).map((endpoint) => (
+            [...(service.endpoints || [])].sort(compareEndpointOrder).map((endpoint) => (
               <tr key={`${service.container}-${endpoint.id || endpoint.name}`}>
                 <td><CodeText value={service.compose_service || ""} /></td>
                 <td><CodeText value={endpoint.name || endpoint.id || ""} /></td>
@@ -507,7 +745,8 @@ function BranchPanel({ branch, onAction }) {
         <button className="branch-toggle" type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
           <Chevron className="toggle-icon" aria-hidden="true" />
           <GitBranch className="entity-icon" aria-hidden="true" />
-          <span className="branch-name branch-running-name">{branch.branch}</span>
+          <BranchName entry={branch} className="branch-name branch-running-name" />
+          <WorktreeStatusBadges entry={branch} />
           <span className="branch-path-note" title={branch.worktree}>{branch.worktree_title}</span>
         </button>
         <div className="branch-header-right">
@@ -544,7 +783,7 @@ function DeadInstancesMenu({ instances, onStart }) {
   return (
     <div className="dead-menu" data-dead-panel>
       <button
-        className="dead-menu-button"
+        className={`dead-menu-button ${hasItems ? "has-items" : "is-empty"}`}
         type="button"
         title="dead branches"
         disabled={!hasItems}
@@ -563,7 +802,8 @@ function DeadInstancesMenu({ instances, onStart }) {
           {instances.map((instance) => (
             <div className="dead-row" key={`${instance.worktree}-${instance.branch}-${instance.compose_project || ""}`}>
               <div className="dead-main">
-                <CodeText value={instance.branch || ""} />
+                <BranchName entry={instance} />
+                <WorktreeStatusBadges entry={instance} />
                 <span className="branch-path-note" title={instance.worktree}>{instance.worktree_title}</span>
                 {instance.source === "history" ? <span className="dead-note">history</span> : null}
               </div>
@@ -588,6 +828,8 @@ function WorktreePanel({ worktree, onAction, onStart }) {
   const [open, setOpen] = useState(true);
   const Chevron = open ? ChevronDown : ChevronRight;
   const hasBranches = worktree.branches.length > 0;
+  const pathLabel = text(worktree.worktree_path_label || worktree.worktree);
+  const pathTitle = text(worktree.worktree_path_title || worktree.worktree);
   return (
     <section className="worktree-group" data-worktree-group="true">
       <div className="worktree-header">
@@ -595,7 +837,13 @@ function WorktreePanel({ worktree, onAction, onStart }) {
           <Chevron className="toggle-icon" aria-hidden="true" />
           <Boxes className="entity-icon worktree-icon" aria-hidden="true" />
           <span className="worktree-name">{worktree.worktree_title}</span>
-          <span className="worktree-path" title={worktree.worktree}>{worktree.worktree}</span>
+          {worktreeSubmodule(worktree) ? (
+            <span className="worktree-kind-badge" title="git submodule">
+              <GitFork className="worktree-kind-icon" aria-hidden="true" />
+              submodule
+            </span>
+          ) : null}
+          {pathLabel ? <span className="worktree-path" title={pathTitle}>{pathLabel}</span> : null}
         </button>
         <div className="worktree-header-right">
           <RunningBranchesMenu branches={worktree.branches} onAction={onAction} />

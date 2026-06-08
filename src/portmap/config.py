@@ -15,13 +15,16 @@ def load_endpoint_declarations(path: Path | None) -> list[EndpointDeclaration]:
     raw_endpoints = payload.get("endpoints")
     if not isinstance(raw_endpoints, dict):
         raise ConfigError("config must contain [endpoints.<name>] tables")
-    endpoints = [parse_endpoint(name, value) for name, value in raw_endpoints.items()]
+    endpoints = [
+        parse_endpoint(name, value, order=index)
+        for index, (name, value) in enumerate(raw_endpoints.items())
+    ]
     if not endpoints:
         raise ConfigError("config contains no endpoints")
     return endpoints
 
 
-def parse_endpoint(name: str, raw: Any) -> EndpointDeclaration:
+def parse_endpoint(name: str, raw: Any, *, order: int) -> EndpointDeclaration:
     if not isinstance(raw, dict):
         raise ConfigError(f"endpoint {name!r} must be a table")
     kind_value = raw.get("kind")
@@ -58,6 +61,7 @@ def parse_endpoint(name: str, raw: Any) -> EndpointDeclaration:
         raise ConfigError(f"endpoint {name!r} upstream_host must be a string")
     return EndpointDeclaration(
         name=name,
+        order=order,
         kind=kind,
         service=service,
         container_port=container_port,

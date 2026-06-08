@@ -32,3 +32,34 @@
   identity and linked `.git` wt root, exposes running/dead branch controls,
   and keeps startable history as dead branch discovery instead of a separate UI
   level.
+- Merge `feat/transparent-compose` so the main gateway compose file remains
+  transparent in repos without `.portmap` runtime state and no longer requires
+  `PORTMAP_STATE_DIR` just to parse `docker compose down`.
+- Merge `feat/host-agent` so the catalog can use a small host-side agent for
+  Git worktree discovery and host compose starts, while docs clarify that
+  portmap manages port resources and endpoint indexes rather than protocol
+  behavior.
+- Merge `feat/fronted` so empty running/dead branch controls are fixed-width
+  and visually muted when their counts are zero.
+- Merge `feat/fronted` spacing follow-up so fixed branch controls do not clip
+  icons and restart/down actions have clearer separation.
+- Merge `feat/branch-tip-order` so catalog branches are ordered by newest Git
+  tip first and endpoint/service tables preserve `.portmap/endpoints.toml`
+  declaration order.
+- Merge `feat/worktree-status-badges` so running containers with deleted
+  worktree directories show red deleted branch badges, and submodule checkouts
+  show submodule badges beside branch names.
+- Merge `feat/worktree-status-badges` follow-up so host agent worktree metadata
+  overrides catalog-container path checks and avoids false deleted badges for
+  existing host worktrees.
+- Merge `feat/submodule-worktrees` so the host agent can discover startable
+  portmap-ready submodules across sibling superproject worktrees.
+- Merge `feat/submodule-display-group` so submodule instances group by parent
+  repo path and show the superproject branch as the primary branch label.
+- Merge `feat/submodule-branch-display` so submodule branch labels show the
+  submodule repo branch while the superproject branch remains contextual
+  metadata.
+- Merge `feat/submodule-worktree-path-display` so synthetic submodule grouping
+  keys stay internal and worktree headers show human-readable submodule paths.
+- Merge `feat/submodule-worktree-icon` so submodule worktree headers include a
+  compact submodule badge and icon for clearer hierarchy.

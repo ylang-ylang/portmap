@@ -16,6 +16,7 @@ class EndpointKind(StrEnum):
 @dataclass(frozen=True)
 class EndpointDeclaration:
     name: str
+    order: int
     kind: EndpointKind
     service: str
     container_port: int

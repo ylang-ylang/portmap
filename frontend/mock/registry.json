@@ -10,14 +10,19 @@
       "repo_id": "a2b2a254990e",
       "repo_name": "browserdeck",
       "branch": "dev",
+      "branch_tip_epoch": 1780560000,
+      "branch_tip_time": "2026-06-04T08:00:00+00:00",
+      "branch_tip_sha": "1111111111111111111111111111111111111111",
       "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@dev",
       "compose_project": "browserdeck_dev_a2b2",
       "compose_service": "browser-gpu-lab",
       "docker_network": "portmap_gateway",
+      "portmap_order": 0,
       "endpoints": [
         {
           "id": "desktop-dev-browserdeck",
           "name": "desktop",
+          "order": 0,
           "kind": "http",
           "container_port": 18080,
           "url": "http://desktop.dev.browserdeck.debug.lan:8080"
@@ -25,6 +30,7 @@
         {
           "id": "browser-debug-dev-browserdeck",
           "name": "browser-debug",
+          "order": 1,
           "kind": "http",
           "container_port": 19333,
           "url": "http://browser-debug.dev.browserdeck.debug.lan:8080"
@@ -43,10 +49,12 @@
       "compose_project": "browserdeck_dev_a2b2",
       "compose_service": "coturn",
       "docker_network": "browserdeck_dev_default",
+      "portmap_order": 2,
       "endpoints": [
         {
           "id": "turn-dev-browserdeck",
           "name": "turn",
+          "order": 2,
           "kind": "range",
           "container_port": 3478,
           "host": "192.0.2.10",
@@ -64,14 +72,22 @@
       "repo_id": "a2b2a254990e",
       "repo_name": "browserdeck",
       "branch": "feat-docker-browser-pointer-alignment",
+      "branch_tip_epoch": 1780567200,
+      "branch_tip_time": "2026-06-04T10:00:00+00:00",
+      "branch_tip_sha": "2222222222222222222222222222222222222222",
       "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@feat-docker-browser-pointer-alignment",
+      "worktree_exists": false,
+      "worktree_status": "deleted",
+      "worktree_status_message": "worktree directory not found",
       "compose_project": "browserdeck_feat_pointer_a2b2",
       "compose_service": "browser-gpu-lab",
       "docker_network": "portmap_gateway",
+      "portmap_order": 0,
       "endpoints": [
         {
           "id": "desktop-feat-browserdeck",
           "name": "desktop",
+          "order": 0,
           "kind": "http",
           "container_port": 18080,
           "url": "http://desktop.feat-docker-browser-pointer-alignment.browserdeck.debug.lan:8080"
@@ -79,6 +95,7 @@
         {
           "id": "browser-debug-feat-browserdeck",
           "name": "browser-debug",
+          "order": 1,
           "kind": "http",
           "container_port": 19333,
           "url": "http://browser-debug.feat-docker-browser-pointer-alignment.browserdeck.debug.lan:8080"
@@ -97,10 +114,12 @@
       "compose_project": "comap_dev_11aa",
       "compose_service": "frontend",
       "docker_network": "portmap_gateway",
+      "portmap_order": 0,
       "endpoints": [
         {
           "id": "frontend-dev-comap",
           "name": "frontend",
+          "order": 0,
           "kind": "http",
           "container_port": 5173,
           "url": "http://frontend.dev.comap.debug.lan:8080"
@@ -119,10 +138,12 @@
       "compose_project": "comap_dev_11aa",
       "compose_service": "backend",
       "docker_network": "portmap_gateway",
+      "portmap_order": 1,
       "endpoints": [
         {
           "id": "api-dev-comap",
           "name": "api",
+          "order": 1,
           "kind": "http",
           "container_port": 8000,
           "url": "http://api.dev.comap.debug.lan:8080"
@@ -130,6 +151,7 @@
         {
           "id": "mqtt-dev-comap",
           "name": "mqtt",
+          "order": 2,
           "kind": "tcp",
           "container_port": 1883,
           "host": "192.0.2.10",
@@ -149,10 +171,12 @@
       "compose_project": "robotops_dev_55cc",
       "compose_service": "api",
       "docker_network": "portmap_gateway",
+      "portmap_order": 0,
       "endpoints": [
         {
           "id": "api-dev-robotops",
           "name": "api",
+          "order": 0,
           "kind": "http",
           "container_port": 8080,
           "url": "http://api.dev.robotops.debug.lan:8080"
@@ -160,6 +184,7 @@
         {
           "id": "metrics-dev-robotops",
           "name": "metrics",
+          "order": 1,
           "kind": "http",
           "container_port": 9100,
           "url": "http://metrics.dev.robotops.debug.lan:8080"
@@ -178,10 +203,12 @@
       "compose_project": "robotops_dev_55cc",
       "compose_service": "message-bus",
       "docker_network": "robotops_dev_default",
+      "portmap_order": 2,
       "endpoints": [
         {
           "id": "mqtt-dev-robotops",
           "name": "mqtt",
+          "order": 2,
           "kind": "tcp",
           "container_port": 1883,
           "host": "192.0.2.10",
@@ -201,10 +228,12 @@
       "compose_project": "robotops_feat_sim_55cc",
       "compose_service": "sim-ui",
       "docker_network": "portmap_gateway",
+      "portmap_order": 0,
       "endpoints": [
         {
           "id": "sim-ui-feat-robotops",
           "name": "sim-ui",
+          "order": 0,
           "kind": "http",
           "container_port": 5173,
           "url": "http://sim-ui.feat-sim.robotops.debug.lan:8080"
@@ -220,15 +249,21 @@
       "repo_name": "browserdeck",
       "branch": "dev-clone",
       "worktree": "/home/ylang/ylangs_ws/browserdeck-clone@wt/browserdeck@dev-clone",
+      "worktree_exists": true,
+      "worktree_status": "submodule",
+      "worktree_status_message": "submodule under /home/ylang/ylangs_ws/comap@worktree/comap@dev",
+      "worktree_superproject": "/home/ylang/ylangs_ws/comap@worktree/comap@dev",
       "worktree_root": "/home/ylang/linked-git/browserdeck-clone.git",
       "worktree_root_title": "browserdeck clone linked .git",
       "compose_project": "browserdeck_clone_dev_7f21",
       "compose_service": "web",
       "docker_network": "portmap_gateway",
+      "portmap_order": 0,
       "endpoints": [
         {
           "id": "web-clone-browserdeck",
           "name": "web",
+          "order": 0,
           "kind": "http",
           "container_port": 5173,
           "url": "http://web.dev-clone.browserdeck.debug.lan:8080"
@@ -260,6 +295,9 @@
       "branch": "feat-docker-browser-pointer-alignment",
       "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@feat-docker-browser-pointer-alignment",
       "worktree_title": "browserdeck@feat-docker-browser-pointer-alignment",
+      "worktree_exists": false,
+      "worktree_status": "deleted",
+      "worktree_status_message": "worktree directory not found",
       "compose_project": "browserdeck_feat_pointer_a2b2",
       "running": true,
       "status": "running",
@@ -274,6 +312,9 @@
       "repo_id": "a2b2a254990e",
       "repo_name": "browserdeck",
       "branch": "feat-bug-fix",
+      "branch_tip_epoch": 1780563600,
+      "branch_tip_time": "2026-06-04T09:00:00+00:00",
+      "branch_tip_sha": "3333333333333333333333333333333333333333",
       "worktree": "/home/ylang/ylangs_ws/comap@worktree/browserdeck@wt/browserdeck@feat-bug-fix",
       "worktree_title": "browserdeck@feat-bug-fix",
       "compose_project": "",
@@ -306,6 +347,9 @@
       "repo_id": "55cc66dd77ee",
       "repo_name": "robotops",
       "branch": "dev",
+      "branch_tip_epoch": 1780556400,
+      "branch_tip_time": "2026-06-04T07:00:00+00:00",
+      "branch_tip_sha": "4444444444444444444444444444444444444444",
       "worktree": "/home/ylang/ylangs_ws/robotops@wt/robotops@dev",
       "worktree_title": "robotops@dev",
       "compose_project": "robotops_dev_55cc",
@@ -322,6 +366,9 @@
       "repo_id": "55cc66dd77ee",
       "repo_name": "robotops",
       "branch": "feat-sim",
+      "branch_tip_epoch": 1780565400,
+      "branch_tip_time": "2026-06-04T09:30:00+00:00",
+      "branch_tip_sha": "5555555555555555555555555555555555555555",
       "worktree": "/home/ylang/ylangs_ws/robotops@wt/robotops@feat-sim",
       "worktree_title": "robotops@feat-sim",
       "compose_project": "robotops_feat_sim_55cc",
@@ -338,6 +385,9 @@
       "repo_id": "55cc66dd77ee",
       "repo_name": "robotops",
       "branch": "feat-calibration",
+      "branch_tip_epoch": 1780569000,
+      "branch_tip_time": "2026-06-04T10:30:00+00:00",
+      "branch_tip_sha": "6666666666666666666666666666666666666666",
       "worktree": "/home/ylang/ylangs_ws/robotops@wt/robotops@feat-calibration",
       "worktree_title": "robotops@feat-calibration",
       "compose_project": "",
@@ -404,6 +454,10 @@
       "branch": "dev-clone",
       "worktree": "/home/ylang/ylangs_ws/browserdeck-clone@wt/browserdeck@dev-clone",
       "worktree_title": "browserdeck@dev-clone",
+      "worktree_exists": true,
+      "worktree_status": "submodule",
+      "worktree_status_message": "submodule under /home/ylang/ylangs_ws/comap@worktree/comap@dev",
+      "worktree_superproject": "/home/ylang/ylangs_ws/comap@worktree/comap@dev",
       "worktree_root": "/home/ylang/linked-git/browserdeck-clone.git",
       "worktree_root_title": "browserdeck clone linked .git",
       "compose_project": "browserdeck_clone_dev_7f21",
