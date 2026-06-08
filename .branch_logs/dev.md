@@ -59,3 +59,5 @@
 - Merge `feat/submodule-branch-display` so submodule branch labels show the
   submodule repo branch while the superproject branch remains contextual
   metadata.
+- Merge `feat/submodule-worktree-path-display` so synthetic submodule grouping
+  keys stay internal and worktree headers show human-readable submodule paths.

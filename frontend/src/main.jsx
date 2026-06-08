@@ -115,6 +115,24 @@ function worktreeRootTitle(seed) {
   return text(seed.display_worktree_root_title || seed.worktree_root_title || pathTitle(worktreeRootPath(seed)) || pathTitle(seed.worktree) || "wt root");
 }
 
+function worktreeDisplayPath(seed) {
+  if (worktreeSubmodule(seed)) {
+    const relative = text(seed.submodule_relative_path || "");
+    if (relative) return `submodule path ${relative}`;
+  }
+  return text(seed.worktree || seed.worktree_root || worktreeRootPath(seed));
+}
+
+function worktreeDisplayTitle(seed) {
+  if (worktreeSubmodule(seed)) {
+    const repo = text(seed.superproject_repo_name || "");
+    const relative = text(seed.submodule_relative_path || "");
+    if (repo && relative) return `${repo} submodule path ${relative}`;
+    if (relative) return `submodule path ${relative}`;
+  }
+  return text(seed.worktree || seed.worktree_root || worktreeRootPath(seed));
+}
+
 function branchName(seed) {
   if (worktreeSubmodule(seed)) {
     return text(seed.submodule_branch || seed.branch || seed.display_branch || "unknown");
@@ -222,6 +240,8 @@ function buildCatalogTree(catalog) {
   function ensureWorktree(project, seed) {
     const rootPath = worktreeRootPath(seed);
     const rootTitle = worktreeRootTitle(seed);
+    const displayPath = worktreeDisplayPath(seed);
+    const displayTitle = worktreeDisplayTitle(seed);
     const key = text(rootPath || seed.id || seed.compose_project || `${seed.repo_id}:${seed.branch}`);
     if (!project.worktrees.has(key)) {
       project.worktrees.set(key, {
@@ -233,6 +253,8 @@ function buildCatalogTree(catalog) {
         worktree_title: rootTitle,
         worktree_root: rootPath,
         worktree_root_title: rootTitle,
+        worktree_path_label: displayPath,
+        worktree_path_title: displayTitle,
         compose_project: text(seed.compose_project || ""),
         running: Boolean(seed.running),
         status: text(seed.status || (seed.running ? "running" : "stopped")),
@@ -255,6 +277,8 @@ function buildCatalogTree(catalog) {
     worktree.worktree_title = worktree.worktree_title || rootTitle;
     worktree.worktree_root = worktree.worktree_root || rootPath;
     worktree.worktree_root_title = worktree.worktree_root_title || rootTitle;
+    worktree.worktree_path_label = worktree.worktree_path_label || displayPath;
+    worktree.worktree_path_title = worktree.worktree_path_title || displayTitle;
     applyWorktreeStatus(worktree, seed);
     worktree.source = worktree.source === "current" || seed.source === "current" ? "current" : worktree.source;
     worktree.last_seen_at = text(seed.last_seen_at || worktree.last_seen_at || "");
@@ -803,6 +827,8 @@ function WorktreePanel({ worktree, onAction, onStart }) {
   const [open, setOpen] = useState(true);
   const Chevron = open ? ChevronDown : ChevronRight;
   const hasBranches = worktree.branches.length > 0;
+  const pathLabel = text(worktree.worktree_path_label || worktree.worktree);
+  const pathTitle = text(worktree.worktree_path_title || worktree.worktree);
   return (
     <section className="worktree-group" data-worktree-group="true">
       <div className="worktree-header">
@@ -810,7 +836,7 @@ function WorktreePanel({ worktree, onAction, onStart }) {
           <Chevron className="toggle-icon" aria-hidden="true" />
           <Boxes className="entity-icon worktree-icon" aria-hidden="true" />
           <span className="worktree-name">{worktree.worktree_title}</span>
-          <span className="worktree-path" title={worktree.worktree}>{worktree.worktree}</span>
+          {pathLabel ? <span className="worktree-path" title={pathTitle}>{pathLabel}</span> : null}
         </button>
         <div className="worktree-header-right">
           <RunningBranchesMenu branches={worktree.branches} onAction={onAction} />
