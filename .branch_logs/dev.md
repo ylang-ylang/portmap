@@ -61,3 +61,5 @@
   metadata.
 - Merge `feat/submodule-worktree-path-display` so synthetic submodule grouping
   keys stay internal and worktree headers show human-readable submodule paths.
+- Merge `feat/submodule-worktree-icon` so submodule worktree headers include a
+  compact submodule badge and icon for clearer hierarchy.

@@ -8,6 +8,7 @@ import {
   ExternalLink,
   Folder,
   GitBranch,
+  GitFork,
   Play,
   Power,
   RefreshCw,
@@ -836,6 +837,12 @@ function WorktreePanel({ worktree, onAction, onStart }) {
           <Chevron className="toggle-icon" aria-hidden="true" />
           <Boxes className="entity-icon worktree-icon" aria-hidden="true" />
           <span className="worktree-name">{worktree.worktree_title}</span>
+          {worktreeSubmodule(worktree) ? (
+            <span className="worktree-kind-badge" title="git submodule">
+              <GitFork className="worktree-kind-icon" aria-hidden="true" />
+              submodule
+            </span>
+          ) : null}
           {pathLabel ? <span className="worktree-path" title={pathTitle}>{pathLabel}</span> : null}
         </button>
         <div className="worktree-header-right">
