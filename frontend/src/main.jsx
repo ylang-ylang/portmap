@@ -116,17 +116,25 @@ function worktreeRootTitle(seed) {
 }
 
 function branchName(seed) {
+  if (worktreeSubmodule(seed)) {
+    return text(seed.submodule_branch || seed.branch || seed.display_branch || "unknown");
+  }
   return text(seed.display_branch || seed.branch || "unknown");
+}
+
+function submoduleContext(seed) {
+  const repo = text(seed.superproject_repo_name || "superproject");
+  const branch = text(seed.superproject_branch || seed.display_branch || "");
+  if (repo && branch) return `${repo}@${branch}`;
+  if (branch) return branch;
+  return pathTitle(seed.superproject_worktree || seed.worktree_superproject || seed.worktree);
 }
 
 function branchNote(seed) {
   if (worktreeSubmodule(seed)) {
-    const submoduleBranch = text(seed.submodule_branch || seed.branch || "");
     const submoduleSha = text(seed.submodule_sha || seed.branch_tip_sha || "").slice(0, 7);
-    if (submoduleBranch && submoduleSha && !submoduleBranch.includes(submoduleSha)) {
-      return `${submoduleBranch} ${submoduleSha}`;
-    }
-    return submoduleBranch || (submoduleSha ? `submodule ${submoduleSha}` : pathTitle(seed.worktree));
+    const context = submoduleContext(seed);
+    return submoduleSha ? `in ${context} (${submoduleSha})` : `in ${context}`;
   }
   return text(seed.worktree_title || pathTitle(seed.worktree));
 }
@@ -285,7 +293,13 @@ function buildCatalogTree(catalog) {
     const project = ensureProject(record.repo_id, record.repo_name);
     const worktree = ensureWorktree(project, record);
     if (!record.running) {
-      worktree.dead_instances.push({ ...record, branch: branchName(record), raw_branch: text(record.branch || ""), dead: true });
+      worktree.dead_instances.push({
+        ...record,
+        branch: branchName(record),
+        raw_branch: text(record.branch || ""),
+        worktree_title: branchNote(record),
+        dead: true,
+      });
       continue;
     }
     ensureBranch(worktree, branchName(record), record);

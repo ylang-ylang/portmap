@@ -678,8 +678,12 @@ def test_collect_catalog_discovers_startable_submodules_across_superproject_work
     assert {worktree["display_worktree_root_title"] for worktree in submodule_worktrees.values()} == {
         "comap / 3rdparty/browserdeck"
     }
-    assert submodule_worktrees[str((parent / submodule_relative).resolve())]["display_branch"] == "dev"
-    assert submodule_worktrees[str((sibling / submodule_relative).resolve())]["display_branch"] == "feat-sibling"
+    parent_submodule = submodule_worktrees[str((parent / submodule_relative).resolve())]
+    sibling_submodule = submodule_worktrees[str((sibling / submodule_relative).resolve())]
+    assert parent_submodule["display_branch"] == parent_submodule["submodule_branch"]
+    assert sibling_submodule["display_branch"] == sibling_submodule["submodule_branch"]
+    assert parent_submodule["superproject_branch"] == "dev"
+    assert sibling_submodule["superproject_branch"] == "feat-sibling"
     assert all(worktree["submodule_branch"] for worktree in submodule_worktrees.values())
     assert all(worktree["submodule_sha"] for worktree in submodule_worktrees.values())
 

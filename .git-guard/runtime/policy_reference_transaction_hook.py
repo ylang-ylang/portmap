@@ -44,8 +44,6 @@ def main() -> int:
         if command == "pre-push":
             if len(sys.argv) != 4:
                 raise HookReject("HOOK_PRE_PUSH_USAGE", argv=sys.argv[1:])
-            if os.environ.get("GG_INTERNAL_TAG_SYNC") == "1":
-                return 0
             validate_pre_push(repo, policy, config, sys.argv[2], sys.argv[3], read_push_updates(sys.stdin))
             return 0
 

@@ -9,13 +9,13 @@ from typing import Any
 try:
     from .common import HookReject, LocalPolicyTag, RefUpdate, SourceCandidate, ZERO, append_unique, format_context_value
     from .config import config_bool
-    from .git_ops import format_version, git, git_with_env, is_ancestor, peeled_rev_parse, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from .git_ops import format_version, git, is_ancestor, peeled_rev_parse, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from .policy import source_ref_regex
     from .state import load_state, pending_tag_items
 except ImportError:  # pragma: no cover - installed hook script mode
     from common import HookReject, LocalPolicyTag, RefUpdate, SourceCandidate, ZERO, append_unique, format_context_value
     from config import config_bool
-    from git_ops import format_version, git, git_with_env, is_ancestor, peeled_rev_parse, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from git_ops import format_version, git, is_ancestor, peeled_rev_parse, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from policy import source_ref_regex
     from state import load_state, pending_tag_items
 
@@ -93,9 +93,7 @@ def auto_push_missing_tags(repo: Path, remote: str, display_remote: str, tags: l
         file=sys.stderr,
     )
     for tag in tags:
-        env = os.environ.copy()
-        env["GG_INTERNAL_TAG_SYNC"] = "1"
-        result = git_with_env(repo, env, "push", remote, f"{tag.ref}:{tag.ref}", check=False)
+        result = git(repo, "push", "--no-verify", remote, f"{tag.ref}:{tag.ref}", check=False)
         if result.returncode != 0:
             raise HookReject(
                 "PUSH_TAG_SYNC_FAILED",
