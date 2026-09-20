@@ -299,8 +299,10 @@ def run_gateway_compose(settings, compose_args: list[str]) -> int:
         "compose",
         "-f",
         str(settings.root / "docker-compose.yml"),
-        *compose_args,
     ]
+    if settings.http_port == settings.catalog_port:
+        command += ["-f", str(settings.root / "docker-compose.single-port.yml")]
+    command += compose_args
     return subprocess.run(command, check=False, env=env).returncode
 
 

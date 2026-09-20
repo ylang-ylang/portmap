@@ -41,6 +41,15 @@ services:
       - "${PORTMAP_AGENT_RUNTIME_HOST_DIR:-./.portmap-agent-runtime}:/run/portmap"
     networks:
       - portmap_gateway
+    labels:
+      - portmap.gateway=true
+      - traefik.enable=true
+      - traefik.docker.network=${PORTMAP_GATEWAY_NETWORK:-portmap_gateway}
+      - traefik.http.routers.portmap-catalog.rule=HostRegexp(`.+`)
+      - traefik.http.routers.portmap-catalog.entrypoints=web
+      - traefik.http.routers.portmap-catalog.priority=1
+      - traefik.http.routers.portmap-catalog.service=portmap-catalog
+      - traefik.http.services.portmap-catalog.loadbalancer.server.port=8081
 
   dns:
     image: coredns/coredns:1.12.1
