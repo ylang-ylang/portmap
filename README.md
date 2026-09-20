@@ -225,13 +225,14 @@ agent scans host Git worktrees and handles host-side compose starts for the
 catalog page; the gateway containers provide Traefik, CoreDNS, and the catalog
 UI.
 
-This creates the `portmap_gateway` Docker network and exposes:
+This creates the `portmap_gateway` Docker network. The default ports stay
+compatible with existing deployments; single-port mode shares the HTTP entrypoint:
 
-```text
-Catalog: http://<detected-host-ip>
-Traefik: http://<detected-host-ip>:8080
-DNS:     <detected-host-ip>:53
-```
+| Entry | Default | Single-port mode |
+|---|---|---|
+| Traefik / managed HTTP services | `http://<host-ip>:8080` | `http://<host-ip>:80` |
+| Catalog (bare IP or unmatched Host) | `http://<host-ip>:80`, also via Traefik on `:8080` | Via Traefik on `:80`; no catalog host-port mapping |
+| CoreDNS (TCP/UDP) | `<host-ip>:53` | Unchanged; keep local/private if the firewall only permits HTTP |
 
 CoreDNS answers every `*.debug.lan` A record with the detected host LAN IP.
 Other DNS queries are forwarded to the configured upstream resolver, defaulting
@@ -249,6 +250,78 @@ portmap.toml
 directly and detect the current host LAN IP at runtime. The detected IP is used
 for DNS answers and raw/range endpoint advertisement, so the LAN IP does not
 need to be stored in config.
+
+### One HTTP Port Per Development Machine
+
+For a machine whose firewall only allows inbound TCP `80`, set this in the
+gateway's `portmap.toml`:
+
+```toml
+[gateway]
+http_bind = "0.0.0.0"
+http_port = 80
+catalog_port = 80
+dns_bind = "0.0.0.0"
+dns_port = 53
+dns_domain = "debug.lan"
+network = "portmap_gateway"
+```
+
+When `http_port == catalog_port`, `portmap up` / `portmap gateway` automatically
+apply `docker-compose.single-port.yml` to remove the catalog's host-port mapping.
+The catalog stays on `portmap_gateway`, listening on container port `8081`.
+Traefik's ``HostRegexp(`.+`)`` fallback router has priority `1`, below generated
+service Host routes. Bare IPs and unknown Hosts therefore serve the catalog,
+while registered Hosts reach their services on the same HTTP port. In this mode
+`catalog_bind` is ignored; `http_bind` controls the shared listener. Equal
+non-80 ports work the same way. Unequal ports keep the separate catalog mapping,
+including a custom `catalog_bind` / `catalog_port`.
+
+Preview before changing running services:
+
+```bash
+portmap gateway config
+```
+
+For an existing default deployment, first validate a separate stack on an unused
+loopback port (use distinct container names and an external `portmap_gateway`
+network; `-p` alone does not change the fixed gateway container names). At cutover,
+release the old catalog's port `80` before starting Traefik on it:
+
+```bash
+portmap gateway stop catalog
+portmap gateway up -d
+curl http://127.0.0.1/
+curl -H 'Host: unknown.debug.lan' http://127.0.0.1/
+curl -H 'Host: web.dev.lushu.debug.lan' http://127.0.0.1/map.html
+```
+
+Changing the gateway port does not rewrite labels on existing project containers.
+Run `portmap docker-compose -- up -d` in each managed worktree (including
+`lushu@dev`) with the same gateway settings so generated URLs and catalog links
+move from `:8080` to `:80`. `PORTMAP_HTTP_PORT=80` is an explicit override if the
+project's broker points at another portmap checkout. To roll back, restore
+`http_port = 8080` / `catalog_port = 80`, stop Traefik to free `80`, run
+`portmap gateway up -d`, and regenerate project URLs with the restored settings.
+
+Raw `docker compose` does not read `portmap.toml` or choose the overlay. Its
+equivalent single-port invocation is:
+
+```bash
+PORTMAP_HTTP_PORT=80 PORTMAP_CATALOG_PORT=80 docker compose \
+  -f docker-compose.yml -f docker-compose.single-port.yml up -d
+```
+
+Use Docker Compose with `!reset` support. This mode combines **HTTP** ports only:
+it does not tunnel DNS, raw TCP/UDP, or ranges through port `80`. With external
+DNS port `53` closed, clients need a separately managed wildcard DNS record or
+hosts entries for individual service names pointing at the development machine.
+`dns_bind = "0.0.0.0"` resolves to the detected LAN IP; restrict DNS to trusted
+local/container clients instead of opening it publicly. The catalog and its
+control actions are unauthenticated: exposing the fallback on `80` does not make
+the gateway safe for the public Internet.
+
+### Split DNS
 
 Configure split DNS on a Linux development machine without manually looking up
 the network interface:

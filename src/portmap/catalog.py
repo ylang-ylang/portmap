@@ -208,6 +208,8 @@ def missing_catalog_value(value: Any) -> bool:
 
 def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
     labels = container.get("Labels") or {}
+    if labels.get("portmap.gateway") == "true":
+        return None
     if labels.get("traefik.enable") != "true" and labels.get("portmap.managed") != "true":
         return None
 

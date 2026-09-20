@@ -63,3 +63,6 @@
   keys stay internal and worktree headers show human-readable submodule paths.
 - Merge `feat/submodule-worktree-icon` so submodule worktree headers include a
   compact submodule badge and icon for clearer hierarchy.
+- Merge `feat/infra-http-port-80` so equal gateway HTTP/catalog ports publish
+  only Traefik, with the catalog as the lowest-priority Host fallback. Preserve
+  the separate default ports and document migration, DNS limits, and rollback.
