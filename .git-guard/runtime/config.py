@@ -10,6 +10,12 @@ except ImportError:  # pragma: no cover - installed hook script mode
     from common import HookReject
 
 DEFAULT_CONFIG = {
+    "auto_push": {
+        "enabled": False,
+        "include_protected": False,
+        "remote": "origin",
+        "timeout_seconds": 15,
+    },
     "branch_logs": {
         "path": ".branch_logs/",
         "force_diff_required": True,
@@ -88,6 +94,30 @@ def config_bool(config: dict[str, Any], section: str, key: str) -> bool:
     if not isinstance(value, bool):
         raise HookReject("CONFIG_INVALID", key=f"{section}.{key}", expected="boolean")
     return value
+
+def config_string(config: dict[str, Any], section: str, key: str) -> str:
+    section_value = config.get(section, {})
+    if not isinstance(section_value, dict):
+        raise HookReject("CONFIG_INVALID", key=section, expected="object")
+
+    default_value = DEFAULT_CONFIG[section][key]
+    value = section_value.get(key, default_value)
+    if not isinstance(value, str) or not value:
+        raise HookReject("CONFIG_INVALID", key=f"{section}.{key}", expected="non-empty string")
+    return value
+
+
+def config_int(config: dict[str, Any], section: str, key: str) -> int:
+    section_value = config.get(section, {})
+    if not isinstance(section_value, dict):
+        raise HookReject("CONFIG_INVALID", key=section, expected="object")
+
+    default_value = DEFAULT_CONFIG[section][key]
+    value = section_value.get(key, default_value)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise HookReject("CONFIG_INVALID", key=f"{section}.{key}", expected="positive integer")
+    return value
+
 
 def config_string_list(config: dict[str, Any], section: str, key: str) -> list[str]:
     section_value = config.get(section, {})

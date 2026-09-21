@@ -250,6 +250,7 @@ def cmd_docker_compose(args: argparse.Namespace) -> int:
         )
     env = os.environ.copy()
     env["PORTMAP_BROKER_BYPASS"] = "1"
+    env["DOCKER_HOST"] = load_portmap_settings(environ=os.environ).docker_host
     return subprocess.run(plan.command, check=False, env=env).returncode
 
 
@@ -299,8 +300,10 @@ def run_gateway_compose(settings, compose_args: list[str]) -> int:
         "compose",
         "-f",
         str(settings.root / "docker-compose.yml"),
-        *compose_args,
     ]
+    if settings.http_port == settings.catalog_port:
+        command += ["-f", str(settings.root / "docker-compose.single-port.yml")]
+    command += compose_args
     return subprocess.run(command, check=False, env=env).returncode
 
 

@@ -208,6 +208,8 @@ def missing_catalog_value(value: Any) -> bool:
 
 def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
     labels = container.get("Labels") or {}
+    if labels.get("portmap.gateway") == "true":
+        return None
     if labels.get("traefik.enable") != "true" and labels.get("portmap.managed") != "true":
         return None
 
@@ -916,6 +918,10 @@ def compose_up_worktree(worktree: str) -> dict[str, Any]:
 
     env = os.environ.copy()
     env["PORTMAP_BROKER_BYPASS"] = "1"
+    # Read at call time: the host agent receives the runtime socket through
+    # PORTMAP_DOCKER_SOCKET; the in-container fallback uses the mount target.
+    socket_path = os.environ.get("PORTMAP_DOCKER_SOCKET", DOCKER_SOCKET)
+    env["DOCKER_HOST"] = f"unix://{socket_path}"
     result = subprocess.run(
         plan.command,
         cwd=path,

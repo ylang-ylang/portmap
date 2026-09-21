@@ -28,6 +28,8 @@ def test_portmap_up_starts_agent_before_gateway(tmp_path: Path, monkeypatch) -> 
     assert calls[1][1] == ["docker", "compose", "-f", str(tmp_path / "docker-compose.yml"), "up", "-d"]
     assert calls[1][2]["PORTMAP_AGENT_RUNTIME_HOST_DIR"] == str(tmp_path / "runtime" / "portmap")
     assert calls[1][2]["PORTMAP_AGENT_SOCKET"] == "/run/portmap/agent.sock"
+    assert calls[1][2]["DOCKER_HOST"].startswith("unix://")
+    assert "PORTMAP_RUNTIME_SOCKET" in calls[1][2]
 
 
 def test_portmap_down_stops_gateway_and_agent(tmp_path: Path, monkeypatch) -> None:

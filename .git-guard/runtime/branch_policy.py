@@ -15,7 +15,7 @@ try:
     from .policy import is_allowed_branch_ref, required_target_refs, rule_targets_ref
     from .state import enforce_pending_lock, enforce_pending_tag_lock, load_state, save_state
     from .submodule_policy import enforce_submodule_main_guard
-    from .tag_policy import clear_satisfied_pending_tags, latest_reachable_release_tag, update_pending_tags, validate_tag
+    from .tag_policy import clear_satisfied_pending_tags, latest_reachable_release_tag, update_pending_tags, validate_tag, validate_tag_delete
 except ImportError:  # pragma: no cover - installed hook script mode
     from branch_logs import enforce_branch_log_update
     from common import HookReject, RefUpdate, SourceCandidate, ZERO, warn
@@ -24,14 +24,19 @@ except ImportError:  # pragma: no cover - installed hook script mode
     from policy import is_allowed_branch_ref, required_target_refs, rule_targets_ref
     from state import enforce_pending_lock, enforce_pending_tag_lock, load_state, save_state
     from submodule_policy import enforce_submodule_main_guard
-    from tag_policy import clear_satisfied_pending_tags, latest_reachable_release_tag, update_pending_tags, validate_tag
+    from tag_policy import clear_satisfied_pending_tags, latest_reachable_release_tag, update_pending_tags, validate_tag, validate_tag_delete
 
 def validate_prepared(repo: Path, policy: dict[str, Any], config: dict[str, Any], state_path: Path, updates: list[RefUpdate]) -> None:
-    meaningful_updates = [update for update in updates if update.old != update.new]
+    meaningful_updates = [
+        update
+        for update in updates
+        if update.old != update.new or (update.new == ZERO and is_policy_ref(update.ref))
+    ]
 
     enforce_linked_worktree_branch_creation_guard(repo, config, meaningful_updates)
     enforce_submodule_main_guard(repo, config, meaningful_updates)
     validate_branch_rename_target(policy, meaningful_updates)
+    validate_head_symref_target(repo, policy, meaningful_updates)
 
     state = load_state(state_path)
     pending = state.get("pending", {})
@@ -42,7 +47,7 @@ def validate_prepared(repo: Path, policy: dict[str, Any], config: dict[str, Any]
         if not is_policy_ref(update.ref):
             continue
 
-        if update.ref.startswith("refs/heads/"):
+        if update.ref.startswith("refs/heads/") and update.new != ZERO:
             validate_branch_name(policy, update.ref)
             enforce_branch_log_update(repo, policy, config, update)
 
@@ -50,7 +55,15 @@ def validate_prepared(repo: Path, policy: dict[str, Any], config: dict[str, Any]
         enforce_pending_tag_lock(repo, policy, pending_tags, update)
 
         if update.ref.startswith("refs/tags/"):
-            validate_tag(repo, policy, proposed, update)
+            if update.new == ZERO:
+                validate_tag_delete(policy, update)
+            else:
+                validate_tag(repo, policy, proposed, update)
+            continue
+
+        if update.ref.startswith("refs/heads/") and update.new == ZERO:
+            if update.ref in set(policy.get("protected_refs", [])):
+                raise HookReject("PROTECTED_REF_DELETE", ref=update.ref)
             continue
 
         if update.ref.startswith("refs/heads/") and update.old == ZERO:
@@ -69,32 +82,42 @@ def validate_branch_name(policy: dict[str, Any], ref: str) -> None:
     raise HookReject("BRANCH_NAME_NOT_ALLOWED", ref=ref)
 
 def validate_branch_rename_target(policy: dict[str, Any], updates: list[RefUpdate]) -> None:
-    deleted_heads = [
-        update
-        for update in updates
-        if update.ref.startswith("refs/heads/") and update.old != ZERO and update.new == ZERO
-    ]
+    deleted_heads = [update for update in updates if update.ref.startswith("refs/heads/") and update.new == ZERO]
     if not deleted_heads:
         return
 
-    if not any(update.ref == "HEAD" and update.old != ZERO and update.new == ZERO for update in updates):
+    is_rename, target_ref = branch_rename_target_from_parent()
+    if not is_rename:
         return
-
-    target_ref = branch_rename_target_ref_from_parent()
     if not target_ref:
         raise HookReject("BRANCH_RENAME_TARGET_UNOBSERVABLE", ref=deleted_heads[0].ref)
     validate_branch_name(policy, target_ref)
 
-def branch_rename_target_ref_from_parent() -> str | None:
+
+def validate_head_symref_target(repo: Path, policy: dict[str, Any], updates: list[RefUpdate]) -> None:
+    for update in updates:
+        if update.ref != "HEAD" or not update.new.startswith("ref:"):
+            continue
+        target = update.new[len("ref:") :]
+        if not target.startswith("refs/heads/"):
+            continue
+        if ref_exists(repo, target):
+            continue
+        validate_branch_name(policy, target)
+
+
+def branch_rename_target_from_parent() -> tuple[bool, str | None]:
     argv = parent_process_argv()
     if not argv:
-        return None
-    target = branch_rename_target_from_argv(argv)
+        return False, None
+    is_rename, target = branch_rename_target_from_argv(argv)
+    if not is_rename:
+        return False, None
     if not target:
-        return None
-    if target.startswith("refs/heads/"):
-        return target
-    return f"refs/heads/{target}"
+        return True, None
+    if not target.startswith("refs/heads/"):
+        target = f"refs/heads/{target}"
+    return True, target
 
 def parent_process_argv() -> list[str]:
     parent_pid = os.getppid()
@@ -126,15 +149,15 @@ def ps_command_argv(pid: int) -> list[str]:
     except ValueError:
         return []
 
-def branch_rename_target_from_argv(argv: list[str]) -> str | None:
+def branch_rename_target_from_argv(argv: list[str]) -> tuple[bool, str | None]:
     try:
         branch_index = next(index for index, item in enumerate(argv) if Path(item).name == "branch")
     except StopIteration:
-        return None
+        return False, None
 
     args = argv[branch_index + 1 :]
     if not any(arg in {"-m", "-M", "--move", "--Move"} for arg in args):
-        return None
+        return False, None
 
     positional: list[str] = []
     end_of_options = False
@@ -152,8 +175,8 @@ def branch_rename_target_from_argv(argv: list[str]) -> str | None:
         positional.append(arg)
 
     if not positional:
-        return None
-    return positional[-1]
+        return True, None
+    return True, positional[-1]
 
 def enforce_linked_worktree_branch_creation_guard(repo: Path, config: dict[str, Any], updates: list[RefUpdate]) -> None:
     if not config_bool(config, "worktree", "reject_branch_creation_in_linked_worktree"):
@@ -211,19 +234,18 @@ def validate_managed_branch_update(
     if not is_ancestor(repo, update.old, update.new):
         raise HookReject("MANAGED_BRANCH_NON_FAST_FORWARD", ref=update.ref, old=short_sha(update.old), new=short_sha(update.new))
 
-    for source_ref in introduced_policy_branch_heads(repo, policy, update):
-        rule = merge_rule_for_source(policy, source_ref, update.ref)
-        if rule:
+    for sha, refs in introduced_policy_branch_heads(repo, policy, update):
+        if any(merge_rule_for_source(policy, ref, update.ref) for ref in refs):
             continue
         raise HookReject(
             "MANAGED_BRANCH_SOURCE_NOT_ALLOWED",
             ref=update.ref,
-            source_ref=source_ref,
+            source_refs=sorted(refs),
             old=short_sha(update.old),
             new=short_sha(update.new),
         )
 
-def introduced_policy_branch_heads(repo: Path, policy: dict[str, Any], update: RefUpdate) -> list[str]:
+def introduced_policy_branch_heads(repo: Path, policy: dict[str, Any], update: RefUpdate) -> list[tuple[str, list[str]]]:
     heads: list[tuple[str, str]] = []
     for ref in git(repo, "for-each-ref", "--format=%(refname)", "refs/heads").stdout.splitlines():
         if ref == update.ref or not is_allowed_branch_ref(policy, ref):
@@ -231,7 +253,10 @@ def introduced_policy_branch_heads(repo: Path, policy: dict[str, Any], update: R
         sha = rev_parse(repo, ref)
         if is_ancestor(repo, sha, update.new) and not is_ancestor(repo, sha, update.old):
             heads.append((ref, sha))
-    return [ref for ref, _ in maximal_branch_heads(repo, heads)]
+    grouped: dict[str, list[str]] = {}
+    for ref, sha in maximal_branch_heads(repo, heads):
+        grouped.setdefault(sha, []).append(ref)
+    return list(grouped.items())
 
 def maximal_branch_heads(repo: Path, heads: list[tuple[str, str]]) -> list[tuple[str, str]]:
     maximal = []
@@ -380,5 +405,5 @@ def update_committed_state(repo: Path, policy: dict[str, Any], state_path: Path,
                 "remaining_target_refs": [ref for ref in required if ref not in completed],
             }
 
-    clear_satisfied_pending_tags(pending_tags, meaningful_updates)
+    clear_satisfied_pending_tags(repo, pending_tags, meaningful_updates)
     save_state(state_path, state)

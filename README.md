@@ -207,12 +207,24 @@ that endpoint. If a service needs a specific upstream Host, set
 
 ## CLI
 
-Install the local checkout as a `uv` tool so other repos can call the short
+Install with Homebrew (Linux or macOS tap):
+
+```bash
+brew install ylang-ylang/tap/portmap
+```
+
+Or install a source checkout as a `uv` tool so other repos can call the short
 `portmap` command:
 
 ```bash
 uv tool install --editable /home/ylang/ylangs_ws/portmap@wt/portmap@dev --force
 ```
+
+Both modes are equivalent. Installed packages read gateway assets
+(`docker-compose.yml`, single-port overlay, Corefile) from the Python package
+and keep editable settings in `~/.config/portmap/portmap.toml` when the
+gateway's own `portmap.toml` is absent; `PORTMAP_ROOT` still overrides the
+asset root explicitly.
 
 Start portmap once:
 
@@ -225,13 +237,14 @@ agent scans host Git worktrees and handles host-side compose starts for the
 catalog page; the gateway containers provide Traefik, CoreDNS, and the catalog
 UI.
 
-This creates the `portmap_gateway` Docker network and exposes:
+This creates the `portmap_gateway` Docker network. The default ports stay
+compatible with existing deployments; single-port mode shares the HTTP entrypoint:
 
-```text
-Catalog: http://<detected-host-ip>
-Traefik: http://<detected-host-ip>:8080
-DNS:     <detected-host-ip>:53
-```
+| Entry | Default | Single-port mode |
+|---|---|---|
+| Traefik / managed HTTP services | `http://<host-ip>:8080` | `http://<host-ip>:80` |
+| Catalog (bare IP or unmatched Host) | `http://<host-ip>:80`, also via Traefik on `:8080` | Via Traefik on `:80`; no catalog host-port mapping |
+| CoreDNS (TCP/UDP) | `<host-ip>:53` | Unchanged; keep local/private if the firewall only permits HTTP |
 
 CoreDNS answers every `*.debug.lan` A record with the detected host LAN IP.
 Other DNS queries are forwarded to the configured upstream resolver, defaulting
@@ -249,6 +262,116 @@ portmap.toml
 directly and detect the current host LAN IP at runtime. The detected IP is used
 for DNS answers and raw/range endpoint advertisement, so the LAN IP does not
 need to be stored in config.
+
+### One HTTP Port Per Development Machine
+
+For a machine whose firewall only allows inbound TCP `80`, set this in the
+gateway's `portmap.toml`:
+
+```toml
+[gateway]
+http_bind = "0.0.0.0"
+http_port = 80
+catalog_port = 80
+dns_bind = "0.0.0.0"
+dns_port = 53
+dns_domain = "debug.lan"
+network = "portmap_gateway"
+```
+
+When `http_port == catalog_port`, `portmap up` / `portmap gateway` automatically
+apply `docker-compose.single-port.yml` to remove the catalog's host-port mapping.
+The catalog stays on `portmap_gateway`, listening on container port `8081`.
+Traefik's ``HostRegexp(`.+`)`` fallback router has priority `1`, below generated
+service Host routes. Bare IPs and unknown Hosts therefore serve the catalog,
+while registered Hosts reach their services on the same HTTP port. In this mode
+`catalog_bind` is ignored; `http_bind` controls the shared listener. Equal
+non-80 ports work the same way. Unequal ports keep the separate catalog mapping,
+including a custom `catalog_bind` / `catalog_port`.
+
+Preview before changing running services:
+
+```bash
+portmap gateway config
+```
+
+For an existing default deployment, first validate a separate stack on an unused
+loopback port (use distinct container names and an external `portmap_gateway`
+network; `-p` alone does not change the fixed gateway container names). At cutover,
+release the old catalog's port `80` before starting Traefik on it:
+
+```bash
+portmap gateway stop catalog
+portmap gateway up -d
+curl http://127.0.0.1/
+curl -H 'Host: unknown.debug.lan' http://127.0.0.1/
+curl -H 'Host: web.dev.lushu.debug.lan' http://127.0.0.1/map.html
+```
+
+Changing the gateway port does not rewrite labels on existing project containers.
+Run `portmap docker-compose -- up -d` in each managed worktree (including
+`lushu@dev`) with the same gateway settings so generated URLs and catalog links
+move from `:8080` to `:80`. `PORTMAP_HTTP_PORT=80` is an explicit override if the
+project's broker points at another portmap checkout. To roll back, restore
+`http_port = 8080` / `catalog_port = 80`, stop Traefik to free `80`, run
+`portmap gateway up -d`, and regenerate project URLs with the restored settings.
+
+Raw `docker compose` does not read `portmap.toml` or choose the overlay. Its
+equivalent single-port invocation is:
+
+```bash
+PORTMAP_HTTP_PORT=80 PORTMAP_CATALOG_PORT=80 docker compose \
+  -f docker-compose.yml -f docker-compose.single-port.yml up -d
+```
+
+Use Docker Compose with `!reset` support. This mode combines **HTTP** ports only:
+it does not tunnel DNS, raw TCP/UDP, or ranges through port `80`. With external
+DNS port `53` closed, clients need a separately managed wildcard DNS record or
+hosts entries for individual service names pointing at the development machine.
+`dns_bind = "0.0.0.0"` resolves to the detected LAN IP; restrict DNS to trusted
+local/container clients instead of opening it publicly. The catalog and its
+control actions are unauthenticated: exposing the fallback on `80` does not make
+the gateway safe for the public Internet.
+
+### Container Runtime: Docker or Podman
+
+Each host runs one container runtime, selected per machine:
+
+```toml
+# portmap.toml
+[runtime]
+backend = "auto"    # auto | docker | podman
+# socket = "/run/podman/podman.sock"   # optional explicit override
+```
+
+`auto` resolution order: an explicit `DOCKER_HOST` unix socket, then a
+**live** `/var/run/docker.sock`, then the Podman sockets
+(`/run/podman/podman.sock`, `$XDG_RUNTIME_DIR/podman/podman.sock`).
+Liveness is checked by connecting, so a stale socket file left by a
+stopped dockerd does not win the probe. `PORTMAP_RUNTIME` /
+`PORTMAP_RUNTIME_SOCKET` environment variables override the file.
+
+Podman hosts still use the docker compose CLI as the client: portmap
+points it at the Podman API socket through `DOCKER_HOST`, so generated
+override semantics (including `!reset` for single-port mode) are
+identical on both runtimes. Traefik and CoreDNS are unchanged — Traefik's
+Docker provider talks to whichever socket the gateway mounts. Rootful
+Podman needs no extra setup; rootless Podman must allow privileged ports
+(`sysctl net.ipv4.ip_unprivileged_port_start=53`) for the gateway's DNS
+and HTTP listeners.
+
+The compose takeover shim auto-detects the runtime the same way, and it
+also covers `podman compose`: Podman's provider search path includes
+`~/.docker/cli-plugins/docker-compose`, so one shim shadows both
+`docker compose` and `podman compose`. On Podman-only hosts make sure the
+docker CLI and its compose plugin are installed as client-only packages
+(no dockerd required).
+
+Runtime support was verified end-to-end on Debian 13 with Docker 29.6 /
+compose v5.3 and rootful Podman 5.4; see
+[docs/podman-spike.md](docs/podman-spike.md) for the spike evidence.
+
+### Split DNS
 
 Configure split DNS on a Linux development machine without manually looking up
 the network interface:

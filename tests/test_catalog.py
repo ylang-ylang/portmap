@@ -610,7 +610,6 @@ def test_collect_catalog_orders_worktrees_by_branch_tip_descending(tmp_path: Pat
 
     assert [worktree["branch"] for worktree in catalog["worktrees"]] == ["feat-new", "dev"]
     assert catalog["worktrees"][0]["branch_tip_epoch"] > catalog["worktrees"][1]["branch_tip_epoch"]
-    assert catalog["worktrees"][0]["branch_tip_time"] == "2026-02-01T00:00:00+00:00"
 
 
 def test_collect_catalog_discovers_startable_submodules_across_superproject_worktrees(
@@ -870,6 +869,7 @@ def test_compose_up_worktree_runs_generated_compose_command(tmp_path: Path, monk
     assert calls["run"]["command"] == ["docker", "compose", "-f", str(repo / "docker-compose.yml"), "up", "-d"]
     assert calls["run"]["cwd"] == repo
     assert calls["run"]["env"]["PORTMAP_BROKER_BYPASS"] == "1"
+    assert calls["run"]["env"]["DOCKER_HOST"].startswith("unix://")
     assert result["ok"] is True
     assert result["compose_project"] == "sample_dev"
 

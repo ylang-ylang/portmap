@@ -17,6 +17,38 @@ compose override. Raw TCP/UDP/range endpoints use direct Docker port mappings
 and do not need the gateway network unless the same service also has an HTTP
 endpoint.
 
+## Container Runtime Abstraction
+
+`portmap` supports one container runtime per host: Docker or Podman,
+selected by `[runtime] backend` in `portmap.toml` (`auto` by default) or
+`PORTMAP_RUNTIME` / `PORTMAP_RUNTIME_SOCKET`.
+
+The abstraction is a single seam: the runtime's API socket. All compose
+inspection and container lifecycle operations go through the docker
+compose CLI pointed at the resolved socket via `DOCKER_HOST`, and the
+gateway mounts that socket into Traefik and the catalog at the fixed
+in-container path `/var/run/docker.sock`. The docker compose CLI remains
+the client on Podman hosts because it preserves generated-override
+semantics (`!reset`, label merge, external networks) that
+`podman-compose` does not.
+
+Auto-detection probes **live** sockets: an explicit `DOCKER_HOST`, then
+`/var/run/docker.sock`, then `/run/podman/podman.sock`, then
+`$XDG_RUNTIME_DIR/podman/podman.sock`. A socket path only counts when it
+accepts a connection, so stale files from a stopped daemon are ignored.
+
+The takeover shim resolves the runtime identically and doubles as
+Podman's compose provider: Podman's provider search path includes
+`$HOME/.docker/cli-plugins/docker-compose`, so the same user-level file
+shadows both `docker compose` and `podman compose` invocations.
+
+What does NOT change across runtimes: the planner, port allocation,
+endpoint model, Traefik/CoreDNS data plane, generated labels, and the
+catalog's label-derived registry. Rootless Podman is reachable through
+the same socket discovery but requires host sysctl tuning for the
+gateway's privileged ports; it was not part of the verification spike
+([podman-spike.md](podman-spike.md)).
+
 ## Fixed Model
 
 The default data plane is split by endpoint shape:
@@ -93,7 +125,7 @@ The agent and gateway read the tracked root-level `portmap.toml` directly.
 Runtime-only values such as the host LAN IP and agent Unix-socket runtime
 directory are detected when the command runs instead of being stored in config.
 
-Default shape:
+Default shape (unchanged host-port allocations):
 
 ```text
 host agent
@@ -111,11 +143,44 @@ host:8080 HTTP
   -> portmap-traefik
   -> portmap_gateway Docker network
   -> managed project service:container_port
+  -> unmatched Host (including a bare IP): portmap-catalog:8081
 
 host:53 DNS
   -> portmap-dns
   -> *.debug.lan A <detected-host-ip>
 ```
+
+For HTTP-only access through a firewall permitting just TCP `80`, configure
+`[gateway] http_port = 80` and `catalog_port = 80` in `portmap.toml`. The gateway
+CLI (`up`, `down`, `restart`, and `gateway`) compares the effective ports after
+environment overrides. Equal ports select `docker-compose.single-port.yml`,
+whose `!reset []` removes catalog host-port publication:
+
+```text
+host:80 HTTP -> portmap-traefik -> portmap_gateway
+  -> registered Host: managed project service:container_port
+  -> bare IP / unmatched Host: portmap-catalog:8081
+```
+
+The catalog is a normal backend on the shared network in both modes. Its Docker
+labels define a ``HostRegexp(`.+`)`` router on `web` with explicit priority `1`
+and service port `8081`. Generated Host routes keep Traefik's higher default
+rule-length priority. Priority `0` would not mean lowest priority in Traefik;
+it restores automatic rule-length ordering. The catalog backend is marked
+`portmap.gateway=true` so discovery does not list infrastructure as an
+application project or offer project lifecycle controls for it.
+
+Equal non-80 ports use the same consolidated layout. `http_bind` owns the
+shared listener and `catalog_bind` is ignored in that mode. Unequal ports retain
+the separately configurable catalog mapping for compatibility. Raw
+`docker compose` needs the overlay selected explicitly; it does not read
+`portmap.toml`. See the [single-port setup and migration](../README.md#one-http-port-per-development-machine)
+for configuration, safe cutover, and rollback commands.
+
+DNS and raw TCP/UDP/range endpoints are not multiplexed onto HTTP. Keep DNS
+private or use external wildcard DNS/hosts entries when inbound `53` is closed.
+Existing containers retain their old endpoint URL labels until their generated
+overrides are refreshed and Compose recreates them with the new HTTP port.
 
 The gateway compose creates the named Docker network:
 
@@ -533,8 +598,10 @@ which endpoints each instance exposes
 which URL or host:port each endpoint uses
 ```
 
-The catalog is derived from Docker labels on running containers. It is exposed
-on host port `80`:
+The catalog is derived from Docker labels on running containers. By default it
+has a direct host-port `80` mapping and is also Traefik's fallback on `8080`.
+In single-port mode only Traefik publishes `80`; the same catalog URLs work
+through the fallback router:
 
 ```text
 http://portmap.debug.lan/

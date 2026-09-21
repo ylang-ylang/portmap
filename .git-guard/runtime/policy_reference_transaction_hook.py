@@ -7,26 +7,31 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from .auto_push import auto_push_after_commit
     from .branch_logs import merge_in_progress, prepare_merge_commit, validate_pre_commit
     from .branch_policy import update_committed_state, validate_prepared
     from .common import AGENT_REJECT_HINT, HookReject
     from .config import load_config, load_json_object
-    from .git_ops import append_log, read_push_updates, read_updates, required_env
+    from .git_ops import append_log, append_trigger_log, read_push_updates, read_updates, required_env
     from .managed_files import enforce_git_guard_managed_files_staged
     from .tag_policy import validate_pre_push
 except ImportError:  # pragma: no cover - installed hook script mode
+    from auto_push import auto_push_after_commit
     from branch_logs import merge_in_progress, prepare_merge_commit, validate_pre_commit
     from branch_policy import update_committed_state, validate_prepared
     from common import AGENT_REJECT_HINT, HookReject
     from config import load_config, load_json_object
-    from git_ops import append_log, read_push_updates, read_updates, required_env
+    from git_ops import append_log, append_trigger_log, read_push_updates, read_updates, required_env
     from managed_files import enforce_git_guard_managed_files_staged
     from tag_policy import validate_pre_push
 
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("usage: reference_transaction_hook.py <phase|pre-push|pre-commit|pre-merge-commit>", file=sys.stderr)
+        print(
+            "usage: reference_transaction_hook.py <phase|pre-push|pre-commit|pre-merge-commit|post-commit>",
+            file=sys.stderr,
+        )
         return 2
 
     command = sys.argv[1]
@@ -34,7 +39,7 @@ def main() -> int:
     policy_path = Path(required_env("GG_POLICY_JSON"))
     config_path = Path(os.environ.get("GG_CONFIG_JSON", repo / ".git-guard" / "config.json"))
     state_path = Path(os.environ.get("GG_STATE_JSON", repo / ".git" / "git-guard-state.json"))
-    log_path = os.environ.get("GG_LOG_PATH")
+    log_path = Path(os.environ["GG_LOG_PATH"]) if os.environ.get("GG_LOG_PATH") else None
     policy: dict[str, Any] = {}
 
     try:
@@ -45,6 +50,7 @@ def main() -> int:
             if len(sys.argv) != 4:
                 raise HookReject("HOOK_PRE_PUSH_USAGE", argv=sys.argv[1:])
             validate_pre_push(repo, policy, config, sys.argv[2], sys.argv[3], read_push_updates(sys.stdin))
+            append_trigger_log(log_path, "pre-push", "ok", remote=sys.argv[2] or sys.argv[3])
             return 0
 
         if command == "pre-commit":
@@ -55,6 +61,7 @@ def main() -> int:
                 prepare_merge_commit(repo, config)
             enforce_git_guard_managed_files_staged(repo, config)
             validate_pre_commit(repo, policy, config, require_branch_log_change=True)
+            append_trigger_log(log_path, "pre-commit", "ok")
             return 0
 
         if command == "pre-merge-commit":
@@ -63,6 +70,14 @@ def main() -> int:
             prepare_merge_commit(repo, config)
             enforce_git_guard_managed_files_staged(repo, config)
             validate_pre_commit(repo, policy, config, require_branch_log_change=True)
+            append_trigger_log(log_path, "pre-merge-commit", "ok")
+            return 0
+
+        if command == "post-commit":
+            if len(sys.argv) != 2:
+                raise HookReject("HOOK_POST_COMMIT_USAGE", argv=sys.argv[1:])
+            auto_push_after_commit(repo, policy, config)
+            append_trigger_log(log_path, "post-commit", "ok")
             return 0
 
         if len(sys.argv) != 2:
@@ -70,17 +85,20 @@ def main() -> int:
 
         updates = read_updates(sys.stdin)
         if log_path:
-            append_log(Path(log_path), command, updates)
+            append_log(log_path, command, updates)
 
-        if command == "prepared":
+        if command in ("prepared", "preparing"):
             validate_prepared(repo, policy, config, state_path, updates)
         elif command == "committed":
             update_committed_state(repo, policy, state_path, updates)
         elif command == "aborted":
+            append_trigger_log(log_path, "aborted", "ok")
             return 0
         else:
             raise HookReject("HOOK_UNSUPPORTED_PHASE", phase=command)
+        append_trigger_log(log_path, command, "ok", updates=len(updates))
     except HookReject as exc:
+        append_trigger_log(log_path, command, "rejected", code=exc.code)
         print(f"git-guard: {exc}", file=sys.stderr)
         if exc.code == "WORKTREE_BRANCH_CREATION_NOT_ALLOWED":
             print(
