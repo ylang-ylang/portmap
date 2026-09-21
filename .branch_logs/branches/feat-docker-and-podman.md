@@ -49,3 +49,4 @@
   gateway_assets + catalog_static; brew formula installs locally and
   the installed-mode gateway/takeover passed the full podman e2e on
   192.168.201.142. Adds MIT LICENSE.
+- Carry the dev branch-log entry for the merge back to dev.
