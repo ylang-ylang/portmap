@@ -869,6 +869,7 @@ def test_compose_up_worktree_runs_generated_compose_command(tmp_path: Path, monk
     assert calls["run"]["command"] == ["docker", "compose", "-f", str(repo / "docker-compose.yml"), "up", "-d"]
     assert calls["run"]["cwd"] == repo
     assert calls["run"]["env"]["PORTMAP_BROKER_BYPASS"] == "1"
+    assert calls["run"]["env"]["DOCKER_HOST"].startswith("unix://")
     assert result["ok"] is True
     assert result["compose_project"] == "sample_dev"
 

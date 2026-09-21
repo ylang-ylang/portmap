@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 try:
-    from .common import HookReject, PushUpdate, RefUpdate, ZERO
+    from .common import HookReject, PushUpdate, RefUpdate, ZERO, format_context_value
 except ImportError:  # pragma: no cover - installed hook script mode
-    from common import HookReject, PushUpdate, RefUpdate, ZERO
+    from common import HookReject, PushUpdate, RefUpdate, ZERO, format_context_value
 
 GIT_LOCAL_ENV_VARS = {
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -57,10 +58,27 @@ def read_push_updates(stdin: Any) -> list[PushUpdate]:
     return updates
 
 def append_log(path: Path, phase: str, updates: list[RefUpdate]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as stream:
-        for update in updates:
-            stream.write(f"{phase} {update.old} {update.new} {update.ref}\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            for update in updates:
+                stream.write(f"{phase} {update.old} {update.new} {update.ref}\n")
+    except OSError:
+        pass
+
+def append_trigger_log(path: Path | None, hook: str, result: str, **context: Any) -> None:
+    if path is None:
+        return
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    fields = f"hook={hook} result={result}"
+    if context:
+        fields += " " + " ".join(f"{key}={format_context_value(value)}" for key, value in context.items())
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(f"{timestamp} {fields}\n")
+    except OSError:
+        pass
 
 def refs_matching(repo: Path, pattern: str) -> list[str]:
     refs = git(repo, "for-each-ref", "--format=%(refname)", "refs/heads").stdout.splitlines()
@@ -94,6 +112,17 @@ def rev_parse(repo: Path, ref: str) -> str:
 
 def peeled_rev_parse(repo: Path, ref: str) -> str:
     return git(repo, "rev-parse", "--verify", f"{ref}^{{}}").stdout.strip()
+
+def peel_tag_target(repo: Path, sha: str) -> str:
+    object_type = git(repo, "cat-file", "-t", sha).stdout.strip()
+    if object_type == "commit":
+        return sha
+    if object_type == "tag":
+        header = git(repo, "cat-file", "tag", sha).stdout.split("\n\n", 1)[0]
+        for line in header.splitlines():
+            if line.startswith("object "):
+                return line.split(" ", 1)[1].strip()
+    raise HookReject("TAG_OBJECT_INVALID", tag=sha, type=object_type)
 
 def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
     if ancestor == ZERO or descendant == ZERO:
@@ -132,6 +161,26 @@ def git_with_env(repo: Path, env: dict[str, str], *args: str, check: bool = True
         stderr=subprocess.PIPE,
         check=False,
     )
+    if check and result.returncode != 0:
+        raise HookReject("GIT_COMMAND_FAILED", command="git " + " ".join(args), stderr=result.stderr.strip())
+    return result
+
+def git_with_timeout(repo: Path, timeout: int, *args: str, check: bool = True) -> subprocess.CompletedProcess[str] | None:
+    clean_env = clean_git_env(os.environ.copy())
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            env=clean_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        if check:
+            raise HookReject("GIT_COMMAND_TIMEOUT", command="git " + " ".join(args), timeout_seconds=timeout)
+        return None
     if check and result.returncode != 0:
         raise HookReject("GIT_COMMAND_FAILED", command="git " + " ".join(args), stderr=result.stderr.strip())
     return result

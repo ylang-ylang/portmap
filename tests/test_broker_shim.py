@@ -31,6 +31,14 @@ def test_render_compose_plugin_shim_contains_required_guards(tmp_path: Path) -> 
     assert "unset DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND" in shim
     assert "unset DOCKER_CLI_PLUGIN_SOCKET" in shim
     assert 'PORTMAP_BROKER_BYPASS=1' in shim
+    # Runtime auto-detect: explicit DOCKER_HOST wins; a configured socket is
+    # honored; podman sockets are probed only when dockerd's socket is absent.
+    # Detection runs after the bypass hatches so opt-outs stay pure.
+    assert shim.index("PORTMAP_BROKER_BYPASS") < shim.index("PORTMAP_RUNTIME_SOCKET")
+    assert 'if [ -z "${DOCKER_HOST:-}" ]; then' in shim
+    assert 'DOCKER_HOST="unix://$PORTMAP_RUNTIME_SOCKET"' in shim
+    assert "DOCKER_HOST=unix:///run/podman/podman.sock" in shim
+    assert 'DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"' in shim
     assert (
         'env -u VIRTUAL_ENV PORTMAP_ROOT="$PORTMAP_ROOT" PORTMAP_BROKER_BYPASS=1 '
         'uv run --project "$PORTMAP_ROOT" portmap docker-compose -- "$@"'
@@ -144,3 +152,82 @@ def test_generated_shim_forwards_metadata_and_real_compose(tmp_path: Path) -> No
     log = real_log.read_text(encoding="utf-8")
     assert "version\n" in log
     assert "DOCKER_CLI_PLUGIN_SOCKET" not in log
+
+
+def test_generated_shim_honors_configured_runtime_socket(tmp_path: Path) -> None:
+    real_log = tmp_path / "real.log"
+    real = tmp_path / "real-compose"
+    real.write_text(
+        "#!/bin/sh\n"
+        "printf 'DOCKER_HOST=%s\\n' \"${DOCKER_HOST:-unset}\" >> \"$REAL_LOG\"\n"
+        "printf '%s\\n' \"$@\" >> \"$REAL_LOG\"\n",
+        encoding="utf-8",
+    )
+    real.chmod(real.stat().st_mode | stat.S_IXUSR)
+    shim = tmp_path / "docker-compose"
+    shim.write_text(render_compose_plugin_shim(real_compose=real, portmap_root=tmp_path), encoding="utf-8")
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "REAL_LOG": str(real_log),
+        "PORTMAP_COMPOSE_TAKEOVER": "1",
+        "PORTMAP_RUNTIME_SOCKET": "/custom/podman.sock",
+    }
+    # cwd has no .portmap/, so the shim forwards to the real compose plugin
+    # after runtime detection.
+    assert os.spawnve(os.P_WAIT, str(shim), [str(shim), "compose", "ps"], env) == 0
+
+    log = real_log.read_text(encoding="utf-8")
+    assert "DOCKER_HOST=unix:///custom/podman.sock\n" in log
+    assert "ps\n" in log
+
+
+def test_generated_shim_keeps_explicit_docker_host(tmp_path: Path) -> None:
+    real_log = tmp_path / "real.log"
+    real = tmp_path / "real-compose"
+    real.write_text(
+        "#!/bin/sh\n"
+        "printf 'DOCKER_HOST=%s\\n' \"${DOCKER_HOST:-unset}\" >> \"$REAL_LOG\"\n",
+        encoding="utf-8",
+    )
+    real.chmod(real.stat().st_mode | stat.S_IXUSR)
+    shim = tmp_path / "docker-compose"
+    shim.write_text(render_compose_plugin_shim(real_compose=real, portmap_root=tmp_path), encoding="utf-8")
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "REAL_LOG": str(real_log),
+        "PORTMAP_COMPOSE_TAKEOVER": "1",
+        "PORTMAP_RUNTIME_SOCKET": "/custom/podman.sock",
+        "DOCKER_HOST": "tcp://remote:2375",
+    }
+    assert os.spawnve(os.P_WAIT, str(shim), [str(shim), "compose", "ps"], env) == 0
+
+    assert "DOCKER_HOST=tcp://remote:2375\n" in real_log.read_text(encoding="utf-8")
+
+
+def test_render_shim_binary_mode_uses_portmap_executable(tmp_path: Path) -> None:
+    real = tmp_path / "real-compose"
+    root = tmp_path / "installed-root"  # no pyproject.toml: installed package
+    binary = tmp_path / "bin" / "portmap"
+
+    shim = render_compose_plugin_shim(real_compose=real, portmap_root=root, portmap_bin=binary)
+
+    assert f"'{binary}' docker-compose --" in shim
+    assert "uv run --project" not in shim
+
+
+def test_detect_portmap_bin_modes(tmp_path: Path, monkeypatch) -> None:
+    from portmap.broker_shim import detect_portmap_bin
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "pyproject.toml").touch()
+    assert detect_portmap_bin(checkout) is None
+
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    monkeypatch.setattr("shutil.which", lambda name: "/brew/bin/portmap")
+    assert detect_portmap_bin(installed) == Path("/brew/bin/portmap")

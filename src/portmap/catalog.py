@@ -918,6 +918,10 @@ def compose_up_worktree(worktree: str) -> dict[str, Any]:
 
     env = os.environ.copy()
     env["PORTMAP_BROKER_BYPASS"] = "1"
+    # Read at call time: the host agent receives the runtime socket through
+    # PORTMAP_DOCKER_SOCKET; the in-container fallback uses the mount target.
+    socket_path = os.environ.get("PORTMAP_DOCKER_SOCKET", DOCKER_SOCKET)
+    env["DOCKER_HOST"] = f"unix://{socket_path}"
     result = subprocess.run(
         plan.command,
         cwd=path,

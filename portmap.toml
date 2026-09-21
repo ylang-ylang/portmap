@@ -8,6 +8,16 @@ dns_port = 53
 dns_domain = "debug.lan"
 network = "portmap_gateway"
 
+# Container runtime for the gateway and managed projects.
+# backend = "auto" probes: DOCKER_HOST -> /var/run/docker.sock
+#   -> /run/podman/podman.sock -> $XDG_RUNTIME_DIR/podman/podman.sock.
+# Set backend = "podman" on hosts that run Podman instead of dockerd.
+# Podman hosts still use the docker compose CLI as the client; the CLI is
+# pointed at the Podman socket through DOCKER_HOST.
+# [runtime]
+# backend = "auto"
+# socket = "/run/podman/podman.sock"
+
 [ports]
 tcp_start = 18000
 udp_start = 19000

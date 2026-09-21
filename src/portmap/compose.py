@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from .errors import ComposeError
 from .model import ComposeConfig, ComposePort, ComposeService
+from .settings import load_portmap_settings
 
 
 def load_compose_config(
@@ -34,9 +36,12 @@ def render_compose_json(compose_file: Path, project_directory: Path) -> dict[str
         "--format",
         "json",
     ]
+    env = os.environ.copy()
+    env["DOCKER_HOST"] = load_portmap_settings().docker_host
     result = subprocess.run(
         cmd,
         cwd=project_directory,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
