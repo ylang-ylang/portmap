@@ -17,6 +17,38 @@ compose override. Raw TCP/UDP/range endpoints use direct Docker port mappings
 and do not need the gateway network unless the same service also has an HTTP
 endpoint.
 
+## Container Runtime Abstraction
+
+`portmap` supports one container runtime per host: Docker or Podman,
+selected by `[runtime] backend` in `portmap.toml` (`auto` by default) or
+`PORTMAP_RUNTIME` / `PORTMAP_RUNTIME_SOCKET`.
+
+The abstraction is a single seam: the runtime's API socket. All compose
+inspection and container lifecycle operations go through the docker
+compose CLI pointed at the resolved socket via `DOCKER_HOST`, and the
+gateway mounts that socket into Traefik and the catalog at the fixed
+in-container path `/var/run/docker.sock`. The docker compose CLI remains
+the client on Podman hosts because it preserves generated-override
+semantics (`!reset`, label merge, external networks) that
+`podman-compose` does not.
+
+Auto-detection probes **live** sockets: an explicit `DOCKER_HOST`, then
+`/var/run/docker.sock`, then `/run/podman/podman.sock`, then
+`$XDG_RUNTIME_DIR/podman/podman.sock`. A socket path only counts when it
+accepts a connection, so stale files from a stopped daemon are ignored.
+
+The takeover shim resolves the runtime identically and doubles as
+Podman's compose provider: Podman's provider search path includes
+`$HOME/.docker/cli-plugins/docker-compose`, so the same user-level file
+shadows both `docker compose` and `podman compose` invocations.
+
+What does NOT change across runtimes: the planner, port allocation,
+endpoint model, Traefik/CoreDNS data plane, generated labels, and the
+catalog's label-derived registry. Rootless Podman is reachable through
+the same socket discovery but requires host sysctl tuning for the
+gateway's privileged ports; it was not part of the verification spike
+([podman-spike.md](podman-spike.md)).
+
 ## Fixed Model
 
 The default data plane is split by endpoint shape:

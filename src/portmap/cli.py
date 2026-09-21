@@ -250,6 +250,7 @@ def cmd_docker_compose(args: argparse.Namespace) -> int:
         )
     env = os.environ.copy()
     env["PORTMAP_BROKER_BYPASS"] = "1"
+    env["DOCKER_HOST"] = load_portmap_settings(environ=os.environ).docker_host
     return subprocess.run(plan.command, check=False, env=env).returncode
 
 

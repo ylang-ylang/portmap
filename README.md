@@ -321,6 +321,44 @@ local/container clients instead of opening it publicly. The catalog and its
 control actions are unauthenticated: exposing the fallback on `80` does not make
 the gateway safe for the public Internet.
 
+### Container Runtime: Docker or Podman
+
+Each host runs one container runtime, selected per machine:
+
+```toml
+# portmap.toml
+[runtime]
+backend = "auto"    # auto | docker | podman
+# socket = "/run/podman/podman.sock"   # optional explicit override
+```
+
+`auto` resolution order: an explicit `DOCKER_HOST` unix socket, then a
+**live** `/var/run/docker.sock`, then the Podman sockets
+(`/run/podman/podman.sock`, `$XDG_RUNTIME_DIR/podman/podman.sock`).
+Liveness is checked by connecting, so a stale socket file left by a
+stopped dockerd does not win the probe. `PORTMAP_RUNTIME` /
+`PORTMAP_RUNTIME_SOCKET` environment variables override the file.
+
+Podman hosts still use the docker compose CLI as the client: portmap
+points it at the Podman API socket through `DOCKER_HOST`, so generated
+override semantics (including `!reset` for single-port mode) are
+identical on both runtimes. Traefik and CoreDNS are unchanged — Traefik's
+Docker provider talks to whichever socket the gateway mounts. Rootful
+Podman needs no extra setup; rootless Podman must allow privileged ports
+(`sysctl net.ipv4.ip_unprivileged_port_start=53`) for the gateway's DNS
+and HTTP listeners.
+
+The compose takeover shim auto-detects the runtime the same way, and it
+also covers `podman compose`: Podman's provider search path includes
+`~/.docker/cli-plugins/docker-compose`, so one shim shadows both
+`docker compose` and `podman compose`. On Podman-only hosts make sure the
+docker CLI and its compose plugin are installed as client-only packages
+(no dockerd required).
+
+Runtime support was verified end-to-end on Debian 13 with Docker 29.6 /
+compose v5.3 and rootful Podman 5.4; see
+[docs/podman-spike.md](docs/podman-spike.md) for the spike evidence.
+
 ### Split DNS
 
 Configure split DNS on a Linux development machine without manually looking up

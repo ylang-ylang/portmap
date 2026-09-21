@@ -2,7 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from portmap.cli import main
-from portmap.settings import load_portmap_settings
+from portmap.settings import load_portmap_settings, resolve_runtime
 
 
 def test_load_portmap_settings_reads_root_toml_and_detects_host_ip(tmp_path: Path, monkeypatch) -> None:
@@ -74,6 +74,7 @@ network = "test_gateway"
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setenv("PORTMAP_ROOT", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg"))
     monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: detected_host)
     monkeypatch.setattr("portmap.cli.subprocess.run", fake_run)
 
@@ -96,3 +97,126 @@ network = "test_gateway"
     assert recorded["env"]["PORTMAP_GATEWAY_NETWORK"] == "test_gateway"
     assert recorded["env"]["PORTMAP_AGENT_SOCKET"] == "/run/portmap/agent.sock"
     assert recorded["env"]["PORTMAP_AGENT_RUNTIME_HOST_DIR"].endswith("/portmap")
+
+
+def test_resolve_runtime_explicit_socket_wins() -> None:
+    name, socket_path = resolve_runtime(
+        {"PORTMAP_RUNTIME_SOCKET": "/run/podman/podman.sock"},
+        {},
+    )
+    assert (name, socket_path) == ("podman", "/run/podman/podman.sock")
+
+
+def test_resolve_runtime_explicit_backend_podman() -> None:
+    name, socket_path = resolve_runtime({"PORTMAP_RUNTIME": "podman"}, {})
+    assert name == "podman"
+    assert socket_path == "/run/podman/podman.sock"
+
+
+def test_resolve_runtime_config_backend_and_socket() -> None:
+    name, socket_path = resolve_runtime(
+        {},
+        {"backend": "docker", "socket": "/custom/docker.sock"},
+    )
+    assert (name, socket_path) == ("docker", "/custom/docker.sock")
+
+
+def test_resolve_runtime_docker_host_unix_socket_detects_podman() -> None:
+    name, socket_path = resolve_runtime(
+        {"DOCKER_HOST": "unix:///run/user/1000/podman/podman.sock"},
+        {},
+    )
+    assert (name, socket_path) == ("podman", "/run/user/1000/podman/podman.sock")
+
+
+def _listen_unix(path: Path):
+    import socket as socket_module
+
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen(1)
+    return server
+
+
+def test_resolve_runtime_auto_probes_live_docker_socket(tmp_path: Path, monkeypatch) -> None:
+    docker_socket = tmp_path / "docker.sock"
+    server = _listen_unix(docker_socket)
+    monkeypatch.setattr("portmap.settings.DEFAULT_DOCKER_SOCKET", str(docker_socket))
+    try:
+        name, socket_path = resolve_runtime({}, {})
+        assert (name, socket_path) == ("docker", str(docker_socket))
+    finally:
+        server.close()
+
+
+def test_resolve_runtime_auto_ignores_stale_docker_socket(tmp_path: Path, monkeypatch) -> None:
+    stale_docker = tmp_path / "docker.sock"
+    stale_docker.touch()  # leftover file, nothing listening
+    podman_socket = tmp_path / "podman.sock"
+    server = _listen_unix(podman_socket)
+    monkeypatch.setattr("portmap.settings.DEFAULT_DOCKER_SOCKET", str(stale_docker))
+    monkeypatch.setattr("portmap.settings.DEFAULT_PODMAN_SOCKET", str(podman_socket))
+    try:
+        name, socket_path = resolve_runtime({}, {})
+        assert (name, socket_path) == ("podman", str(podman_socket))
+    finally:
+        server.close()
+
+
+def test_resolve_runtime_auto_defaults_to_docker(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("portmap.settings.DEFAULT_DOCKER_SOCKET", str(tmp_path / "missing.sock"))
+    monkeypatch.setattr("portmap.settings.DEFAULT_PODMAN_SOCKET", str(tmp_path / "missing-podman.sock"))
+    name, socket_path = resolve_runtime({}, {})
+    assert name == "docker"
+
+
+def test_settings_expose_runtime_and_docker_host(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: "detected-host")
+    settings = load_portmap_settings(
+        environ={
+            "PORTMAP_ROOT": str(tmp_path),
+            "PORTMAP_RUNTIME": "podman",
+            "PORTMAP_RUNTIME_SOCKET": "/run/podman/podman.sock",
+        }
+    )
+    assert settings.runtime == "podman"
+    assert settings.runtime_socket == "/run/podman/podman.sock"
+    assert settings.docker_host == "unix:///run/podman/podman.sock"
+    env = settings.gateway_env()
+    assert env["DOCKER_HOST"] == "unix:///run/podman/podman.sock"
+    assert env["PORTMAP_RUNTIME_SOCKET"] == "/run/podman/podman.sock"
+    assert env["PORTMAP_DOCKER_SOCKET"] == "/run/podman/podman.sock"
+
+
+def test_resolve_runtime_invalid_backend_raises() -> None:
+    import pytest
+
+    from portmap.errors import PortmapError
+
+    with pytest.raises(PortmapError, match="invalid runtime backend"):
+        resolve_runtime({"PORTMAP_RUNTIME": "podmann"}, {})
+
+
+def test_resolve_runtime_remote_docker_host_passes_through() -> None:
+    name, socket_path = resolve_runtime({"DOCKER_HOST": "tcp://remote:2375"}, {})
+    assert name == "docker"
+    assert socket_path == "tcp://remote:2375"
+
+
+def test_resolve_runtime_explicit_socket_normalizes_scheme() -> None:
+    name, socket_path = resolve_runtime(
+        {"PORTMAP_RUNTIME_SOCKET": "unix:///run/podman/podman.sock"},
+        {},
+    )
+    assert (name, socket_path) == ("podman", "/run/podman/podman.sock")
+
+
+def test_remote_runtime_docker_host_verbatim(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: "detected-host")
+    settings = load_portmap_settings(
+        environ={"PORTMAP_ROOT": str(tmp_path), "DOCKER_HOST": "tcp://remote:2375"}
+    )
+    assert settings.docker_host == "tcp://remote:2375"
+    assert settings.gateway_env()["DOCKER_HOST"] == "tcp://remote:2375"
+    # A remote endpoint is not a mountable socket path.
+    assert settings.gateway_env()["PORTMAP_RUNTIME_SOCKET"] == ""
