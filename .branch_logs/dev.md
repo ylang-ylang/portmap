@@ -66,3 +66,7 @@
 - Merge `feat/infra-http-port-80` so equal gateway HTTP/catalog ports publish
   only Traefik, with the catalog as the lowest-priority Host fallback. Preserve
   the separate default ports and document migration, DNS limits, and rollback.
+- Merge `feat/docker-and-podman` so each host can run portmap on docker
+  or podman through runtime socket resolution, and so portmap installs
+  as a plain package (brew/pip/wheel) with packaged gateway assets,
+  installed-mode shim, and an MIT license.
