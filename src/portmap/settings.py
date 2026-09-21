@@ -11,6 +11,8 @@ from .errors import PortmapError
 
 
 CONFIG_FILE_NAME = "portmap.toml"
+GATEWAY_COMPOSE_FILE_NAME = "docker-compose.yml"
+USER_CONFIG_PATH = Path.home() / ".config" / "portmap" / CONFIG_FILE_NAME
 DEFAULT_DNS_DOMAIN = "debug.lan"
 DEFAULT_GATEWAY_NETWORK = "portmap_gateway"
 AGENT_CONTAINER_SOCKET = "/run/portmap/agent.sock"
@@ -92,6 +94,7 @@ class PortmapSettings:
             "PORTMAP_STATE_DIR": str(self.state_dir),
             "PORTMAP_AGENT_RUNTIME_HOST_DIR": str(self.agent_runtime_dir),
             "PORTMAP_AGENT_SOCKET": AGENT_CONTAINER_SOCKET,
+            "PORTMAP_PYTHONPATH_DIR": str(pythonpath_dir()),
         }
 
 
@@ -103,6 +106,9 @@ def load_portmap_settings(
     env = os.environ if environ is None else environ
     resolved_root = resolve_portmap_root(environ=env, root=root)
     config = load_config_file(resolved_root / CONFIG_FILE_NAME)
+    if not config and resolved_root != USER_CONFIG_PATH.parent:
+        # Installed-mode hosts keep their editable config in ~/.config.
+        config = load_config_file(USER_CONFIG_PATH)
     gateway = table(config, "gateway")
     ports = table(config, "ports")
     state = table(config, "state")
@@ -262,7 +268,24 @@ def resolve_portmap_root(
     env = os.environ if environ is None else environ
     if raw_root := string_env(env, "PORTMAP_ROOT"):
         return Path(raw_root).expanduser().resolve()
-    return Path(__file__).resolve().parents[2]
+    candidate = Path(__file__).resolve().parents[2]
+    if (candidate / GATEWAY_COMPOSE_FILE_NAME).exists():
+        # Source checkout: the repo root holds the gateway compose file.
+        return candidate
+    assets = gateway_assets_dir()
+    if (assets / GATEWAY_COMPOSE_FILE_NAME).exists():
+        # Installed package (brew/pip/uv): gateway assets live in the wheel.
+        return assets
+    return candidate
+
+
+def gateway_assets_dir() -> Path:
+    return Path(__file__).resolve().parent / "gateway_assets"
+
+
+def pythonpath_dir() -> Path:
+    """Directory containing the portmap package (src/ or site-packages/)."""
+    return Path(__file__).resolve().parent.parent
 
 
 def load_config_file(path: Path) -> dict[str, Any]:

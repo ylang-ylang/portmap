@@ -1,3 +1,1 @@
-services:
-  catalog:
-    ports: !reset []
+src/portmap/gateway_assets/docker-compose.single-port.yml

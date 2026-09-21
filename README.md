@@ -207,12 +207,24 @@ that endpoint. If a service needs a specific upstream Host, set
 
 ## CLI
 
-Install the local checkout as a `uv` tool so other repos can call the short
+Install with Homebrew (Linux or macOS tap):
+
+```bash
+brew install ylang-ylang/tap/portmap
+```
+
+Or install a source checkout as a `uv` tool so other repos can call the short
 `portmap` command:
 
 ```bash
 uv tool install --editable /home/ylang/ylangs_ws/portmap@wt/portmap@dev --force
 ```
+
+Both modes are equivalent. Installed packages read gateway assets
+(`docker-compose.yml`, single-port overlay, Corefile) from the Python package
+and keep editable settings in `~/.config/portmap/portmap.toml` when the
+gateway's own `portmap.toml` is absent; `PORTMAP_ROOT` still overrides the
+asset root explicitly.
 
 Start portmap once:
 

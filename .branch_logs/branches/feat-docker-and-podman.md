@@ -37,3 +37,15 @@
   sockets accept unix:// forms, shim detection runs after the bypass
   hatches and is covered by behavioral tests, the host agent resolves
   its socket at call time, and call-site tests assert DOCKER_HOST.
+- Make portmap installable as a plain package (brew/pip/wheel): the
+  gateway compose files and Corefile now live in
+  src/portmap/gateway_assets (repo-root files are symlinks), root
+  resolution falls back to the packaged assets when no source checkout
+  is present, editable settings fall back to
+  ~/.config/portmap/portmap.toml, the catalog container mounts the
+  installed package location instead of assuming ./src, and the
+  takeover shim calls the installed portmap executable directly when
+  the root is not a uv project. Wheel verified to contain
+  gateway_assets + catalog_static; brew formula installs locally and
+  the installed-mode gateway/takeover passed the full podman e2e on
+  192.168.201.142. Adds MIT LICENSE.

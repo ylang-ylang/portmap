@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,7 +79,22 @@ def find_real_compose_plugin(
     return None
 
 
-def render_compose_plugin_shim(*, real_compose: Path, portmap_root: Path) -> str:
+def render_compose_plugin_shim(
+    *,
+    real_compose: Path,
+    portmap_root: Path,
+    portmap_bin: Path | None = None,
+) -> str:
+    if portmap_bin is not None:
+        takeover_exec = (
+            f"exec env -u VIRTUAL_ENV PORTMAP_ROOT=\"$PORTMAP_ROOT\" PORTMAP_BROKER_BYPASS=1 "
+            f"{shell_quote(str(portmap_bin))} docker-compose -- \"$@\""
+        )
+    else:
+        takeover_exec = (
+            "exec env -u VIRTUAL_ENV PORTMAP_ROOT=\"$PORTMAP_ROOT\" PORTMAP_BROKER_BYPASS=1 "
+            "uv run --project \"$PORTMAP_ROOT\" portmap docker-compose -- \"$@\""
+        )
     return f"""#!/bin/sh
 # {SHIM_MARKER}
 set -eu
@@ -127,7 +143,7 @@ if [ -z "${{DOCKER_HOST:-}}" ]; then
 fi
 
 if [ -f ".portmap/endpoints.toml" ]; then
-  exec env -u VIRTUAL_ENV PORTMAP_ROOT="$PORTMAP_ROOT" PORTMAP_BROKER_BYPASS=1 uv run --project "$PORTMAP_ROOT" portmap docker-compose -- "$@"
+  {takeover_exec}
 fi
 
 exec "$REAL_COMPOSE" "$@"
@@ -147,11 +163,25 @@ def is_portmap_shim(path: Path) -> bool:
         return False
 
 
+def detect_portmap_bin(portmap_root: Path) -> Path | None:
+    """Installed-mode entrypoint for the shim's takeover path.
+
+    Source checkouts (a pyproject.toml at the root) run through
+    `uv run --project`; installed packages (brew/pip/uv tool) call the
+    portmap executable on PATH directly.
+    """
+    if (portmap_root / "pyproject.toml").exists():
+        return None
+    found = shutil.which("portmap")
+    return Path(found) if found else None
+
+
 def install_compose_plugin_shim(
     *,
     docker_config: Path,
     real_compose: Path | None = None,
     portmap_root: Path | None = None,
+    portmap_bin: Path | None = None,
     force: bool = False,
 ) -> BrokerShimStatus:
     shim_path = compose_plugin_shim_path(docker_config)
@@ -165,9 +195,15 @@ def install_compose_plugin_shim(
         raise PortmapError(f"refusing to overwrite non-portmap compose plugin: {shim_path}")
 
     root = (portmap_root or default_portmap_root()).resolve()
+    resolved_bin = portmap_bin or detect_portmap_bin(root)
+    if resolved_bin is None and not (root / "pyproject.toml").exists():
+        raise PortmapError(
+            "portmap executable not found on PATH; installed-mode shim "
+            "requires the portmap command to be available"
+        )
     shim_path.parent.mkdir(parents=True, exist_ok=True)
     shim_path.write_text(
-        render_compose_plugin_shim(real_compose=resolved_real, portmap_root=root),
+        render_compose_plugin_shim(real_compose=resolved_real, portmap_root=root, portmap_bin=resolved_bin),
         encoding="utf-8",
     )
     mode = shim_path.stat().st_mode

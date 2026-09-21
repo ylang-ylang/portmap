@@ -206,3 +206,28 @@ def test_generated_shim_keeps_explicit_docker_host(tmp_path: Path) -> None:
     assert os.spawnve(os.P_WAIT, str(shim), [str(shim), "compose", "ps"], env) == 0
 
     assert "DOCKER_HOST=tcp://remote:2375\n" in real_log.read_text(encoding="utf-8")
+
+
+def test_render_shim_binary_mode_uses_portmap_executable(tmp_path: Path) -> None:
+    real = tmp_path / "real-compose"
+    root = tmp_path / "installed-root"  # no pyproject.toml: installed package
+    binary = tmp_path / "bin" / "portmap"
+
+    shim = render_compose_plugin_shim(real_compose=real, portmap_root=root, portmap_bin=binary)
+
+    assert f"'{binary}' docker-compose --" in shim
+    assert "uv run --project" not in shim
+
+
+def test_detect_portmap_bin_modes(tmp_path: Path, monkeypatch) -> None:
+    from portmap.broker_shim import detect_portmap_bin
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "pyproject.toml").touch()
+    assert detect_portmap_bin(checkout) is None
+
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    monkeypatch.setattr("shutil.which", lambda name: "/brew/bin/portmap")
+    assert detect_portmap_bin(installed) == Path("/brew/bin/portmap")

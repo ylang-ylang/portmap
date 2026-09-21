@@ -220,3 +220,39 @@ def test_remote_runtime_docker_host_verbatim(tmp_path: Path, monkeypatch) -> Non
     assert settings.gateway_env()["DOCKER_HOST"] == "tcp://remote:2375"
     # A remote endpoint is not a mountable socket path.
     assert settings.gateway_env()["PORTMAP_RUNTIME_SOCKET"] == ""
+
+
+def test_resolve_root_falls_back_to_package_assets(tmp_path: Path, monkeypatch) -> None:
+    package = tmp_path / "lib" / "python3.12" / "site-packages" / "portmap"
+    assets = package / "gateway_assets"
+    assets.mkdir(parents=True)
+    (assets / "docker-compose.yml").touch()
+    monkeypatch.setattr("portmap.settings.__file__", str(package / "settings.py"))
+
+    from portmap.settings import resolve_portmap_root
+
+    assert resolve_portmap_root(environ={}) == assets
+
+
+def test_resolve_root_prefers_source_checkout(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "checkout"
+    (repo / "src" / "portmap").mkdir(parents=True)
+    (repo / "docker-compose.yml").touch()
+    monkeypatch.setattr("portmap.settings.__file__", str(repo / "src" / "portmap" / "settings.py"))
+
+    from portmap.settings import resolve_portmap_root
+
+    assert resolve_portmap_root(environ={}) == repo
+
+
+def test_user_config_fallback(tmp_path: Path, monkeypatch) -> None:
+    user_config = tmp_path / "home" / ".config" / "portmap" / "portmap.toml"
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text('[gateway]\nhttp_port = 18081\n', encoding="utf-8")
+    empty_root = tmp_path / "root"
+    empty_root.mkdir()
+    monkeypatch.setattr("portmap.settings.USER_CONFIG_PATH", user_config)
+    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: "detected-host")
+
+    settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(empty_root)})
+    assert settings.http_port == 18081
