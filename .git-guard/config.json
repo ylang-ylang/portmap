@@ -1,4 +1,10 @@
 {
+  "auto_push": {
+    "enabled": false,
+    "include_protected": false,
+    "remote": "origin",
+    "timeout_seconds": 15
+  },
   "branch_logs": {
     "force_diff_required": true,
     "path": ".branch_logs/"

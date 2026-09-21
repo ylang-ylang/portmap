@@ -9,13 +9,13 @@ from typing import Any
 try:
     from .common import HookReject, LocalPolicyTag, RefUpdate, SourceCandidate, ZERO, append_unique, format_context_value
     from .config import config_bool
-    from .git_ops import format_version, git, is_ancestor, peeled_rev_parse, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from .git_ops import format_version, git, is_ancestor, peel_tag_target, peeled_rev_parse, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from .policy import source_ref_regex
     from .state import load_state, pending_tag_items
 except ImportError:  # pragma: no cover - installed hook script mode
     from common import HookReject, LocalPolicyTag, RefUpdate, SourceCandidate, ZERO, append_unique, format_context_value
     from config import config_bool
-    from git_ops import format_version, git, is_ancestor, peeled_rev_parse, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from git_ops import format_version, git, is_ancestor, peel_tag_target, peeled_rev_parse, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from policy import source_ref_regex
     from state import load_state, pending_tag_items
 
@@ -106,16 +106,23 @@ def auto_push_missing_tags(repo: Path, remote: str, display_remote: str, tags: l
             file=sys.stderr,
         )
 
+def validate_tag_delete(policy: dict[str, Any], update: RefUpdate) -> None:
+    for rule in policy.get("tag_rules", []):
+        if re.match(rule["tag_ref_regex"], update.ref):
+            raise HookReject("TAG_DELETE_NOT_ALLOWED", tag=update.ref)
+
+
 def validate_tag(repo: Path, policy: dict[str, Any], proposed: dict[str, str], update: RefUpdate) -> None:
     if update.old != ZERO:
         raise HookReject("TAG_MOVE_NOT_ALLOWED", tag=update.ref, old=short_sha(update.old), new=short_sha(update.new))
+    target_sha = peel_tag_target(repo, update.new)
     state = load_state(Path(os.environ.get("GG_STATE_JSON", repo / ".git" / "git-guard-state.json")))
-    target_matches = tag_target_matches(repo, policy, state, update.ref, update.new, proposed)
+    target_matches = tag_target_matches(repo, policy, state, update.ref, target_sha, proposed)
     if target_matches and not [item for item in target_matches if item["tag_matches"]]:
         raise HookReject(
             "TAG_TARGET_TAG_PATTERN_MISMATCH",
             tag=update.ref,
-            target=short_sha(update.new),
+            target=short_sha(target_sha),
             target_refs=[item["target_ref"] for item in target_matches],
             allowed_patterns=[item["tag_pattern"] for item in target_matches],
         )
@@ -128,16 +135,16 @@ def validate_tag(repo: Path, policy: dict[str, Any], proposed: dict[str, str], u
 
     for rule in rules:
         target_ref = tag_rule_target_ref(policy, rule)
-        target_sha = target_ref_sha(repo, target_ref, proposed)
-        if target_sha is None:
+        rule_target_sha = target_ref_sha(repo, target_ref, proposed)
+        if rule_target_sha is None:
             failures.append(HookReject("TAG_TARGET_BRANCH_MISSING", tag=update.ref, target_ref=target_ref))
             continue
 
-        if not tag_target_ref_satisfies_rule(repo, rule, target_ref, target_sha, update.new):
-            failures.append(HookReject(tag_target_ref_failure_code(rule), tag=update.ref, target=short_sha(update.new), target_ref=target_ref))
+        if not tag_target_ref_satisfies_rule(repo, rule, target_ref, rule_target_sha, target_sha):
+            failures.append(HookReject(tag_target_ref_failure_code(rule), tag=update.ref, target=short_sha(target_sha), target_ref=target_ref))
             continue
 
-        source_refs = tag_source_candidates_for_target(repo, policy, state, rule, update.new)
+        source_refs = tag_source_candidates_for_target(repo, policy, state, rule, target_sha)
         if not source_refs and not tag_requires_source_context(rule):
             source_refs = [rule["source"]]
         if not source_refs:
@@ -145,7 +152,7 @@ def validate_tag(repo: Path, policy: dict[str, Any], proposed: dict[str, str], u
                 HookReject(
                     "TAG_TARGET_MISSING_SOURCE",
                     tag=update.ref,
-                    target=short_sha(update.new),
+                    target=short_sha(target_sha),
                     source=rule["source"],
                     target_ref=target_ref,
                 )
@@ -389,12 +396,13 @@ def update_pending_tags(repo: Path, pending_tags: dict[str, Any], candidate: Sou
         "tag_ref_regex": tag_ref_regex,
     }
 
-def clear_satisfied_pending_tags(pending_tags: dict[str, Any], updates: list[RefUpdate]) -> None:
+def clear_satisfied_pending_tags(repo: Path, pending_tags: dict[str, Any], updates: list[RefUpdate]) -> None:
     for update in updates:
         if not update.ref.startswith("refs/tags/") or update.new == ZERO:
             continue
+        target_sha = peel_tag_target(repo, update.new)
         for key, item in pending_tag_items(pending_tags):
-            if update.new == item["target_sha"] and re.match(item["tag_ref_regex"], update.ref):
+            if target_sha == item["target_sha"] and re.match(item["tag_ref_regex"], update.ref):
                 pending_tags.pop(key, None)
 
 def pending_tag_key(source_ref: str, target_ref: str, target_sha: str, tag_pattern: str) -> str:
