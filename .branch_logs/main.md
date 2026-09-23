@@ -11,3 +11,8 @@
   submodule discovery across superproject worktrees, corrected submodule branch
   display semantics, and docs clarifying that portmap manages port resources
   and endpoint indexes rather than protocol behavior.
+- Release `V0.6` from `dev`: add local client discovery, direct/SSH connections,
+  isolated split DNS and one shared native HTTP gateway with projected catalog
+  links. Verify real Docker/Podman Debian VM access, ordinary .coder SSH
+  configuration, browser routing, private-state cleanup and immediate restart
+  behavior. Homebrew supplies the native CoreDNS and Traefik dependencies.

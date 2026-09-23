@@ -49,6 +49,62 @@ the same socket discovery but requires host sysctl tuning for the
 gateway's privileged ports; it was not part of the verification spike
 ([podman-spike.md](podman-spike.md)).
 
+## Local Client Access
+
+Client access is separate from the server runtime. A workstation connects to
+remote portmap gateways using exactly two transports: direct IP reachability
+(including an already configured LAN or Tailscale route), or an OpenSSH local
+forward. No Coder API, VPN implementation, or custom traffic proxy is involved.
+
+```text
+local resolver -- .portmap only --> local CoreDNS
+                                      |
+                         registered host zones -> 127.0.0.1
+
+browser --> one local Traefik HTTP listener
+              | Host: service.branch.repo.machine.portmap
+              +--> direct remote gateway IP:port
+              +--> private SSH forward --> remote gateway:port
+
+browser --> machine.portmap catalog
+              +--> local read-only catalog view
+                     +--> remote /registry.json
+                     +--> project HTTP links onto the shared local port
+```
+
+The remote catalog describes services and the remote HTTP listener; the
+workstation chooses its own connection path. Discovery can inventory positive
+literal SSH aliases and static Include globs, but does not infer unknown users,
+keys, jump paths, or workspace names. Wildcard SSH rules cannot enumerate
+machines. A manually supplied target is passed to ordinary OpenSSH with the
+user's authentication and ProxyCommand/ProxyJump settings.
+
+CoreDNS serves only registered hostname zones locally; it is not a DNS relay
+to every remote machine. Linux uses an owned dummy interface for `~portmap`,
+with DNS bound to that interface's link-local address on port 1053. This avoids
+both global DNS-server mixing and the per-link loopback-server limitation in
+systemd-resolved 249. Global/physical resolver configuration stays unchanged.
+
+Traefik preserves the Host header for remote application routing. Its exact
+apex catalog route has priority over the remote suffix route; apex
+`/actions/*` has still higher priority and passes through to the remote catalog.
+An application's own `/registry.json` on a subdomain is never intercepted.
+The apex name is reserved for the local catalog; custom apex app endpoints
+are marked unsupported rather than silently serving the wrong application.
+
+The local catalog view reuses packaged frontend assets and projects only
+client-visible addresses. Unsupported custom hosts, unforwarded TCP, and
+SSH-inaccessible UDP/ranges are explicitly marked. It does not execute Docker
+actions locally and does not expose tunnel ownership or control-socket data.
+
+Connection state is private, serialized and atomically published. A connect
+is successful only after the remote catalog, local gateway configuration,
+system DNS mapping and public local catalog all respond correctly. Failed
+publication restores the previous connections and removes the new owned
+tunnel. Disconnect affects only the selected client's route; remote application
+containers remain running. The client processes and resolver route are removed
+by explicit teardown.
+
 ## Fixed Model
 
 The default data plane is split by endpoint shape:
