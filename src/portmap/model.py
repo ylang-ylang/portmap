@@ -71,7 +71,7 @@ class GenerateRequest:
     udp_port_start: int = 19000
     range_port_start: int = 49160
     host_ip: str = "127.0.0.1"
-    domain_suffix: str = "debug.lan"
+    domain_suffix: str = "portmap"
     gateway_network: str = "portmap_gateway"
     container_dns_server: str | None = None
     allocation_state_file: Path | None = None

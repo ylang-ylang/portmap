@@ -256,3 +256,39 @@ def test_user_config_fallback(tmp_path: Path, monkeypatch) -> None:
 
     settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(empty_root)})
     assert settings.http_port == 18081
+
+
+def test_default_dns_domain_uses_slugified_hostname(monkeypatch) -> None:
+    from portmap.settings import default_dns_domain
+
+    monkeypatch.setattr("portmap.settings.socket.gethostname", lambda: "ylang-U22")
+    assert default_dns_domain() == "ylang-u22.portmap"
+
+    monkeypatch.setattr("portmap.settings.socket.gethostname", lambda: "coderstress")
+    assert default_dns_domain() == "coderstress.portmap"
+
+
+def test_default_dns_domain_falls_back_for_localhost(monkeypatch) -> None:
+    from portmap.settings import default_dns_domain
+
+    monkeypatch.setattr("portmap.settings.socket.gethostname", lambda: "localhost")
+    assert default_dns_domain() == "portmap"
+
+    monkeypatch.setattr("portmap.settings.socket.gethostname", lambda: "___")
+    assert default_dns_domain() == "portmap"
+
+
+def test_settings_dns_domain_defaults_to_hostname_domain(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: "detected-host")
+    monkeypatch.setattr("portmap.settings.socket.gethostname", lambda: "ylang-U22")
+    settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(tmp_path)})
+    assert settings.dns_domain == "ylang-u22.portmap"
+    assert settings.gateway_env()["PORTMAP_DNS_DOMAIN"] == "ylang-u22.portmap"
+
+
+def test_settings_dns_domain_explicit_config_wins(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "portmap.toml").write_text('[gateway]\ndns_domain = "debug.lan"\n', encoding="utf-8")
+    monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: "detected-host")
+    monkeypatch.setattr("portmap.settings.socket.gethostname", lambda: "ylang-U22")
+    settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(tmp_path)})
+    assert settings.dns_domain == "debug.lan"

@@ -1,0 +1,9 @@
+[endpoints.web]
+kind = "http"
+service = "web"
+container_port = 80
+
+[endpoints.raw]
+kind = "tcp"
+service = "raw"
+container_port = 8080

@@ -135,6 +135,7 @@ def make_request(tmp_path: Path, *, branch: str = "feat/example") -> GenerateReq
         http_port=28081,
         tcp_port_start=28800,
         udp_port_start=29900,
+        domain_suffix="debug.lan",
         container_dns_server=CONTAINER_DNS_SERVER,
     )
 
