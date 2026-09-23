@@ -56,6 +56,29 @@ remote portmap gateways using exactly two transports: direct IP reachability
 (including an already configured LAN or Tailscale route), or an OpenSSH local
 forward. No Coder API, VPN implementation, or custom traffic proxy is involved.
 
+The public client command is `portmap-client`, not a subcommand of the server's
+`portmap` CLI. The downloadable one-directory bundle includes a frozen Python
+runtime and pinned CoreDNS/Traefik executables. It excludes the server CLI,
+agent, planner, container runtime integration, and server settings. Shared HTTP
+static-file support lives in `web_static.py`, so the local catalog does not
+import the server catalog. No local server installation is required.
+
+The frozen executable re-executes itself for its private catalog-view worker.
+Native and OS children receive an environment without bundle-specific dynamic
+library search paths, keeping ordinary OpenSSH and system tools independent of
+the bundled Python libraries. Client state defaults to
+`$XDG_STATE_HOME/portmap-client` (or `~/.local/state/portmap-client`), not the
+server state directory.
+
+The server owns distribution, not workstation connection state. Its immutable
+`client_release.json` selects versioned assets with size and SHA-256; `/api/client`
+exposes same-origin download URLs, and `/downloads/client/<filename>` serves a
+verified cache entry or fetches the pinned trusted upstream. The web panel
+advertises only manifest-backed platforms. `/install-client.sh` verifies and
+extracts the flat archive into an owned versioned directory and creates a
+user-space executable symlink. Installation never starts services or edits DNS.
+The currently shipped standalone target is Linux amd64, glibc 2.31+.
+
 ```text
 local resolver -- .portmap only --> local CoreDNS
                                       |

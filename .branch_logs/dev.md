@@ -81,3 +81,8 @@
 - Merge the client listener follow-up so immediate same-port restarts tolerate
   TCP TIME_WAIT without taking over an active listener; installed-package
   restart cycles and all 105 focused regressions passed.
+- Merge `feat/standalone-client-download`: deliver a separate frozen
+  `portmap-client` with bundled Python/CoreDNS/Traefik and manifest-backed web
+  downloads. Remove client commands from the server CLI and document migration.
+  Verify the real archive, isolated installer, browser UI, SSH/DNS lifecycle,
+  installed server wheel, and 147 focused regressions.

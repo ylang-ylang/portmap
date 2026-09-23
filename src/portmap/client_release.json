@@ -1,0 +1,13 @@
+{
+  "version": "0.7.0",
+  "assets": [
+    {
+      "os": "linux",
+      "arch": "amd64",
+      "filename": "portmap-client-0.7.0-linux-amd64.tar.gz",
+      "sha256": "d24c227ed34455937896eaa01082c4fbce60b55f3cf9d3dd25e5fb520614cf6b",
+      "size": 79896223,
+      "source_url": "https://github.com/ylang-ylang/portmap/releases/download/V0.7/portmap-client-0.7.0-linux-amd64.tar.gz"
+    }
+  ]
+}

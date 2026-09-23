@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import BinaryIO, Mapping, TypedDict
 
+from .client_runtime import native_environment
 from .errors import PortmapError
 
 
@@ -110,6 +111,9 @@ def start_tunnel(
         with os.fdopen(os.open(tunnel["log_file"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log:
             child = subprocess.Popen(
                 command,
+                # System ssh must not inherit the frozen bundle's loader path;
+                # its normal auth/config environment passes through untouched.
+                env=native_environment(),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=log,
@@ -354,6 +358,7 @@ def _control(
             try:
                 result = subprocess.run(
                     command,
+                    env=native_environment(),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=error_log,
