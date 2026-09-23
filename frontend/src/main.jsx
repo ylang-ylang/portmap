@@ -52,6 +52,7 @@ function currentPortSuffix() {
 }
 
 function splitDnsSetupCommand(catalog) {
+  if (catalog?.client_access) return "portmap client setup\n";
   const dnsServer = shellSingleQuote(catalog?.dns_server);
   const dnsDomain = shellSingleQuote(catalog?.dns_domain);
   return `DNS_SERVER=${dnsServer}
@@ -65,6 +66,7 @@ resolvectl query "portmap.$DNS_DOMAIN"
 }
 
 function splitDnsUnsetCommand(catalog) {
+  if (catalog?.client_access) return "portmap client teardown\n";
   const dnsServer = shellSingleQuote(catalog?.dns_server);
   const dnsDomain = shellSingleQuote(catalog?.dns_domain);
   return `DNS_SERVER=${dnsServer}
@@ -408,16 +410,17 @@ function buildCatalogTree(catalog) {
 }
 
 function endpointExternal(endpoint) {
+  const host = text(endpoint.host).includes(":") ? `[${endpoint.host}]` : endpoint.host;
   if (endpoint.url) return text(endpoint.url);
   if ((endpoint.kind === "tcp" || endpoint.kind === "udp") && endpoint.host && endpoint.host_port) {
-    return `${endpoint.host}:${endpoint.host_port}`;
+    return `${host}:${endpoint.host_port}`;
   }
   if (endpoint.kind === "range" && endpoint.host && endpoint.host_port) {
     let rangeText = "";
     if (endpoint.range_start && endpoint.range_end) {
       rangeText = ` relay ${endpoint.range_start}-${endpoint.range_end}`;
     }
-    return `${endpoint.host}:${endpoint.host_port}${rangeText}`;
+    return `${host}:${endpoint.host_port}${rangeText}`;
   }
   return "";
 }
@@ -576,7 +579,7 @@ function CatalogMeta({ catalog }) {
   return (
     <p className="meta" data-catalog-meta>
       Generated at {text(catalog.generated_at)}. HTTP proxy port: {text(catalog.http_port)}. DNS domain:{" "}
-      {text(catalog.dns_domain)}. DNS server: {text(catalog.dns_server)}. JSON:{" "}
+      {text(catalog.dns_domain)}. DNS server: {text(catalog.dns_server)}{catalog.dns_port && catalog.dns_port !== 53 ? `:${catalog.dns_port}` : ""}. JSON:{" "}
       <OpenLink href="/registry.json">/registry.json</OpenLink>.
     </p>
   );
@@ -685,6 +688,9 @@ function RunningBranchesMenu({ branches, onAction }) {
 }
 
 function EndpointExternal({ endpoint }) {
+  if (endpoint.transport_supported === false) {
+    return <span>{text(endpoint.reason) || "Unavailable from this client"}</span>;
+  }
   const external = endpointExternal(endpoint);
   if (!external) return null;
   if (external.startsWith("http://") || external.startsWith("https://")) {
@@ -946,7 +952,7 @@ function SplitDnsTools({ catalog }) {
           </div>
           <div className="quick-command">
             <div className="quick-setup-actions">
-              <p>Remove the temporary split DNS override from the same client machine.</p>
+              <p>{catalog?.client_access ? "Disconnect client gateways and remove the local DNS setup." : "Remove the temporary split DNS override from the same client machine."}</p>
               <CopyButton targetId="split-dns-unset" />
             </div>
             <pre><code id="split-dns-unset">{unset}</code></pre>
@@ -968,7 +974,7 @@ function DnsStatus({ catalog }) {
     );
   }
   const domain = text(catalog.dns_domain).replace(/\.$/, "");
-  const host = `portmap.${domain}`;
+  const host = catalog.client_access ? text(catalog.client_access.domain) : `portmap.${domain}`;
   const url = `${window.location.protocol}//${host}${currentPortSuffix()}/assets/dns-check.svg?ts=${Date.now()}`;
   const statusLabel = status === "ok" ? "succ" : status === "failed" ? "failed" : "checking";
   return (
