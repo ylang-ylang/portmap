@@ -8,12 +8,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .errors import PortmapError
+from .slug import slugify
 
 
 CONFIG_FILE_NAME = "portmap.toml"
 GATEWAY_COMPOSE_FILE_NAME = "docker-compose.yml"
 USER_CONFIG_PATH = Path.home() / ".config" / "portmap" / CONFIG_FILE_NAME
-DEFAULT_DNS_DOMAIN = "debug.lan"
+DEFAULT_DNS_DOMAIN = "portmap"
 DEFAULT_GATEWAY_NETWORK = "portmap_gateway"
 AGENT_CONTAINER_SOCKET = "/run/portmap/agent.sock"
 
@@ -140,7 +141,7 @@ def load_portmap_settings(
         dns_domain=(
             string_env(env, "PORTMAP_DOMAIN_SUFFIX")
             or string_env(env, "PORTMAP_DNS_DOMAIN")
-            or string_value(gateway, "dns_domain", DEFAULT_DNS_DOMAIN)
+            or string_value(gateway, "dns_domain", default_dns_domain())
         ).strip("."),
         dns_forward=string_env(env, "PORTMAP_DNS_FORWARD") or string_value(gateway, "dns_forward", "/etc/resolv.conf"),
         gateway_network=(
@@ -256,6 +257,19 @@ def podman_socket_path(environ: Mapping[str, str], *, probe: bool = False) -> st
 
 def runtime_name_for_socket(socket_path: str) -> str:
     return RUNTIME_PODMAN if "podman" in socket_path else RUNTIME_DOCKER
+
+
+def default_dns_domain() -> str:
+    """Per-host debug domain derived from the machine hostname.
+
+    `ylang-U22` -> `ylang-u22.portmap`. Falls back to the bare `portmap`
+    zone when the hostname is unusable (empty, localhost, or no DNS-valid
+    characters).
+    """
+    slug = slugify(socket.gethostname(), fallback="")
+    if not slug or slug == "localhost":
+        return DEFAULT_DNS_DOMAIN
+    return f"{slug}.{DEFAULT_DNS_DOMAIN}"
 
 
 def resolve_portmap_root(

@@ -23,7 +23,7 @@ from .slug import slugify
 
 DOCKER_SOCKET = os.environ.get("PORTMAP_DOCKER_SOCKET", "/var/run/docker.sock")
 HTTP_PORT = int(os.environ.get("PORTMAP_HTTP_PORT", "8080"))
-DNS_DOMAIN = os.environ.get("PORTMAP_DNS_DOMAIN", "debug.lan").strip(".")
+DNS_DOMAIN = os.environ.get("PORTMAP_DNS_DOMAIN", "portmap").strip(".")
 DNS_BIND = os.environ.get("PORTMAP_DNS_BIND", "127.0.0.1")
 DNS_TARGET_IP = os.environ.get("PORTMAP_DNS_TARGET_IP", "127.0.0.1")
 CATALOG_WORKTREE_ROOTS = os.environ.get("PORTMAP_CATALOG_WORKTREE_ROOTS", "")

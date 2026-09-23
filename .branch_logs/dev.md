@@ -70,3 +70,7 @@
   or podman through runtime socket resolution, and so portmap installs
   as a plain package (brew/pip/wheel) with packaged gateway assets,
   installed-mode shim, and an MIT license.
+- Merge `feat/demo-command` so portmap ships a self-contained
+  `portmap demo up|down` verification project and derives the default
+  DNS domain from the machine hostname (`<hostname>.portmap`), letting
+  multiple portmap hosts coexist in one client resolver.
