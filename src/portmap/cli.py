@@ -58,6 +58,14 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("compose_args", nargs=argparse.REMAINDER, help="gateway compose args; defaults to 'up -d'")
     up.set_defaults(func=cmd_up)
 
+    demo = subparsers.add_parser("demo", help="run a self-contained demo project through the real broker pipeline")
+    demo_subparsers = demo.add_subparsers(dest="demo_command", required=True)
+    demo_up = demo_subparsers.add_parser("up", help="create and start the demo project")
+    demo_up.set_defaults(func=cmd_demo_up)
+    demo_down = demo_subparsers.add_parser("down", help="stop the demo project")
+    demo_down.add_argument("--purge", action="store_true", help="also delete the demo project directory")
+    demo_down.set_defaults(func=cmd_demo_down)
+
     down = subparsers.add_parser("down", help="stop shared gateway containers and the host agent")
     down.add_argument("compose_args", nargs=argparse.REMAINDER, help="gateway compose args; defaults to 'down'")
     down.set_defaults(func=cmd_down)
@@ -252,6 +260,27 @@ def cmd_docker_compose(args: argparse.Namespace) -> int:
     env["PORTMAP_BROKER_BYPASS"] = "1"
     env["DOCKER_HOST"] = load_portmap_settings(environ=os.environ).docker_host
     return subprocess.run(plan.command, check=False, env=env).returncode
+
+
+def cmd_demo_up(args: argparse.Namespace) -> int:
+    from .demo import demo_up, load_demo_settings
+
+    result = demo_up(load_demo_settings())
+    print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
+    if result.ok and result.endpoints:
+        print("\ndemo endpoints:", file=sys.stderr)
+        for name, endpoint in result.endpoints.items():
+            target = endpoint.get("url") or f"{endpoint.get('host')}:{endpoint.get('host_port')}"
+            print(f"  {name}: {endpoint.get('kind')} -> {target}", file=sys.stderr)
+    return 0 if result.ok else 1
+
+
+def cmd_demo_down(args: argparse.Namespace) -> int:
+    from .demo import demo_down, load_demo_settings
+
+    result = demo_down(load_demo_settings(), purge=args.purge)
+    print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
+    return 0 if result.ok else 1
 
 
 def cmd_up(args: argparse.Namespace) -> int:

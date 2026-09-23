@@ -1,0 +1,6 @@
+services:
+  web:
+    image: docker.io/traefik/whoami:latest
+  raw:
+    image: docker.io/traefik/whoami:latest
+    command: ["--port", "8080"]

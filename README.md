@@ -33,8 +33,8 @@ portmap keeps the branch network entrypoints organized.
 HTTP, WebSocket, and CDP-like services get stable URLs:
 
 ```text
-http://frontend.dev.myrepo.debug.lan:8080
-http://frontend.feat-a.myrepo.debug.lan:8080
+http://frontend.dev.myrepo.ylang-u22.portmap:8080
+http://frontend.feat-a.myrepo.ylang-u22.portmap:8080
 ```
 
 TCP, UDP, TURN, and other raw-port services get non-conflicting host ports.
@@ -246,11 +246,17 @@ compatible with existing deployments; single-port mode shares the HTTP entrypoin
 | Catalog (bare IP or unmatched Host) | `http://<host-ip>:80`, also via Traefik on `:8080` | Via Traefik on `:80`; no catalog host-port mapping |
 | CoreDNS (TCP/UDP) | `<host-ip>:53` | Unchanged; keep local/private if the firewall only permits HTTP |
 
-CoreDNS answers every `*.debug.lan` A record with the detected host LAN IP.
+CoreDNS answers every A record under the host's domain with the
+detected host LAN IP. The default domain is the machine hostname — a
+host named `ylang-U22` serves `*.ylang-u22.portmap` — so multiple
+portmap hosts coexist in one client resolver: delegate each
+`<hostname>.portmap` subzone to its own machine. Set
+`[gateway] dns_domain` in `portmap.toml` (or `PORTMAP_DNS_DOMAIN`) to pin
+a custom suffix such as the legacy shared `debug.lan`.
 Other DNS queries are forwarded to the configured upstream resolver, defaulting
 to `/etc/resolv.conf`, so portmap-managed containers can still resolve public
 domains after their DNS is pointed at portmap. Configure development machines
-with split DNS so only `debug.lan` queries go to this DNS server.
+with split DNS so only the debug domain's queries go to this DNS server.
 
 Gateway runtime settings are tracked in the portmap repo root:
 
@@ -378,7 +384,7 @@ the network interface:
 
 ```bash
 DNS_SERVER=<detected-host-ip>
-DNS_DOMAIN=debug.lan
+DNS_DOMAIN=<hostname>.portmap
 DNS_IFACE="$(ip route get "$DNS_SERVER" | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
 
 sudo resolvectl dns "$DNS_IFACE" "$DNS_SERVER"
