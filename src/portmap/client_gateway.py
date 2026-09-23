@@ -376,6 +376,9 @@ def _child_env() -> dict[str, str]:
 def _reserve(port: int) -> socket.socket:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
+        # Match the native HTTP servers: TIME_WAIT from a prior owned listener
+        # must not prevent a restart. listen() still excludes a live listener.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((_ADDRESS, port))
         listener.listen(1)
         return listener

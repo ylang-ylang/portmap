@@ -298,3 +298,21 @@ def test_native_start_failure_reaps_both_children_and_retains_private_diagnostic
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=5)
+
+
+def test_reservation_reuses_a_closed_listener_after_server_active_close():
+    # Leave a real TCP connection in TIME_WAIT on the server's port.
+    with socket.socket() as server:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as peer:
+            accepted, _ = server.accept()
+            accepted.shutdown(socket.SHUT_WR)
+            assert peer.recv(1) == b""
+        accepted.close()
+    with client_gateway._reserve(port) as reserved:
+        with socket.create_connection(("127.0.0.1", port), timeout=2):
+            connection, _ = reserved.accept()
+            connection.close()
