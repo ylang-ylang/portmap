@@ -14,3 +14,7 @@
   routing, then exercise simultaneous direct Docker and SSH Podman access on
   two Debian VMs. OS DNS, browser links, auto SSH fallback, independent
   disconnect, failure cleanup, and ordinary .coder SSH configuration passed.
+- Match native HTTP listener reuse semantics when reserving local ports:
+  immediate restart after TCP TIME_WAIT succeeds, while a live listener still
+  blocks binding. Reproduced with real TCP active-close and verified by 105
+  focused regressions before the release.
