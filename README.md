@@ -226,7 +226,7 @@ and keep editable settings in `~/.config/portmap/portmap.toml` when the
 gateway's own `portmap.toml` is absent; `PORTMAP_ROOT` still overrides the
 asset root explicitly.
 
-Start portmap once:
+On a machine that runs your Compose projects, start the server-side gateway:
 
 ```bash
 portmap up
@@ -376,6 +376,88 @@ docker CLI and its compose plugin are installed as client-only packages
 Runtime support was verified end-to-end on Debian 13 with Docker 29.6 /
 compose v5.3 and rootful Podman 5.4; see
 [docs/podman-spike.md](docs/podman-spike.md) for the spike evidence.
+
+### Client Access: Direct IP or SSH
+
+The optional client runs on your workstation. It needs native `coredns`,
+`traefik`, and OpenSSH, not a local Docker daemon. Homebrew installs the
+native DNS/HTTP dependencies with portmap. For a Python/source install,
+install them separately with `brew install coredns traefik`.
+
+```bash
+# Run as your normal login user. Setup elevates only OS resolver changes.
+portmap client setup
+
+# Inventory literal Host aliases from local SSH config and Include files.
+# This does not scan the network, authenticate, or expand Host *.coder.
+portmap discover
+
+# Probe only the supplied gateway address.
+portmap discover 192.0.2.10:8080
+portmap connect 192.0.2.10:8080
+
+# Reuse a configured SSH alias, or supply the full target explicitly.
+portmap connect devbox
+portmap connect main.workspace.owner.coder --via ssh
+
+portmap connections --check
+portmap disconnect devbox
+portmap client teardown
+```
+
+Replace documentation addresses and SSH names with your own. In `auto` mode,
+the client tries direct access and can use a concrete local SSH alias as a
+fallback. It does not guess usernames, keys, workspace names, or unknown
+hosts. When no SSH target can be inferred, an interactive terminal prompts
+for one; scripts must supply `--via ssh` or `--ssh-target`. Existing
+`ProxyCommand`/`ProxyJump` and authentication settings remain authoritative;
+Coder needs no special backend.
+
+All connected HTTP gateways share **one local HTTP listener**. Each registered
+`<hostname>.portmap` zone resolves to `127.0.0.1`; local Traefik routes by Host
+to either a reachable remote IP or an internally allocated SSH forward.
+The client never forwards remote DNS servers. Catalogs at each
+`http://<hostname>.portmap:<local-port>/` rewrite application links to that
+same local port, regardless of the remote gateway's port.
+
+The listener prefers port `80`, then `18080`, then a free high port, without
+replacing existing listeners. Select a fixed shared port with
+`portmap client setup --http-port 28080`. Port changes require teardown while
+saved connections exist. Individual SSH backend ports are private implementation
+details, not ports you need to remember.
+
+On Linux, setup requires `systemd-resolved`, `iproute2`, and administrative
+permission. It creates an owned dummy interface and directs only `~portmap`
+to CoreDNS at `169.254.254.53:1053`. Using that link-local address also supports
+systemd 249; loopback DNS on a separate routing interface does not work there.
+Global/physical-interface DNS and `/etc/resolv.conf` are left unchanged.
+The macOS adapter uses `/etc/resolver/portmap`; the live multi-host verification
+was performed on Linux. Rerun setup after an OS restart to restore transient
+Linux resolver state.
+
+Client state lives under `<portmap-state-dir>/client`, created with mode `0700`.
+`PORTMAP_CLIENT_STATE_DIR` selects an isolated private directory for testing.
+Disconnect removes one local route and its owned tunnel, not remote containers;
+teardown removes the local resolver route and client-owned processes.
+
+Boundaries:
+
+- A remote must already run a portmap gateway with a `<hostname>.portmap`
+  domain. Discovery reads its existing `/registry.json`; the remote does not
+  decide which IP or SSH path your workstation should use.
+- Gateway bootstrap tries `8080` and `80`; `connect --remote-port N` supplies
+  a custom SSH-side bootstrap port. A listener alone is not readiness: catalog,
+  routing, and OS DNS are checked before reporting a successful connection.
+- Duplicate hostname zones are rejected instead of overwriting another
+  connection. The apex hostname is reserved for the local catalog; application
+  endpoints must use subdomains.
+- HTTP/WebSocket/SSE use the shared HTTP gateway. `connect --tcp` additionally
+  forwards advertised raw TCP ports at separate local addresses. Ordinary SSH
+  forwarding does not carry UDP or port ranges; unsupported endpoints are
+  explicitly marked in the client catalog.
+- Client HTTP listeners bind loopback only. Catalog actions still control
+  the connected remote gateway and inherit its trust model. A private suffix
+  does not add authentication.
 
 ### Split DNS
 

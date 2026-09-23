@@ -74,3 +74,7 @@
   `portmap demo up|down` verification project and derives the default
   DNS domain from the machine hostname (`<hostname>.portmap`), letting
   multiple portmap hosts coexist in one client resolver.
+- Merge `feat/client-connect` for workstation-side direct/SSH discovery,
+  isolated split DNS, a shared native HTTP gateway, and client-aware catalog
+  links. Verify simultaneous Docker/Podman Debian VM access, automatic SSH
+  fallback, independent disconnect, browser routing and cleanup boundaries.
