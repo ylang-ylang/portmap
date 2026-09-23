@@ -9,7 +9,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import signal
 import socket
 import stat
@@ -22,6 +21,14 @@ from pathlib import Path
 from typing import Iterator, Mapping
 from urllib.parse import urlsplit
 
+from .client_runtime import (
+    find_native_binary,
+    frozen,
+    native_environment,
+    serve_catalog_arguments,
+    serve_catalog_command,
+    worker_environment,
+)
 from .errors import PortmapError
 
 
@@ -59,10 +66,10 @@ def sync_gateway(state_dir: Path, profiles: Mapping[str, dict], *, http_port: in
             if http_port is None:
                 http_port = previous["http_port"]
             _stop(state_dir, previous)
-        binary = shutil.which("traefik")
+        binary = find_native_binary("traefik")
         if binary is None:
-            raise PortmapError("Native Traefik is required: run 'brew install traefik' and put traefik on PATH")
-        return _start(state_dir, backends, str(Path(binary).resolve()), http_port)
+            raise PortmapError("Native Traefik is required: use a portmap-client release bundle or run 'brew install traefik' and put traefik on PATH")
+        return _start(state_dir, backends, str(binary.resolve()), http_port)
 
 
 def gateway_status(state_dir: Path) -> dict:
@@ -310,19 +317,29 @@ def _load(state_dir: Path) -> dict | None:
             not isinstance(process, dict)
             or type(process.get("pid")) is not int or process["pid"] <= 1
             or not isinstance(process.get("start_time"), str) or not process["start_time"]
-            or not isinstance(process.get("executable"), str) or not Path(process["executable"]).is_absolute()
+            or not _valid_recorded_command(state, kind, process.get("command"))
         ):
             raise PortmapError(f"Invalid {kind} process identity in local gateway descriptor")
     return state
 
 
-def _command(state: dict, kind: str, executable: str) -> list[str]:
+def _valid_recorded_command(state: dict, kind: str, command: object) -> bool:
+    """Accept the exact command shapes this controller records, in either the
+    frozen (`_serve-catalog`) or source (`-m`) worker form, without assuming
+    the verifying process runs in the recorder's mode."""
+    if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+        return False
+    if not Path(command[0]).is_absolute():
+        return False
     if kind == "traefik":
-        return [executable, f"--configFile={state['config_path']}"]
-    return [
-        executable, "-m", "portmap.client_view", "--state-dir", state["state_dir"],
-        "--port", str(state["view_port"]), "--owner", state["owner"],
-    ]
+        return len(command) == 2 and command[1] == f"--configFile={state['config_path']}"
+    arguments = serve_catalog_arguments(command)
+    return (
+        arguments is not None
+        and arguments["state_dir"] == state["state_dir"]
+        and arguments["port"] == str(state["view_port"])
+        and arguments["owner"] == state["owner"]
+    )
 
 
 def _process_identity(pid: int) -> tuple[int, str, list[str] | str] | None:
@@ -337,7 +354,8 @@ def _process_identity(pid: int) -> tuple[int, str, list[str] | str] | None:
             return process.stat().st_uid, fields[19], [os.fsdecode(arg) for arg in argv]
         result = subprocess.run(
             ["ps", "-ww", "-p", str(pid), "-o", "uid=,lstart=,command="],
-            capture_output=True, text=True, timeout=1, check=False, env={**os.environ, "LC_ALL": "C"},
+            capture_output=True, text=True, timeout=1, check=False,
+            env={**native_environment(), "LC_ALL": "C"},
         )
         fields = result.stdout.strip().split(None, 6)
         if result.returncode == 0 and len(fields) == 7:
@@ -357,20 +375,26 @@ def _owned_process(state: dict, kind: str) -> bool:
     identity = _process_identity(process["pid"])
     if identity is None or identity[:2] != (os.getuid(), process["start_time"]):
         return False
-    command = _command(state, kind, process["executable"])
+    command = process["command"]
     return identity[2] == (command if isinstance(identity[2], list) else " ".join(command))
 
 
-def _child_env() -> dict[str, str]:
+def _child_environment(kind: str) -> dict[str, str]:
     proxy_names = {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
     environment = {key: value for key, value in os.environ.items() if key.lower() not in proxy_names and not key.startswith("TRAEFIK_")}
     environment.update({"NO_PROXY": "*", "no_proxy": "*"})
-    # In source mode this is src/; in an installation it is site-packages/.
-    # Keep sys.executable's original venv path rather than resolving its symlink.
-    package_root = str(Path(__file__).resolve().parent.parent)
-    inherited = environment.get("PYTHONPATH")
-    environment["PYTHONPATH"] = package_root + (os.pathsep + inherited if inherited else "")
-    return environment
+    if kind == "view":
+        # A frozen self-spawn shares this executable; PYINSTALLER_RESET_ENVIRONMENT
+        # keeps the child bootloader from stacking inherited loader paths. In
+        # source mode sys.executable must still find the package, whose root is
+        # src/ in a checkout or site-packages/ in an installation.
+        if not frozen():
+            package_root = str(Path(__file__).resolve().parent.parent)
+            inherited = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = package_root + (os.pathsep + inherited if inherited else "")
+        return worker_environment(environment)
+    # Native Traefik must never inherit the frozen bundle's loader search path.
+    return native_environment(environment)
 
 
 def _reserve(port: int) -> socket.socket:
@@ -402,11 +426,11 @@ def _http_reservation(port: int | None) -> socket.socket:
     raise PortmapError("No loopback HTTP port is available")
 
 
-def _launch(state: dict, kind: str, executable: str, children: list[subprocess.Popen[bytes]]) -> None:
+def _launch(state: dict, kind: str, command: list[str], children: list[subprocess.Popen[bytes]]) -> None:
     log_path = Path(state["instance_dir"]) / f"{kind}.log"
     with os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log:
         child = subprocess.Popen(
-            _command(state, kind, executable), cwd=state["instance_dir"], env=_child_env(),
+            command, cwd=state["instance_dir"], env=_child_environment(kind),
             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
         )
     children.append(child)
@@ -414,7 +438,9 @@ def _launch(state: dict, kind: str, executable: str, children: list[subprocess.P
     identity = _process_identity(child.pid)
     if identity is None:
         raise PortmapError(f"The local {kind} process exited before its ownership could be recorded")
-    state[kind] = {"pid": child.pid, "start_time": identity[1], "executable": executable}
+    # Record the exact argv: ownership checks must reconstruct it from this
+    # descriptor, never from the (possibly different) mode of a later process.
+    state[kind] = {"pid": child.pid, "start_time": identity[1], "command": list(command)}
 
 
 def _start(state_dir: Path, backends: dict[str, str], binary: str, http_port: int | None) -> dict:
@@ -446,11 +472,11 @@ def _start(state_dir: Path, backends: dict[str, str], binary: str, http_port: in
         _atomic_write(Path(state["dynamic_path"]), _json_bytes(config))
         _save(state_dir, state, ownership=True)
         view.close()
-        _launch(state, "view", sys.executable, children)
+        _launch(state, "view", serve_catalog_command(state_dir=state["state_dir"], port=state["view_port"], owner=state["owner"]), children)
         _save(state_dir, state, ownership=True)
         http.close()
         management.close()
-        _launch(state, "traefik", binary, children)
+        _launch(state, "traefik", [binary, f"--configFile={state['config_path']}"], children)
         _save(state_dir, state, ownership=True)
         return _wait_ready(state, config)
     except BaseException as exc:

@@ -66,43 +66,6 @@ def build_parser() -> argparse.ArgumentParser:
     demo_down.add_argument("--purge", action="store_true", help="also delete the demo project directory")
     demo_down.set_defaults(func=cmd_demo_down)
 
-    client = subparsers.add_parser("client", help="manage unified local DNS and HTTP access")
-    client_commands = client.add_subparsers(dest="client_command", required=True)
-    client_setup = client_commands.add_parser("setup", help="start local DNS/HTTP gateways and install isolated split DNS")
-    client_setup.add_argument("--no-sudo", action="store_true")
-    client_setup.add_argument("--http-port", type=int, help="one local HTTP port for every connected host (otherwise choose an available port)")
-    client_setup.set_defaults(func=cmd_client_setup)
-    client_teardown = client_commands.add_parser("teardown", help="disconnect clients and remove only portmap's resolver route")
-    client_teardown.add_argument("--no-sudo", action="store_true")
-    client_teardown.set_defaults(func=cmd_client_teardown)
-    client_status = client_commands.add_parser("status", help="show local DNS and saved connections")
-    client_status.add_argument("--check", action="store_true")
-    client_status.set_defaults(func=cmd_connections)
-
-    discover = subparsers.add_parser("discover", help="probe a direct address or list local SSH host candidates")
-    discover.add_argument("target", nargs="?")
-    discover.add_argument("--ssh-config", type=Path)
-    discover.add_argument("--timeout", type=float, default=3)
-    discover.set_defaults(func=cmd_discover)
-
-    connect = subparsers.add_parser("connect", help="connect a remote gateway by IP or an SSH port forward")
-    connect.add_argument("target", nargs="?", help="IP/URL, configured SSH alias, or explicit SSH target")
-    connect.add_argument("--via", choices=("auto", "direct", "ssh"), default="auto")
-    connect.add_argument("--ssh-target", help="explicit SSH fallback, including full .coder aliases")
-    connect.add_argument("--ssh-config", type=Path)
-    connect.add_argument("--remote-port", type=int, help="SSH bootstrap port for a non-default remote gateway")
-    connect.add_argument("--tcp", action="store_true", help="also forward catalogued raw TCP ports (not UDP/ranges)")
-    connect.add_argument("--timeout", type=float, default=5, help="HTTP probe timeout; SSH startup allows at least 30 seconds")
-    connect.set_defaults(func=cmd_connect)
-
-    connections = subparsers.add_parser("connections", help="list client-managed connections and usable endpoint URLs")
-    connections.add_argument("--check", action="store_true", help="actively verify the gateway and SSH control connection")
-    connections.set_defaults(func=cmd_connections)
-
-    disconnect = subparsers.add_parser("disconnect", help="remove a client's DNS mapping and owned SSH tunnel")
-    disconnect.add_argument("host", help="hostname or full hostname.portmap domain")
-    disconnect.set_defaults(func=cmd_disconnect)
-
     down = subparsers.add_parser("down", help="stop shared gateway containers and the host agent")
     down.add_argument("compose_args", nargs=argparse.REMAINDER, help="gateway compose args; defaults to 'down'")
     down.set_defaults(func=cmd_down)
@@ -297,87 +260,6 @@ def cmd_docker_compose(args: argparse.Namespace) -> int:
     env["PORTMAP_BROKER_BYPASS"] = "1"
     env["DOCKER_HOST"] = load_portmap_settings(environ=os.environ).docker_host
     return subprocess.run(plan.command, check=False, env=env).returncode
-
-
-def cmd_client_setup(args: argparse.Namespace) -> int:
-    from .client import client_state_dir, setup_client
-
-    print_json(setup_client(client_state_dir(), use_sudo=not args.no_sudo, http_port=args.http_port))
-    return 0
-
-
-def cmd_client_teardown(args: argparse.Namespace) -> int:
-    from .client import client_state_dir, teardown_client
-
-    print_json(teardown_client(client_state_dir(), use_sudo=not args.no_sudo))
-    return 0
-
-
-def cmd_discover(args: argparse.Namespace) -> int:
-    from .client import client_state_dir, discover
-
-    print_json(discover(client_state_dir(), args.target, ssh_config=args.ssh_config, timeout=args.timeout))
-    return 0
-
-
-def cmd_connect(args: argparse.Namespace) -> int:
-    from .client import SSHSelectionRequired, client_state_dir, connect, discover
-
-    target = args.target or args.ssh_target
-    if not target:
-        candidates = discover(client_state_dir(), ssh_config=args.ssh_config)["ssh_hosts"]
-        if not sys.stdin.isatty():
-            raise PortmapError("provide an IP/URL or --via ssh TARGET; portmap discover lists local SSH aliases")
-        if candidates:
-            print("Local SSH candidates (not yet authenticated):", file=sys.stderr)
-            for index, host in enumerate(candidates, 1):
-                print(f"  {index}. {host}", file=sys.stderr)
-        try:
-            target = input("IP/URL, SSH target, or candidate number: ").strip()
-        except (EOFError, KeyboardInterrupt) as exc:
-            raise PortmapError("connection cancelled") from exc
-        if target.isdecimal() and 1 <= int(target) <= len(candidates):
-            target = candidates[int(target) - 1]
-            args.via = "ssh"
-        elif not target:
-            raise PortmapError("connection cancelled")
-    options = {
-        "via": args.via,
-        "ssh_target": args.ssh_target,
-        "ssh_config": args.ssh_config,
-        "remote_port": args.remote_port,
-        "include_tcp": args.tcp,
-        "timeout": args.timeout,
-    }
-    try:
-        result = connect(client_state_dir(), target, **options)
-    except SSHSelectionRequired:
-        if not sys.stdin.isatty():
-            raise
-        try:
-            manual_target = input("Direct access unavailable. Enter an SSH target (blank to cancel): ").strip()
-        except (EOFError, KeyboardInterrupt) as exc:
-            raise PortmapError("connection cancelled") from exc
-        if not manual_target:
-            raise PortmapError("connection cancelled")
-        options.update(via="ssh", ssh_target=manual_target)
-        result = connect(client_state_dir(), target, **options)
-    print_json(result)
-    return 0
-
-
-def cmd_connections(args: argparse.Namespace) -> int:
-    from .client import client_state_dir, connections
-
-    print_json(connections(client_state_dir(), check=args.check))
-    return 0
-
-
-def cmd_disconnect(args: argparse.Namespace) -> int:
-    from .client import client_state_dir, disconnect
-
-    print_json(disconnect(client_state_dir(), args.host))
-    return 0
 
 
 def cmd_demo_up(args: argparse.Namespace) -> int:

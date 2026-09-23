@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
 
+from .client_runtime import native_environment
 from .errors import PortmapError
 
 
@@ -466,7 +467,7 @@ def discover_ssh_hosts(config_file: Path | None = None) -> list[str]:
 
 def _ssh_output(command: list[str], timeout: float) -> str:
     try:
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        process = subprocess.Popen(command, env=native_environment(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     except FileNotFoundError as exc:
         raise PortmapError("OpenSSH ssh is not installed; install it to inspect an SSH target") from exc
     except OSError as exc:

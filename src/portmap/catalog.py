@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import __version__
+
 import datetime as dt
 import http.client
 import json
@@ -9,16 +11,25 @@ import socket
 import subprocess
 import time
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .agent_client import AgentUnavailable, agent_compose_up_worktree, agent_worktrees
 from .broker import ENDPOINT_CONFIG, ensure_generated_override
+from .client_downloads import (
+    CLIENT_DOWNLOADS_PREFIX,
+    INSTALL_SCRIPT_CONTENT_TYPE,
+    ClientDownloadUnavailable,
+    client_download_info,
+    install_script_body,
+    resolve_client_archive,
+)
 from .compose_takeover import find_compose_file, generated_compose_project, plan_docker_compose_command
 from .repo_identity import git, git_branch, resolve_repo_identity, stable_hash
 from .settings import load_portmap_settings
 from .slug import slugify
+from .web_static import StaticHandler, vite_public_root_asset
 
 
 DOCKER_SOCKET = os.environ.get("PORTMAP_DOCKER_SOCKET", "/var/run/docker.sock")
@@ -37,17 +48,6 @@ TRAEFIK_SERVICE_PORT_RE = re.compile(
 HTTP_HOST_RE = re.compile(r"Host\(`([^`]+)`\)")
 NETWORK_REMOVE_ATTEMPTS = 10
 NETWORK_REMOVE_DELAY_SECONDS = 0.2
-STATIC_ROOT = Path(__file__).with_name("catalog_static")
-STATIC_CONTENT_TYPES_BY_SUFFIX = {
-    ".html": "text/html; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".ico": "image/x-icon",
-    ".js": "application/javascript; charset=utf-8",
-    ".png": "image/png",
-    ".svg": "image/svg+xml",
-    ".txt": "text/plain; charset=utf-8",
-    ".webmanifest": "application/manifest+json",
-}
 MISSING_ORDER = 1_000_000
 AGENT_AUTHORITATIVE_WORKTREE_KEYS = {
     "branch_tip_epoch",
@@ -1082,50 +1082,11 @@ def first_form_value(form: dict[str, list[str]], name: str) -> str:
     return values[0]
 
 
-def safe_static_path(asset_path: str) -> Path | None:
-    normalized = PurePosixPath(asset_path)
-    if normalized.is_absolute() or ".." in normalized.parts or not normalized.parts:
-        return None
-    return STATIC_ROOT.joinpath(*normalized.parts)
 
 
-def static_content_type(asset_path: str) -> str | None:
-    return STATIC_CONTENT_TYPES_BY_SUFFIX.get(PurePosixPath(asset_path).suffix)
+class CatalogHandler(StaticHandler):
+    server_version = f"portmap-catalog/{__version__}"
 
-
-def read_static_asset(asset_path: str) -> tuple[bytes, str] | None:
-    path = safe_static_path(asset_path)
-    content_type = static_content_type(asset_path)
-    if path is None or content_type is None:
-        return None
-    try:
-        return path.read_bytes(), content_type
-    except FileNotFoundError:
-        return None
-
-
-def vite_public_root_asset(request_path: str) -> str | None:
-    if not request_path.startswith("/"):
-        return None
-    normalized = PurePosixPath(request_path.removeprefix("/"))
-    if len(normalized.parts) != 1:
-        return None
-    asset_path = normalized.as_posix()
-    if asset_path in {"", ".", "index.html"}:
-        return None
-    if static_content_type(asset_path) is None:
-        return None
-    return asset_path
-
-
-class CatalogHandler(BaseHTTPRequestHandler):
-    server_version = "portmap-catalog/0.1"
-
-    def do_GET(self) -> None:
-        self.handle_request(send_body=True)
-
-    def do_HEAD(self) -> None:
-        self.handle_request(send_body=False)
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -1171,6 +1132,19 @@ class CatalogHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f"failed to read Docker catalog: {exc}\n".encode("utf-8"))
                 return
             self.write_json(catalog, send_body=send_body)
+            return
+
+        if parsed.path == "/api/client":
+            self.write_json(client_download_info(), send_body=send_body)
+            return
+
+        if parsed.path == "/install-client.sh":
+            self.handle_install_client_script(send_body=send_body)
+            return
+
+        if parsed.path.startswith(CLIENT_DOWNLOADS_PREFIX):
+            requested = parsed.path[len(CLIENT_DOWNLOADS_PREFIX):]
+            self.handle_client_download(urllib.parse.unquote(requested), send_body=send_body)
             return
 
         public_asset = vite_public_root_asset(parsed.path)
@@ -1250,46 +1224,43 @@ class CatalogHandler(BaseHTTPRequestHandler):
                 send_body=True,
             )
 
-    def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"{self.address_string()} - {fmt % args}")
-
-    def write_json(self, payload: dict[str, Any], *, send_body: bool, status: int = 200) -> None:
-        body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    def write_client_error(self, status: int, message: str, *, send_body: bool) -> None:
         self.send_response(status)
-        self.send_header("content-type", "application/json; charset=utf-8")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        if send_body:
-            self.wfile.write(body)
-
-    def write_static(self, filename: str, *, send_body: bool) -> bool:
-        asset = read_static_asset(filename)
-        if asset is None:
-            return False
-        body, content_type = asset
-        self.send_response(200)
-        self.send_header("content-type", content_type)
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        if send_body:
-            self.wfile.write(body)
-        return True
-
-    def write_not_found(self, *, send_body: bool) -> None:
-        self.send_response(404)
         self.send_header("content-type", "text/plain; charset=utf-8")
         self.end_headers()
         if send_body:
-            self.wfile.write(b"not found\n")
+            self.wfile.write(f"{message}\n".encode("utf-8"))
 
-    def write_text(self, body: str, *, content_type: str, send_body: bool) -> None:
-        payload = body.encode("utf-8")
+    def handle_install_client_script(self, *, send_body: bool) -> None:
+        try:
+            body = install_script_body()
+        except ClientDownloadUnavailable as exc:
+            self.write_client_error(exc.status, exc.message, send_body=send_body)
+            return
         self.send_response(200)
-        self.send_header("content-type", f"{content_type}; charset=utf-8")
-        self.send_header("content-length", str(len(payload)))
+        self.send_header("content-type", INSTALL_SCRIPT_CONTENT_TYPE)
+        self.send_header("content-length", str(len(body)))
         self.end_headers()
         if send_body:
-            self.wfile.write(payload)
+            self.wfile.write(body)
+
+    def handle_client_download(self, filename: str, *, send_body: bool) -> None:
+        try:
+            archive = resolve_client_archive(filename)
+        except ClientDownloadUnavailable as exc:
+            self.write_client_error(exc.status, exc.message, send_body=send_body)
+            return
+        size = archive.stat().st_size
+        self.send_response(200)
+        self.send_header("content-type", "application/gzip")
+        self.send_header("content-length", str(size))
+        self.end_headers()
+        if not send_body:
+            return
+        with archive.open("rb") as handle:
+            while chunk := handle.read(65536):
+                self.wfile.write(chunk)
+
 
 
 def main() -> None:

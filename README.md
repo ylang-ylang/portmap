@@ -205,9 +205,9 @@ application needs the original external Host, set `preserve_host = true` for
 that endpoint. If a service needs a specific upstream Host, set
 `upstream_host = "host:port"`.
 
-## CLI
+## Server CLI
 
-Install with Homebrew (Linux or macOS tap):
+Install the **server tooling** with Homebrew (Linux or macOS tap):
 
 ```bash
 brew install ylang-ylang/tap/portmap
@@ -225,6 +225,9 @@ Both modes are equivalent. Installed packages read gateway assets
 and keep editable settings in `~/.config/portmap/portmap.toml` when the
 gateway's own `portmap.toml` is absent; `PORTMAP_ROOT` still overrides the
 asset root explicitly.
+
+For workstation access, use the separate **`portmap-client` download** below.
+Installing the server CLI is not a client prerequisite.
 
 On a machine that runs your Compose projects, start the server-side gateway:
 
@@ -379,31 +382,62 @@ compose v5.3 and rootful Podman 5.4; see
 
 ### Client Access: Direct IP or SSH
 
-The optional client runs on your workstation. It needs native `coredns`,
-`traefik`, and OpenSSH, not a local Docker daemon. Homebrew installs the
-native DNS/HTTP dependencies with portmap. For a Python/source install,
-install them separately with `brew install coredns traefik`.
+`portmap-client` is a separate workstation tool. Open your server's catalog and
+use **Download client**, or copy the install command shown there. The downloadable
+bundle includes its Python runtime, CoreDNS, and Traefik: **no local Python,
+Homebrew, Docker, or portmap server installation is needed**. OpenSSH remains an
+OS dependency for SSH connections; existing SSH configuration and credentials
+are reused.
+
+The published package currently supports **Linux x86-64 with glibc 2.31+**.
+Linux split-DNS setup also requires `systemd-resolved`, `iproute2`, and permission
+to make privileged resolver changes. macOS, Windows, ARM64, and musl/Alpine
+downloads are not published; the page lists only real release artifacts.
+
+The installer requires ordinary shell tools (`curl`, `tar`, `awk`, `grep`,
+`readlink`, and `sha256sum` or `shasum`). Use a catalog you trust: the installer
+verifies the archive against that server's manifest, not an independent signature.
+Use HTTPS or a trusted network when downloading.
 
 ```bash
+# Replace this example with the catalog origin shown in your browser.
+SERVER=http://192.0.2.10
+curl -fsSL "$SERVER/install-client.sh" | sh -s -- "$SERVER"
+# If ~/.local/bin is not already on PATH:
+export PATH="$HOME/.local/bin:$PATH"
+portmap-client --version
+
 # Run as your normal login user. Setup elevates only OS resolver changes.
-portmap client setup
+portmap-client setup
 
 # Inventory literal Host aliases from local SSH config and Include files.
 # This does not scan the network, authenticate, or expand Host *.coder.
-portmap discover
+portmap-client discover
 
 # Probe only the supplied gateway address.
-portmap discover 192.0.2.10:8080
-portmap connect 192.0.2.10:8080
+portmap-client discover 192.0.2.10:8080
+portmap-client connect 192.0.2.10:8080
 
 # Reuse a configured SSH alias, or supply the full target explicitly.
-portmap connect devbox
-portmap connect main.workspace.owner.coder --via ssh
+portmap-client connect devbox
+portmap-client connect main.workspace.owner.coder --via ssh
 
-portmap connections --check
-portmap disconnect devbox
-portmap client teardown
+portmap-client connections --check
+portmap-client disconnect devbox
+portmap-client teardown
 ```
+
+Installation does not start processes or modify DNS. It places a versioned
+bundle under `${XDG_DATA_HOME:-$HOME/.local/share}/portmap-client/<version>` and
+an executable symlink at `~/.local/bin/portmap-client`. Keep the whole bundle:
+the executable uses its adjacent `_internal` directory. The installer refuses
+to replace unrelated files or accept an unsafe or checksum-mismatched archive.
+
+**Migrating from 0.6:** if the old combined CLI has active client connections,
+run `portmap client teardown` with that old version before upgrading the server
+CLI. Then install the separate client, run setup, and reconnect your targets.
+Client commands were removed from the server CLI; there are no compatibility
+aliases or automatic imports of old process ownership/state.
 
 Replace documentation addresses and SSH names with your own. In `auto` mode,
 the client tries direct access and can use a concrete local SSH alias as a
@@ -422,7 +456,7 @@ same local port, regardless of the remote gateway's port.
 
 The listener prefers port `80`, then `18080`, then a free high port, without
 replacing existing listeners. Select a fixed shared port with
-`portmap client setup --http-port 28080`. Port changes require teardown while
+`portmap-client setup --http-port 28080`. Port changes require teardown while
 saved connections exist. Individual SSH backend ports are private implementation
 details, not ports you need to remember.
 
@@ -431,11 +465,12 @@ permission. It creates an owned dummy interface and directs only `~portmap`
 to CoreDNS at `169.254.254.53:1053`. Using that link-local address also supports
 systemd 249; loopback DNS on a separate routing interface does not work there.
 Global/physical-interface DNS and `/etc/resolv.conf` are left unchanged.
-The macOS adapter uses `/etc/resolver/portmap`; the live multi-host verification
-was performed on Linux. Rerun setup after an OS restart to restore transient
-Linux resolver state.
+The source contains a macOS resolver adapter, but there is no published or
+verified macOS standalone package. Rerun setup after an OS restart to restore
+transient Linux resolver state.
 
-Client state lives under `<portmap-state-dir>/client`, created with mode `0700`.
+Client state lives under `${XDG_STATE_HOME:-$HOME/.local/state}/portmap-client`,
+created with mode `0700`, independently of server settings.
 `PORTMAP_CLIENT_STATE_DIR` selects an isolated private directory for testing.
 Disconnect removes one local route and its owned tunnel, not remote containers;
 teardown removes the local resolver route and client-owned processes.
@@ -458,6 +493,33 @@ Boundaries:
 - Client HTTP listeners bind loopback only. Catalog actions still control
   the connected remote gateway and inherit its trust model. A private suffix
   does not add authentication.
+
+#### Building and hosting the client package
+
+The pinned builder targets Debian 11's glibc 2.31 baseline. Run from a source
+checkout (Docker is a **build-time** dependency, not a client dependency):
+
+```bash
+BUILD_DIR=$(mktemp -d)
+docker build -f packaging/client.Dockerfile -t portmap-client-builder packaging
+docker run --rm --cpus=1 --memory=1g \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp/portmap-client-build \
+  -v "$PWD:/src:ro" -v "$BUILD_DIR:/out" \
+  portmap-client-builder --out-dir /out
+```
+
+`tools/build_client.py` verifies the pinned native dependencies, freezes only
+client modules, and emits the archive, SHA-256 sidecar, and `client_release.json`.
+Before a release, copy the verified manifest to
+`src/portmap/client_release.json` and upload those exact bytes to the indicated
+release URL. The source manifest is not generated or changed at server startup.
+
+The catalog serves `/api/client`, `/install-client.sh`, and
+`/downloads/client/<filename>` from its own origin. It validates archive size
+and SHA-256 before serving. Seed `<server-state-dir>/client-downloads/<filename>`
+to serve offline, or let the server fetch the pinned GitHub release once.
+`PORTMAP_CLIENT_DOWNLOAD_DIR` can select another server cache directory.
+Clients download from the catalog, not directly from GitHub.
 
 ### Split DNS
 

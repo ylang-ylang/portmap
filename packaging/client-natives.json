@@ -1,0 +1,16 @@
+{
+  "linux-amd64": {
+    "coredns": {
+      "version": "1.14.7",
+      "url": "https://github.com/coredns/coredns/releases/download/v1.14.7/coredns_1.14.7_linux_amd64.tgz",
+      "sha256": "9a09356438c6d9591cb80011a2a7a52f87fc3a113f6690e41f243f98b98faac9",
+      "license_url": "https://raw.githubusercontent.com/coredns/coredns/v1.14.7/LICENSE"
+    },
+    "traefik": {
+      "version": "3.7.13",
+      "url": "https://github.com/traefik/traefik/releases/download/v3.7.13/traefik_v3.7.13_linux_amd64.tar.gz",
+      "sha256": "52cd039a34258dd61c617a95d69252bc6bcae27c520f338186c31c7fef8f6394",
+      "license_url": "https://raw.githubusercontent.com/traefik/traefik/v3.7.13/LICENSE.md"
+    }
+  }
+}

@@ -19,16 +19,10 @@ from .client_dns import dns_status, resolver_status, setup_resolver, stop_dns, s
 from .client_gateway import gateway_status, stop_gateway, sync_gateway
 from .client_tunnel import add_forward, cancel_forward, start_tunnel, stop_tunnel, tunnel_alive
 from .errors import PortmapError
-from .settings import load_portmap_settings
 
 
 class SSHSelectionRequired(PortmapError):
     """No authoritative local SSH target was supplied or discovered."""
-
-
-def client_state_dir() -> Path:
-    configured = os.environ.get("PORTMAP_CLIENT_STATE_DIR")
-    return (Path(configured).expanduser() if configured else load_portmap_settings().state_dir / "client").resolve()
 
 
 @contextmanager
@@ -146,7 +140,7 @@ def setup_client(state_dir: Path, *, use_sudo: bool = True, http_port: int | Non
     with client_lock(state_dir):
         profiles = _load(state_dir)
         if http_port is not None and any(profile.get("http_port") != http_port for profile in profiles.values()):
-            raise PortmapError("saved connections use another HTTP port; run client teardown before changing --http-port")
+            raise PortmapError("saved connections use another HTTP port; run portmap-client teardown before changing --http-port")
         had_resolver = resolver_status(state_dir)["installed"]
         had_dns = dns_status(state_dir)["running"]
         had_gateway = gateway_status(state_dir)["running"]
@@ -198,14 +192,14 @@ def connect(
     if via not in {"auto", "direct", "ssh"}:
         raise PortmapError("connection mode must be auto, direct or ssh")
     if not target and not ssh_target:
-        raise PortmapError("specify an IP/URL or SSH target; use portmap discover to list local SSH aliases")
+        raise PortmapError("specify an IP/URL or SSH target; use portmap-client discover to list local SSH aliases")
     if timeout <= 0 or timeout > 60:
         raise PortmapError("connection timeout must be between 0 and 60 seconds")
     if remote_port is not None:
         _port(remote_port)
     with client_lock(state_dir):
         if not resolver_status(state_dir)["installed"]:
-            raise PortmapError("local split DNS is not configured; run portmap client setup first")
+            raise PortmapError("local split DNS is not configured; run portmap-client setup first")
         profiles = _load(state_dir)
         gateway = sync_gateway(state_dir, profiles)
         local_port = gateway["http_port"]
