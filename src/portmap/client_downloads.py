@@ -130,7 +130,7 @@ def unavailable_payload(message: str) -> dict[str, Any]:
 
 
 def validate_trusted_source_url(url: str) -> None:
-    """Allow only clean https URLs on the trusted GitHub release hosts."""
+    """Allow trusted HTTPS asset URLs; only CDN hops may carry signed queries."""
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https":
         raise ValueError(f"source URL must use https: {url!r}")
@@ -141,7 +141,7 @@ def validate_trusted_source_url(url: str) -> None:
         raise ValueError(f"source URL host is not trusted: {host!r}")
     if not parsed.path or parsed.path == "/":
         raise ValueError(f"source URL has no asset path: {url!r}")
-    if parsed.query or parsed.fragment:
+    if parsed.fragment or (parsed.query and host == MANIFEST_SOURCE_HOST):
         raise ValueError(f"source URL must not include query or fragment: {url!r}")
 
 
