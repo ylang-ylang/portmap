@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from .catalog import CatalogHandler, vite_public_root_asset
+from . import __version__
+from .web_static import StaticHandler, vite_public_root_asset
 from .client_discovery import probe_gateway
 from .errors import PortmapError
 from .client_dns import DNS_ADDRESS, DNS_PORT
@@ -136,8 +137,8 @@ def project_catalog(catalog: dict[str, Any], profile: dict[str, Any], http_port:
         "transport": profile["via"],
         "domain": domain,
         "http_port": http_port,
-        "dns_setup_command": "portmap client setup",
-        "dns_unset_command": "portmap client teardown",
+        "dns_setup_command": "portmap-client setup",
+        "dns_unset_command": "portmap-client teardown",
     }
     result["services"] = [
         {
@@ -168,9 +169,9 @@ class ClientViewServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", port), ClientViewHandler)
 
 
-class ClientViewHandler(CatalogHandler):
+class ClientViewHandler(StaticHandler):
     server: ClientViewServer
-    server_version = "portmap-client-catalog/0.1"
+    server_version = f"portmap-client-catalog/{__version__}"
 
     def _host(self) -> str | None:
         values = self.headers.get_all("Host", [])
@@ -233,7 +234,7 @@ class ClientViewHandler(CatalogHandler):
             except PortmapError:
                 # Probe errors may include remote details. Expose neither the
                 # controller profile nor backend/tunnel diagnostics over HTTP.
-                self.write_json({"error": "remote catalog unavailable; check portmap connections"}, status=502, send_body=send_body)
+                self.write_json({"error": "remote catalog unavailable; check portmap-client connections"}, status=502, send_body=send_body)
                 return
             self.write_json(projected, send_body=send_body)
             return

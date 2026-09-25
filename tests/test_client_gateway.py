@@ -215,7 +215,7 @@ def test_stop_does_not_signal_foreign_pid_even_with_copied_start_identity(gatewa
     changed = deepcopy(original)
     identity = client_gateway._process_identity(unrelated.pid)
     assert identity is not None
-    changed["traefik"] = {"pid": unrelated.pid, "start_time": identity[1], "executable": sys.executable}
+    changed["traefik"] = {"pid": unrelated.pid, "start_time": identity[1], "command": original["traefik"]["command"]}
     save_json(descriptor_path, changed)
     save_json(marker_path, {key: value for key, value in changed.items() if key != "revision"})
     try:
@@ -248,7 +248,7 @@ def test_untrusted_routing_values_fail_before_creating_state(tmp_path, domain, b
 
 
 def test_missing_native_binary_reports_install_command_without_starting_view(tmp_path, monkeypatch):
-    monkeypatch.setattr(client_gateway.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(client_gateway, "find_native_binary", lambda _name: None)
     with pytest.raises(PortmapError, match="brew install traefik"):
         client_gateway.sync_gateway(tmp_path, {})
     assert not (tmp_path / "gateway.json").exists()
@@ -257,13 +257,12 @@ def test_missing_native_binary_reports_install_command_without_starting_view(tmp
 
 def test_explicit_port_collision_leaves_existing_listener_untouched(tmp_path, backend, monkeypatch):
     # No process is launched: fail at the bind even when an executable is found.
-    monkeypatch.setattr(client_gateway.shutil, "which", lambda _name: sys.executable)
+    monkeypatch.setattr(client_gateway, "find_native_binary", lambda _name: Path(sys.executable))
     with pytest.raises(PortmapError):
         client_gateway.sync_gateway(tmp_path, {}, http_port=backend.server_port)
     assert request(backend.server_port, "existing-listener")[0] == 200
     assert not (tmp_path / "gateway.json").exists()
     assert not (tmp_path / "gateway").exists()
-
 
 def test_native_start_failure_reaps_both_children_and_retains_private_diagnostics(tmp_path, native_traefik, monkeypatch):
     original_config = client_gateway._static_config
@@ -298,6 +297,43 @@ def test_native_start_failure_reaps_both_children_and_retains_private_diagnostic
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=5)
+
+
+def test_ownership_verifies_recorded_worker_command_not_current_mode(gateway, monkeypatch):
+    state = client_gateway._load(gateway.state_dir)
+    assert state["view"]["command"][1:3] == ["-m", "portmap.client_view"]
+    # A frozen portmap-client must still recognize a source-mode gateway, and
+    # vice versa: only the recorded argv may be compared against the process.
+    monkeypatch.setattr(client_gateway, "frozen", lambda: True)
+    monkeypatch.setattr(
+        client_gateway, "serve_catalog_command",
+        lambda **kwargs: [sys.executable, "_serve-catalog", "--state-dir", kwargs["state_dir"], "--port", str(kwargs["port"]), "--owner", kwargs["owner"]],
+    )
+    assert client_gateway._owned_process(client_gateway._load(gateway.state_dir), "view") is True
+    assert client_gateway.gateway_status(gateway.state_dir)["running"] is True
+
+
+def test_descriptor_accepts_frozen_worker_command_shape(gateway):
+    descriptor_path = gateway.state_dir / "gateway.json"
+    original = json.loads(descriptor_path.read_text())
+    marker_path = Path(original["instance_dir"]) / "owner.json"
+    original_marker = json.loads(marker_path.read_text())
+    frozen_form = [sys.executable, "_serve-catalog", "--state-dir", original["state_dir"], "--port", str(original["view_port"]), "--owner", original["owner"]]
+    changed = deepcopy(original)
+    changed["view"] = {**original["view"], "command": frozen_form}
+    save_json(descriptor_path, changed)
+    save_json(marker_path, {key: value for key, value in changed.items() if key != "revision"})
+    try:
+        # _load validates the whole descriptor against the marker: accepting it
+        # proves the frozen argv is a valid recorded worker command, while the
+        # live source-mode child (different argv) is correctly reported as not owned.
+        assert client_gateway._load(gateway.state_dir)["view"]["command"] == frozen_form
+        assert client_gateway._valid_recorded_command(changed, "view", frozen_form) is True
+        assert client_gateway._owned_process(changed, "view") is False
+        assert client_gateway.gateway_status(gateway.state_dir)["running"] is False
+    finally:
+        save_json(descriptor_path, original)
+        save_json(marker_path, original_marker)
 
 
 def test_reservation_reuses_a_closed_listener_after_server_active_close():

@@ -890,6 +890,94 @@ pre {
   white-space: pre;
 }
 
+
+/* client download panel */
+.client-platform-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.client-platform-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid #e6ebf1;
+}
+
+.client-platform-item:last-child {
+  border-bottom: 0;
+}
+
+.client-platform-badge {
+  min-width: 90px;
+  display: inline-block;
+  background: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 12px;
+  text-align: center;
+  max-width: none;
+}
+
+.client-platform-link {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-platform-size {
+  color: #52606d;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.client-platform-tag {
+  font-size: 12px;
+  color: #15803d;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.client-platform-req {
+  font-size: 12px;
+  color: #6b7280;
+  white-space: nowrap;
+  font-style: italic;
+}
+
+.client-platform-suggested .client-platform-link {
+  font-weight: 600;
+}
+
+.client-platforms-label {
+  color: #52606d;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.client-download-notice {
+  margin: 0;
+}
+
+.client-download-error {
+  color: #9f1d16;
+}
+
+.client-download summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
 .dns-status {
   display: inline-flex;
   align-items: center;
@@ -1324,5 +1412,31 @@ pre {
 
   a {
     color: #7dd3fc;
+  }
+
+  .client-platform-item {
+    border-color: #2b3540;
+  }
+
+  .client-platform-badge {
+    background: #1e3a5f;
+    color: #93c5fd;
+    border-color: #3b82f6;
+  }
+
+  .client-platform-size,
+  .client-platforms-label,
+  .client-platform-req {
+    color: #a7b2bf;
+  }
+
+  .client-platform-tag {
+    color: #86efac;
+    background: #14532d;
+    border-color: #16a34a;
+  }
+
+  .client-download-error {
+    color: #fca5a5;
   }
 }

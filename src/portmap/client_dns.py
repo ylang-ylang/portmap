@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from .client_runtime import find_native_binary, native_environment
 from .errors import PortmapError
 
 # Older systemd-resolved (including Ubuntu 22.04's 249) cannot contact a
@@ -172,7 +173,7 @@ def _owned_process(state_dir: Path, state: dict[str, Any]) -> bool:
         except OSError:
             return False
     try:
-        result = subprocess.run(["ps", "-p", str(pid), "-o", "uid=,args="], capture_output=True, text=True, timeout=2, check=False)
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "uid=,args="], capture_output=True, text=True, timeout=2, check=False, env=native_environment())
         uid, args = result.stdout.strip().split(None, 1)
         return int(uid) == os.getuid() and config in args and "-conf" in args
     except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -207,11 +208,11 @@ def sync_dns(state_dir: Path, records: Mapping[str, str]) -> dict[str, Any]:
     process = None
     try:
         if not owned:
-            binary = shutil.which("coredns")
-            if not binary:
-                raise PortmapError("client DNS needs CoreDNS: brew install coredns")
+            binary = find_native_binary("coredns")
+            if binary is None:
+                raise PortmapError("client DNS needs CoreDNS: use a portmap-client release bundle or install coredns on PATH (brew install coredns)")
             with (state_dir / "dns.log").open("ab") as log:
-                process = subprocess.Popen([binary, "-conf", str(config)], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                process = subprocess.Popen([str(binary), "-conf", str(config)], env=native_environment(), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             state = {"pid": process.pid, "owner": owner}
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
@@ -265,7 +266,7 @@ def _link_owner(state_dir: Path) -> str:
 def _command(args: list[str], *, privileged: bool = False, use_sudo: bool = True) -> str:
     prefix = ["sudo", "--"] if privileged and os.geteuid() != 0 and use_sudo else []
     try:
-        result = subprocess.run([*prefix, *args], capture_output=True, text=True, timeout=20, check=False)
+        result = subprocess.run([*prefix, *args], capture_output=True, text=True, timeout=20, check=False, env=native_environment())
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PortmapError(f"cannot run {args[0]}: {exc}") from exc
     if result.returncode:
@@ -275,7 +276,7 @@ def _command(args: list[str], *, privileged: bool = False, use_sudo: bool = True
 
 def _linux_link(state_dir: Path) -> dict[str, Any] | None:
     try:
-        result = subprocess.run(["ip", "-j", "link", "show", "dev", _link_name(state_dir)], capture_output=True, text=True, timeout=3, check=False)
+        result = subprocess.run(["ip", "-j", "link", "show", "dev", _link_name(state_dir)], capture_output=True, text=True, timeout=3, check=False, env=native_environment())
         if result.returncode:
             return None
         return json.loads(result.stdout)[0]

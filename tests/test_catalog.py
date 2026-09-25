@@ -17,9 +17,9 @@ from portmap.catalog import (
     compose_up_worktree,
     container_to_service,
     parse_host_rule,
-    read_static_asset,
     select_dns_server,
 )
+from portmap.web_static import read_static_asset
 
 
 @pytest.fixture(autouse=True)

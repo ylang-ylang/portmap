@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from portmap.catalog import read_static_asset
+from portmap.web_static import read_static_asset
 from portmap.client_view import ClientViewServer, project_catalog
 
 
@@ -79,8 +79,8 @@ def test_http_projection_uses_local_listener_and_preserves_remote_context() -> N
     assert {key: value for key, value in result["services"][0].items() if key != "endpoints"} == {
         key: value for key, value in source["services"][0].items() if key != "endpoints"
     }
-    assert result["client_access"]["dns_setup_command"] == "portmap client setup"
-    assert result["client_access"]["dns_unset_command"] == "portmap client teardown"
+    assert result["client_access"]["dns_setup_command"] == "portmap-client setup"
+    assert result["client_access"]["dns_unset_command"] == "portmap-client teardown"
     assert "private-tunnel-token" not in json.dumps(result)
     assert "/private/controller/socket" not in json.dumps(result)
     assert json.dumps(source, sort_keys=True) == source_json
@@ -285,7 +285,7 @@ def test_mismatched_remote_domain_does_not_project_another_catalog(local_view) -
     catalog["dns_domain"] = "unexpected.portmap"
     status, _, body = request(server, "/registry.json")
     assert status == 502
-    assert json.loads(body) == {"error": "remote catalog unavailable; check portmap connections"}
+    assert json.loads(body) == {"error": "remote catalog unavailable; check portmap-client connections"}
 
 
 def test_health_is_available_before_connections_exist(tmp_path) -> None:

@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Download,
   ExternalLink,
   Folder,
   GitBranch,
@@ -52,7 +53,7 @@ function currentPortSuffix() {
 }
 
 function splitDnsSetupCommand(catalog) {
-  if (catalog?.client_access) return "portmap client setup\n";
+  if (catalog?.client_access) return "portmap-client setup\n";
   const dnsServer = shellSingleQuote(catalog?.dns_server);
   const dnsDomain = shellSingleQuote(catalog?.dns_domain);
   return `DNS_SERVER=${dnsServer}
@@ -66,7 +67,7 @@ resolvectl query "portmap.$DNS_DOMAIN"
 }
 
 function splitDnsUnsetCommand(catalog) {
-  if (catalog?.client_access) return "portmap client teardown\n";
+  if (catalog?.client_access) return "portmap-client teardown\n";
   const dnsServer = shellSingleQuote(catalog?.dns_server);
   const dnsDomain = shellSingleQuote(catalog?.dns_domain);
   return `DNS_SERVER=${dnsServer}
@@ -963,6 +964,119 @@ function SplitDnsTools({ catalog }) {
   );
 }
 
+function detectPlatform() {
+  const fingerprint = `${navigator.userAgent} ${navigator.platform || ""}`.toLowerCase();
+  const mobile = /android|iphone|ipad/.test(fingerprint);
+  const arch = /arm64|aarch64/.test(fingerprint) ? "arm64"
+    : /x86_64|amd64|x64|win64|wow64/.test(fingerprint) ? "amd64" : null;
+  const os = mobile ? null
+    : /windows|win32|win64/.test(fingerprint) ? "windows"
+    : /macintosh|macintel|darwin/.test(fingerprint) ? "darwin"
+    : /linux/.test(fingerprint) ? "linux" : null;
+  return { os, arch };
+}
+
+function formatSize(bytes) {
+  if (bytes == null || bytes <= 0) return null;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ClientDownloadPanel({ catalog }) {
+  const [client, setClient] = useState(null);
+  const [clientError, setClientError] = useState("");
+  const [clientLoading, setClientLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadClient() {
+      try {
+        const res = await fetch("/api/client");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!cancelled) setClient(data);
+      } catch (err) {
+        if (!cancelled) setClientError(`${err}`);
+      } finally {
+        if (!cancelled) setClientLoading(false);
+      }
+    }
+    loadClient();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (catalog?.client_access) return null;
+
+  const origin = `${window.location.protocol}//${window.location.host}`;
+  const installCmd = `curl -fsSL ${shellSingleQuote(`${origin}/install-client.sh`)} | sh -s -- ${shellSingleQuote(origin)}`;
+  const platforms = client?.platforms || [];
+  const detected = detectPlatform();
+  const suggested = platforms.find((p) => p.os === detected.os && p.arch === detected.arch) || null;
+
+  return (
+    <section className="utility-panel" aria-label="Download portmap-client">
+      <details className="quick-setup client-download" open>
+        <summary>
+          <Download className="button-icon" aria-hidden="true" />
+          {" "}Download client / 获取客户端
+        </summary>
+        <div className="quick-setup-body">
+          {clientLoading && <p>Loading…</p>}
+          {!clientLoading && clientError && (
+            <p className="client-download-notice client-download-error">{clientError}</p>
+          )}
+          {!clientLoading && !clientError && client && !client.available && (
+            <p className="client-download-notice">
+              {client.message || "Client download not available on this server."}
+            </p>
+          )}
+          {!clientLoading && !clientError && client?.available && (
+            <>
+              <div className="quick-command">
+                <div className="quick-setup-actions">
+                  <p>
+                    Install <code>portmap-client</code> — detects OS/arch, verifies
+                    the archive, links <code>~/.local/bin/portmap-client</code>. No sudo, no Python.
+                  </p>
+                  <CopyButton targetId="client-install-cmd" />
+                </div>
+                <pre><code id="client-install-cmd">{installCmd}</code></pre>
+              </div>
+              {platforms.length > 0 && (
+                <div className="quick-command">
+                  <div className="client-platforms-label">Or download directly:</div>
+                  <ul className="client-platform-list">
+                    {platforms.map((p) => {
+                      const isSuggested = p === suggested;
+                      const size = formatSize(p.size);
+                      return (
+                        <li
+                          key={p.filename}
+                          className={`client-platform-item${isSuggested ? " client-platform-suggested" : ""}`}
+                        >
+                          <code className="client-platform-badge">{p.os}/{p.arch}</code>
+                          <a href={p.url} className="client-platform-link">{p.filename}</a>
+                          {size && <span className="client-platform-size">{size}</span>}
+                          {isSuggested && <span className="client-platform-tag">your platform</span>}
+                          {p.requirements && <span className="client-platform-req" title={p.requirements}>{p.requirements}</span>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+              <div className="quick-command">
+                <p>After install, on the client machine:</p>
+                <pre><code>{`portmap-client setup\nportmap-client connect <IP-or-SSH-target>`}</code></pre>
+                <p>Setup may request administrator permission for local split DNS; it does not start a server on this machine.</p>
+              </div>
+            </>
+          )}
+        </div>
+      </details>
+    </section>
+  );
+}
+
 function DnsStatus({ catalog }) {
   const [status, setStatus] = useState("checking");
   if (!catalog) {
@@ -1096,6 +1210,7 @@ function CatalogApp() {
       </header>
       <ActionMessage message={actionMessage} />
       <ActionLog entries={actionLog} />
+      <ClientDownloadPanel catalog={catalog} />
       {error ? (
         <section className="catalog-tree" data-catalog-tree>
           <div className="empty load-error">{error}</div>

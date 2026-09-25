@@ -16,3 +16,10 @@
   links. Verify real Docker/Podman Debian VM access, ordinary .coder SSH
   configuration, browser routing, private-state cleanup and immediate restart
   behavior. Homebrew supplies the native CoreDNS and Traefik dependencies.
+- Release `V0.7` from `dev`: distribute an independent `portmap-client` bundle
+  through the catalog web page, with versioned manifests, verified archives,
+  and a user-space installer. Publish the verified Linux amd64/glibc 2.31+
+  artifact; remove client commands and native-client dependencies from the
+  server installation path. Verify frozen execution without Python/Homebrew,
+  real SSH/DNS access and teardown, browser downloads, installed server assets,
+  and 147 focused regressions.
