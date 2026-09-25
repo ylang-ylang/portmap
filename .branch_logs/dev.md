@@ -91,3 +91,8 @@
   real empty-cache downloads in the catalog image and a causal regression
   (old predicate fails, fixed predicate passes); 99 focused tests pass.
   Prepare matching 0.8.0 server and standalone client artifacts.
+- Merge `feat/hostname-domain-default`: remove the source config's fixed
+  legacy DNS domain so the server CLI inherits the per-host `.portmap` default.
+  Use installed server ownership and user configuration for the deployment;
+  refresh application endpoints and replace the legacy DNS rule with the
+  independent client's split DNS.
