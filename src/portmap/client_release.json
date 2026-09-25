@@ -1,13 +1,13 @@
 {
-  "version": "0.7.0",
+  "version": "0.8.0",
   "assets": [
     {
       "os": "linux",
       "arch": "amd64",
-      "filename": "portmap-client-0.7.0-linux-amd64.tar.gz",
-      "sha256": "d24c227ed34455937896eaa01082c4fbce60b55f3cf9d3dd25e5fb520614cf6b",
-      "size": 79896223,
-      "source_url": "https://github.com/ylang-ylang/portmap/releases/download/V0.7/portmap-client-0.7.0-linux-amd64.tar.gz"
+      "filename": "portmap-client-0.8.0-linux-amd64.tar.gz",
+      "sha256": "a09fbb996f9eba6acfbc8f549f60e8c430e75f2a17d99d8e6581522244c1d5be",
+      "size": 79897131,
+      "source_url": "https://github.com/ylang-ylang/portmap/releases/download/V0.8/portmap-client-0.8.0-linux-amd64.tar.gz"
     }
   ]
 }

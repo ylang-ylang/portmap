@@ -23,3 +23,8 @@
   server installation path. Verify frozen execution without Python/Homebrew,
   real SSH/DNS access and teardown, browser downloads, installed server assets,
   and 147 focused regressions.
+- Release `V0.8` from `dev`: fix cold-cache downloads through signed GitHub
+  asset-CDN URLs while retaining all redirect trust checks. Preserve V0.7
+  immutability; publish matching 0.8.0 package/client metadata and artifacts.
+  Verify real upstream fetching with no monkeypatches, 99 focused regressions,
+  causal pre-fix failure, and the rebuilt standalone bundle without Python.

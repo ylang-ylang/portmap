@@ -78,6 +78,10 @@ advertises only manifest-backed platforms. `/install-client.sh` verifies and
 extracts the flat archive into an owned versioned directory and creates a
 user-space executable symlink. Installation never starts services or edits DNS.
 The currently shipped standalone target is Linux amd64, glibc 2.31+.
+Manifest URLs pin query-free canonical GitHub release URLs. Redirects may carry
+signed queries only on trusted GitHub asset CDN hosts; every hop still rejects
+HTTP, credentials, explicit ports, fragments, and untrusted hosts. The downloaded
+bytes must match the manifest's size and SHA-256 before entering the cache.
 
 ```text
 local resolver -- .portmap only --> local CoreDNS

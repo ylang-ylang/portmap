@@ -2,7 +2,7 @@
 
 from importlib import import_module
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 # Keep the existing Python API lazy: importing the standalone client must not
 # import the Compose planner or other server runtime modules.
