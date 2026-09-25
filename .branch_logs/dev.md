@@ -86,3 +86,8 @@
   downloads. Remove client commands from the server CLI and document migration.
   Verify the real archive, isolated installer, browser UI, SSH/DNS lifecycle,
   installed server wheel, and 147 focused regressions.
+- Merge `feat/client-download-redirect`: allow GitHub's signed asset-CDN
+  redirects without weakening canonical URL or redirect trust checks. Verify
+  real empty-cache downloads in the catalog image and a causal regression
+  (old predicate fails, fixed predicate passes); 99 focused tests pass.
+  Prepare matching 0.8.0 server and standalone client artifacts.

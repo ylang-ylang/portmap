@@ -10,6 +10,8 @@ import tarfile
 import threading
 import time
 import urllib.error
+import urllib.request
+import urllib.response
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -35,8 +37,8 @@ from portmap.client_downloads import (
 )
 
 VERSION = __version__
-LINUX_ASSET = "portmap-client-0.7.0-linux-amd64.tar.gz"
-DARWIN_ASSET = "portmap-client-0.7.0-darwin-arm64.tar.gz"
+LINUX_ASSET = f"portmap-client-{VERSION}-linux-amd64.tar.gz"
+DARWIN_ASSET = f"portmap-client-{VERSION}-darwin-arm64.tar.gz"
 
 
 @pytest.fixture(autouse=True)
@@ -206,7 +208,7 @@ def test_parse_client_release_accepts_valid_manifest() -> None:
             id="filename-version",
         ),
         pytest.param(
-            lambda p: p["assets"][0].update(filename="portmap-client-0.7.0-darwin-amd64.tar.gz"),
+            lambda p: p["assets"][0].update(filename=f"portmap-client-{VERSION}-darwin-amd64.tar.gz"),
             "does not match its platform",
             id="filename-platform",
         ),
@@ -312,6 +314,39 @@ def test_trusted_redirect_handler_blocks_untrusted_hops() -> None:
         handler.redirect_request(None, None, 302, "Found", {}, "https://evil.example/asset.tgz")
     with pytest.raises(urllib.error.URLError, match="untrusted redirect target"):
         handler.redirect_request(None, None, 302, "Found", {}, "http://github.com/asset.tgz")
+
+
+def test_downloads_follow_signed_cdn_redirect_into_verified_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    archive = fake_client_archive()
+    asset = asset_payload(sha256=sha256_hex(archive), size=len(archive))
+    publish_manifest(monkeypatch, tmp_path, {"version": VERSION, "assets": [asset]})
+    signed_url = (
+        "https://release-assets.githubusercontent.com/github-production-release-asset/asset"
+        "?sp=r&sig=encoded%2Bsignature%3D&jwt=signed-token"
+    )
+    responses = {
+        asset["source_url"]: (302, {"location": signed_url}, b""),
+        signed_url: (200, {}, archive),
+    }
+
+    class AssetHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, request):
+            # Only the transport is replaced: urllib follows the real redirect
+            # policy, and losing the signed query makes the asset unavailable.
+            if request.full_url not in responses:
+                raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+            code, headers, body = responses[request.full_url]
+            response = urllib.response.addinfourl(io.BytesIO(body), headers, request.full_url, code)
+            response.msg = "Found" if code == 302 else "OK"
+            return response
+
+    monkeypatch.setattr(
+        "portmap.client_downloads.trusted_opener",
+        lambda: urllib.request.build_opener(AssetHTTPSHandler(), TrustedAssetRedirectHandler()),
+    )
+    assert resolve_client_archive(LINUX_ASSET).read_bytes() == archive
 
 
 def test_client_release_state_reports_missing_manifest(

@@ -1,6 +1,6 @@
 [project]
 name = "portmap"
-version = "0.7.0"
+version = "0.8.0"
 description = "Branch-scoped port and Traefik label generator for docker-compose projects."
 readme = "README.md"
 requires-python = ">=3.11"
