@@ -175,9 +175,15 @@ fi
 # --- download and verify ---------------------------------------------------
 note "Downloading $filename ($expected_size bytes)"
 ARCHIVE_TMP=$(mktemp "${TMPDIR:-/tmp}/portmap-client.XXXXXX")
-curl -fsSL "$ORIGIN/downloads/client/$filename" -o "$ARCHIVE_TMP" \
+# The installer's stdin is a pipe; progress belongs on terminal stderr.
+curl_progress=--silent
+if [ -t 2 ]; then
+    curl_progress=--no-silent
+fi
+curl -fSL "$curl_progress" "$ORIGIN/downloads/client/$filename" -o "$ARCHIVE_TMP" \
     || die "failed to download $ORIGIN/downloads/client/$filename"
 
+note "Verifying download..."
 actual_size=$(wc -c < "$ARCHIVE_TMP" | tr -d ' ')
 [ "$actual_size" = "$expected_size" ] \
     || die "downloaded size mismatch: expected $expected_size, got $actual_size"
@@ -198,6 +204,7 @@ fi
 # --- stage, then swap in atomically ----------------------------------------
 mkdir -p "$INSTALL_ROOT"
 STAGE_DIR=$(mktemp -d "$INSTALL_ROOT/.stage.XXXXXX")
+note "Extracting client..."
 if ! tar -xzf "$ARCHIVE_TMP" -C "$STAGE_DIR"; then
     rm -rf "$STAGE_DIR"; STAGE_DIR=
     die "failed to extract $filename"

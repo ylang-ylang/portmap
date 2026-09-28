@@ -1,9 +1,11 @@
+import errno
 import hashlib
 import http.client
 import http.server
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -848,6 +850,59 @@ def test_installer_end_to_end_from_catalog(
     # A managed reinstall of the same version upgrades in place.
     again = run_installer(catalog.origin, installer_home=installer_home)
     assert again.returncode == 0, again.stderr
+    assert_installed(installer_home)
+
+
+@pytest.mark.parametrize("stderr_is_terminal", [True, False], ids=["stderr-tty", "stdout-tty"])
+def test_piped_installer_progress_follows_stderr(
+    stderr_is_terminal: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    catalog: CatalogServer,
+    installer_home: SimpleNamespace,
+) -> None:
+    publish_release(monkeypatch, tmp_path, archive=fake_client_archive())
+    master, slave = os.openpty()
+    try:
+        result = subprocess.run(
+            ["sh", "-s", "--", catalog.origin],
+            input=INSTALL_SCRIPT_PATH.read_bytes(),
+            stdout=subprocess.PIPE if stderr_is_terminal else slave,
+            stderr=slave if stderr_is_terminal else subprocess.PIPE,
+            env={
+                "HOME": str(installer_home.home),
+                "XDG_DATA_HOME": str(installer_home.data),
+                "TMPDIR": str(installer_home.tmp),
+                "PATH": os.environ["PATH"],
+                "LC_ALL": "C",
+            },
+            timeout=30,
+        )
+        os.close(slave)
+        slave = None
+        chunks = []
+        while True:
+            try:
+                chunk = os.read(master, 8192)
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        terminal_output = b"".join(chunks)
+    finally:
+        if slave is not None:
+            os.close(slave)
+        os.close(master)
+
+    assert result.returncode == 0, result.stderr or terminal_output
+    if stderr_is_terminal:
+        assert re.search(rb"(?:^|\r)\s*100\s", terminal_output)
+        assert b"\r" not in result.stdout
+    else:
+        assert result.stderr == b""
     assert_installed(installer_home)
 
 
