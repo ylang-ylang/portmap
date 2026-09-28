@@ -432,6 +432,10 @@ bundle under `${XDG_DATA_HOME:-$HOME/.local/share}/portmap-client/<version>` and
 an executable symlink at `~/.local/bin/portmap-client`. Keep the whole bundle:
 the executable uses its adjacent `_internal` directory. The installer refuses
 to replace unrelated files or accept an unsafe or checksum-mismatched archive.
+When stderr is a terminal, downloads show percentage, received bytes, transfer
+speed, and estimated time remaining, including when the installer is piped into
+`sh`. Redirected/non-interactive logs omit the progress meter but retain errors
+and verification/extraction stage messages.
 
 **Migrating from 0.6:** if the old combined CLI has active client connections,
 run `portmap client teardown` with that old version before upgrading the server

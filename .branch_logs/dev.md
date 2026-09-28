@@ -96,3 +96,7 @@
   Use installed server ownership and user configuration for the deployment;
   refresh application endpoints and replace the legacy DNS rule with the
   independent client's split DNS.
+- Merge `feat/client-download-progress`: show download percentage, bytes,
+  rate and remaining time on terminal stderr, preserving clean redirected logs
+  and visible errors. Add verification/extraction stages; verify piped-input
+  and independent output descriptors with 66 regressions and real CLI installs.
