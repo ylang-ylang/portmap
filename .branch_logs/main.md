@@ -28,3 +28,8 @@
   immutability; publish matching 0.8.0 package/client metadata and artifacts.
   Verify real upstream fetching with no monkeypatches, 99 focused regressions,
   causal pre-fix failure, and the rebuilt standalone bundle without Python.
+- Release `V0.9` from `dev`: display real terminal download progress in the
+  piped client installer, keep non-terminal output quiet with visible failures,
+  and announce verification/extraction stages. Verify the descriptor boundary
+  with 66 focused regressions and actual archive installation under a PTY.
+  Include the hostname-derived source gateway default.
