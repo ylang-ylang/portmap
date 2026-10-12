@@ -6,6 +6,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .client_runtime import native_environment
 from .slug import slugify
 
 
@@ -91,6 +92,7 @@ def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
+        env=native_environment(),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

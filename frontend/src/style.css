@@ -47,7 +47,6 @@ h1 {
 .project-group,
 .worktree-group,
 .branch-group,
-.dns-probe,
 .quick-setup {
   border: 1px solid #d9e0e8;
   background: #ffffff;
@@ -891,14 +890,14 @@ pre {
 }
 
 
-/* client download panel */
-.client-platform-list {
+/* portmap download panel */
+.portmap-platform-list {
   list-style: none;
   margin: 8px 0 0;
   padding: 0;
 }
 
-.client-platform-item {
+.portmap-platform-item {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -906,11 +905,11 @@ pre {
   border-bottom: 1px solid #e6ebf1;
 }
 
-.client-platform-item:last-child {
+.portmap-platform-item:last-child {
   border-bottom: 0;
 }
 
-.client-platform-badge {
+.portmap-platform-badge {
   min-width: 90px;
   display: inline-block;
   background: #dbeafe;
@@ -923,7 +922,7 @@ pre {
   max-width: none;
 }
 
-.client-platform-link {
+.portmap-platform-link {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -931,13 +930,13 @@ pre {
   white-space: nowrap;
 }
 
-.client-platform-size {
+.portmap-platform-size {
   color: #52606d;
   font-size: 13px;
   white-space: nowrap;
 }
 
-.client-platform-tag {
+.portmap-platform-tag {
   font-size: 12px;
   color: #15803d;
   background: #dcfce7;
@@ -947,38 +946,38 @@ pre {
   white-space: nowrap;
 }
 
-.client-platform-req {
+.portmap-platform-req {
   font-size: 12px;
   color: #6b7280;
   white-space: nowrap;
   font-style: italic;
 }
 
-.client-platform-suggested .client-platform-link {
+.portmap-platform-suggested .portmap-platform-link {
   font-weight: 600;
 }
 
-.client-platforms-label {
+.portmap-platforms-label {
   color: #52606d;
   font-size: 14px;
   margin-bottom: 4px;
 }
 
-.client-download-notice {
+.portmap-download-notice {
   margin: 0;
 }
 
-.client-download-error {
+.portmap-download-error {
   color: #9f1d16;
 }
 
-.client-download summary {
+.portmap-download summary {
   display: flex;
   align-items: center;
   gap: 7px;
 }
 
-.dns-status {
+.access-status {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -990,7 +989,7 @@ pre {
   white-space: nowrap;
 }
 
-.dns-status-image {
+.access-status-image {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -998,130 +997,33 @@ pre {
   pointer-events: none;
 }
 
-.dns-status-label {
+.access-status-label {
   font-weight: 700;
 }
 
-.dns-status-value {
+.access-status-value {
   text-transform: uppercase;
   font-weight: 700;
 }
 
-.dns-status-ok {
+.access-status-ok {
   border-color: #16a34a;
   background: #dcfce7;
   color: #14532d;
 }
 
-.dns-status-failed {
+.access-status-failed {
   border-color: #dc2626;
   background: #fee2e2;
   color: #7f1d1d;
 }
 
-.dns-status-checking {
+.access-status-checking {
   border-color: #1d4ed8;
   background: #eff6ff;
   color: #1e40af;
 }
 
-.dns-probe {
-  margin-top: 16px;
-}
-
-.dns-probe-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
-  background: #eef2f6;
-  border-bottom: 1px solid #d9e0e8;
-}
-
-.dns-probe-header h2 {
-  margin: 0 0 4px;
-  font-size: 16px;
-  font-weight: 700;
-}
-
-.dns-probe-header p {
-  margin: 0;
-  color: #52606d;
-  font-size: 14px;
-}
-
-.dns-probe-status {
-  border: 1px solid #9aa7b4;
-  padding: 5px 8px;
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.dns-probe-status-ok {
-  border-color: #16a34a;
-  background: #dcfce7;
-  color: #14532d;
-}
-
-.dns-probe-status-failed {
-  border-color: #dc2626;
-  background: #fee2e2;
-  color: #7f1d1d;
-}
-
-.dns-probe-status-checking {
-  border-color: #9aa7b4;
-  background: #f8fafc;
-  color: #283544;
-}
-
-.dns-probe-body {
-  display: grid;
-  grid-template-columns: 200px minmax(0, 1fr);
-  gap: 14px;
-  padding: 14px;
-}
-
-.dns-probe-image-frame {
-  min-height: 64px;
-  display: grid;
-  place-items: center;
-  border: 1px dashed #cbd5e1;
-  background: #f8fafc;
-}
-
-.dns-probe-image {
-  max-width: 180px;
-  min-height: 48px;
-}
-
-.is-hidden {
-  display: none;
-}
-
-.dns-probe-image[src=""] {
-  display: none;
-}
-
-.dns-probe-details {
-  min-width: 0;
-}
-
-.dns-probe-label {
-  margin-bottom: 4px;
-  color: #52606d;
-  font-size: 12px;
-  text-transform: uppercase;
-}
-
-.dns-probe-details p {
-  margin: 8px 0 0;
-  color: #52606d;
-  font-size: 14px;
-}
 
 @media (max-width: 760px) {
   body {
@@ -1130,8 +1032,7 @@ pre {
 
   .project-summary,
   .branch-summary,
-  .quick-setup-actions,
-  .dns-probe-header {
+  .quick-setup-actions {
     flex-direction: column;
   }
 
@@ -1154,10 +1055,6 @@ pre {
     right: auto;
   }
 
-  .dns-probe-body {
-    grid-template-columns: 1fr;
-  }
-
   .action-log-entry {
     grid-template-columns: 1fr;
   }
@@ -1173,17 +1070,13 @@ pre {
   .project-meta,
   .branch-meta,
   .project-id,
-  .quick-setup p,
-  .dns-probe-header p,
-  .dns-probe-details p,
-  .dns-probe-label {
+  .quick-setup p {
     color: #a7b2bf;
   }
 
   .project-group,
   .worktree-group,
   .branch-group,
-  .dns-probe,
   .quick-setup,
   .empty {
     background: #171d23;
@@ -1206,7 +1099,6 @@ pre {
   .project-header,
   .worktree-header,
   .quick-setup summary,
-  .dns-probe-header,
   th {
     background: #202832;
   }
@@ -1224,9 +1116,7 @@ pre {
   .branch-summary,
   .branch-header,
   .action-button,
-  .copy-button,
-  .dns-probe-image-frame,
-  .dns-probe-status-checking {
+  .copy-button {
     background: #151b22;
   }
 
@@ -1248,7 +1138,6 @@ pre {
   .running-row,
   .dead-list,
   .dead-row,
-  .dns-probe-header,
   th,
   td {
     border-color: #2b3540;
@@ -1257,8 +1146,7 @@ pre {
   .action-button,
   .copy-button,
   .running-menu-button,
-  .dead-menu-button,
-  .dns-probe-status-checking {
+  .dead-menu-button {
     color: #eef2f6;
     border-color: #52606d;
   }
@@ -1378,25 +1266,25 @@ pre {
     border-color: #3b4652;
   }
 
-  .dns-status {
+  .access-status {
     background: #202832;
     color: #cbd5e1;
     border-color: #52606d;
   }
 
-  .dns-status-ok {
+  .access-status-ok {
     background: #12331f;
     color: #bbf7d0;
     border-color: #16a34a;
   }
 
-  .dns-status-failed {
+  .access-status-failed {
     background: #3b1717;
     color: #fecaca;
     border-color: #b42318;
   }
 
-  .dns-status-checking {
+  .access-status-checking {
     background: #172554;
     color: #bfdbfe;
     border-color: #1d4ed8;
@@ -1414,29 +1302,29 @@ pre {
     color: #7dd3fc;
   }
 
-  .client-platform-item {
+  .portmap-platform-item {
     border-color: #2b3540;
   }
 
-  .client-platform-badge {
+  .portmap-platform-badge {
     background: #1e3a5f;
     color: #93c5fd;
     border-color: #3b82f6;
   }
 
-  .client-platform-size,
-  .client-platforms-label,
-  .client-platform-req {
+  .portmap-platform-size,
+  .portmap-platforms-label,
+  .portmap-platform-req {
     color: #a7b2bf;
   }
 
-  .client-platform-tag {
+  .portmap-platform-tag {
     color: #86efac;
     background: #14532d;
     border-color: #16a34a;
   }
 
-  .client-download-error {
+  .portmap-download-error {
     color: #fca5a5;
   }
 }

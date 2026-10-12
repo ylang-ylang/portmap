@@ -17,13 +17,15 @@ from typing import Any
 
 from .agent_client import AgentUnavailable, agent_compose_up_worktree, agent_worktrees
 from .broker import ENDPOINT_CONFIG, ensure_generated_override
-from .client_downloads import (
-    CLIENT_DOWNLOADS_PREFIX,
+from .client_runtime import native_environment
+from .downloads import (
+    ARCHIVE_CONTENT_TYPE,
+    DOWNLOADS_PREFIX,
     INSTALL_SCRIPT_CONTENT_TYPE,
-    ClientDownloadUnavailable,
-    client_download_info,
+    DownloadUnavailable,
+    download_info,
     install_script_body,
-    resolve_client_archive,
+    resolve_archive,
 )
 from .compose_takeover import find_compose_file, generated_compose_project, plan_docker_compose_command
 from .repo_identity import git, git_branch, resolve_repo_identity, stable_hash
@@ -33,7 +35,7 @@ from .web_static import StaticHandler, vite_public_root_asset
 
 
 DOCKER_SOCKET = os.environ.get("PORTMAP_DOCKER_SOCKET", "/var/run/docker.sock")
-HTTP_PORT = int(os.environ.get("PORTMAP_HTTP_PORT", "8080"))
+HTTP_PORT = int(os.environ.get("PORTMAP_HTTP_PORT", "80"))
 DNS_DOMAIN = os.environ.get("PORTMAP_DNS_DOMAIN", "portmap").strip(".")
 DNS_BIND = os.environ.get("PORTMAP_DNS_BIND", "127.0.0.1")
 DNS_TARGET_IP = os.environ.get("PORTMAP_DNS_TARGET_IP", "127.0.0.1")
@@ -916,7 +918,7 @@ def compose_up_worktree(worktree: str) -> dict[str, Any]:
     if not plan.injected:
         raise RuntimeError("generated compose override was not available for docker compose up")
 
-    env = os.environ.copy()
+    env = native_environment()
     env["PORTMAP_BROKER_BYPASS"] = "1"
     # Read at call time: the host agent receives the runtime socket through
     # PORTMAP_DOCKER_SOCKET; the in-container fallback uses the mount target.
@@ -1134,17 +1136,17 @@ class CatalogHandler(StaticHandler):
             self.write_json(catalog, send_body=send_body)
             return
 
-        if parsed.path == "/api/client":
-            self.write_json(client_download_info(), send_body=send_body)
+        if parsed.path == "/api/downloads":
+            self.write_json(download_info(), send_body=send_body)
             return
 
-        if parsed.path == "/install-client.sh":
-            self.handle_install_client_script(send_body=send_body)
+        if parsed.path == "/install.sh":
+            self.handle_install_script(send_body=send_body)
             return
 
-        if parsed.path.startswith(CLIENT_DOWNLOADS_PREFIX):
-            requested = parsed.path[len(CLIENT_DOWNLOADS_PREFIX):]
-            self.handle_client_download(urllib.parse.unquote(requested), send_body=send_body)
+        if parsed.path.startswith(DOWNLOADS_PREFIX):
+            requested = parsed.path[len(DOWNLOADS_PREFIX):]
+            self.handle_download(urllib.parse.unquote(requested), send_body=send_body)
             return
 
         public_asset = vite_public_root_asset(parsed.path)
@@ -1224,18 +1226,11 @@ class CatalogHandler(StaticHandler):
                 send_body=True,
             )
 
-    def write_client_error(self, status: int, message: str, *, send_body: bool) -> None:
-        self.send_response(status)
-        self.send_header("content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        if send_body:
-            self.wfile.write(f"{message}\n".encode("utf-8"))
-
-    def handle_install_client_script(self, *, send_body: bool) -> None:
+    def handle_install_script(self, *, send_body: bool) -> None:
         try:
             body = install_script_body()
-        except ClientDownloadUnavailable as exc:
-            self.write_client_error(exc.status, exc.message, send_body=send_body)
+        except DownloadUnavailable as exc:
+            self.write_json({"error": exc.message}, status=exc.status, send_body=send_body)
             return
         self.send_response(200)
         self.send_header("content-type", INSTALL_SCRIPT_CONTENT_TYPE)
@@ -1244,15 +1239,15 @@ class CatalogHandler(StaticHandler):
         if send_body:
             self.wfile.write(body)
 
-    def handle_client_download(self, filename: str, *, send_body: bool) -> None:
+    def handle_download(self, filename: str, *, send_body: bool) -> None:
         try:
-            archive = resolve_client_archive(filename)
-        except ClientDownloadUnavailable as exc:
-            self.write_client_error(exc.status, exc.message, send_body=send_body)
+            archive = resolve_archive(filename)
+        except DownloadUnavailable as exc:
+            self.write_json({"error": exc.message}, status=exc.status, send_body=send_body)
             return
         size = archive.stat().st_size
         self.send_response(200)
-        self.send_header("content-type", "application/gzip")
+        self.send_header("content-type", ARCHIVE_CONTENT_TYPE)
         self.send_header("content-length", str(size))
         self.end_headers()
         if not send_body:

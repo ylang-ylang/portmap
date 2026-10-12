@@ -66,7 +66,7 @@ class GenerateRequest:
     repo_root: Path | None = None
     repo_id: str | None = None
     repo_name: str | None = None
-    http_port: int = 8080
+    http_port: int = 80
     tcp_port_start: int = 18000
     udp_port_start: int = 19000
     range_port_start: int = 49160

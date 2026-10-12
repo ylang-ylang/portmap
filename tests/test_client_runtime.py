@@ -8,7 +8,7 @@ from portmap import client_runtime
 
 
 def simulate_frozen(monkeypatch, bundle: Path):
-    executable = bundle / "portmap-client"
+    executable = bundle / "portmap"
     executable.write_text("#!/bin/sh\n:", encoding="utf-8")
     executable.chmod(0o755)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
@@ -16,25 +16,49 @@ def simulate_frozen(monkeypatch, bundle: Path):
     return executable
 
 
-def test_state_dir_prefers_explicit_override(monkeypatch, tmp_path):
-    monkeypatch.setenv("PORTMAP_CLIENT_STATE_DIR", str(tmp_path / "custom"))
+def test_state_dir_prefers_explicit_isolation_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("PORTMAP_CLIENT_STATE_DIR", str(tmp_path / "isolated"))
+    monkeypatch.setenv("PORTMAP_STATE_DIR", str(tmp_path / "shared"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
-    assert client_runtime.client_state_dir() == (tmp_path / "custom").resolve()
+    assert client_runtime.client_state_dir() == (tmp_path / "isolated").resolve()
 
 
-def test_state_dir_uses_xdg_then_home_default(monkeypatch, tmp_path):
+def test_state_dir_uses_shared_root_then_xdg_then_home_default(monkeypatch, tmp_path):
     monkeypatch.delenv("PORTMAP_CLIENT_STATE_DIR", raising=False)
+    monkeypatch.setenv("PORTMAP_STATE_DIR", str(tmp_path / "shared"))
+    assert client_runtime.client_state_dir() == (tmp_path / "shared" / "client").resolve()
+    monkeypatch.delenv("PORTMAP_STATE_DIR")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
-    assert client_runtime.client_state_dir() == (tmp_path / "xdg" / "portmap-client").resolve()
+    assert client_runtime.client_state_dir() == (tmp_path / "xdg" / "portmap" / "client").resolve()
     monkeypatch.delenv("XDG_STATE_HOME")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    assert client_runtime.client_state_dir() == (tmp_path / "home" / ".local" / "state" / "portmap-client").resolve()
+    assert client_runtime.client_state_dir() == (tmp_path / "home" / ".local" / "state" / "portmap" / "client").resolve()
+
+
+def test_legacy_state_dir_is_the_standalone_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    assert client_runtime.legacy_client_state_dir() == (tmp_path / "xdg" / "portmap-client").resolve()
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert client_runtime.legacy_client_state_dir() == (tmp_path / "home" / ".local" / "state" / "portmap-client").resolve()
+
+
+def test_bundled_binaries_resolve_from_native_bin(monkeypatch, tmp_path):
+    # The bundle ships native binaries under portmap/native_bin; the constant
+    # must keep pointing there so frozen children resolve them.
+    assert client_runtime.BUNDLED_BIN_DIR.name == "native_bin"
+    monkeypatch.setattr(client_runtime, "BUNDLED_BIN_DIR", tmp_path / "native_bin")
+    (tmp_path / "native_bin").mkdir()
+    bundled = tmp_path / "native_bin" / "traefik"
+    bundled.write_text("#!/bin/sh\n:", encoding="utf-8")
+    bundled.chmod(0o755)
+    assert client_runtime.find_native_binary("traefik") == bundled
 
 
 def test_bundled_binary_wins_over_path_and_requires_executable_bit(monkeypatch, tmp_path):
-    monkeypatch.setattr(client_runtime, "BUNDLED_BIN_DIR", tmp_path / "client_bin")
-    (tmp_path / "client_bin").mkdir()
-    bundled = tmp_path / "client_bin" / "coredns"
+    monkeypatch.setattr(client_runtime, "BUNDLED_BIN_DIR", tmp_path / "native_bin")
+    (tmp_path / "native_bin").mkdir()
+    bundled = tmp_path / "native_bin" / "coredns"
     bundled.write_text("#!/bin/sh\n:", encoding="utf-8")
     bundled.chmod(0o755)
     on_path = tmp_path / "on-path"

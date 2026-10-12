@@ -1,25 +1,36 @@
 #!/bin/sh
-# portmap-client installer.
+# portmap installer.
 #
-# Install the standalone client from a portmap catalog server:
-#   curl -fsSL <origin>/install-client.sh | sh -s -- <origin>
+# Install the standalone portmap command from a portmap catalog server:
+#   curl -fsSL <origin>/install.sh | sh -s -- <origin>
 #
 # Requirements: POSIX sh, curl, tar, awk, grep, readlink and a sha256 tool
 # (sha256sum or shasum). No sudo, Python, jq, Brew, or autostart. Installs a
-# versioned bundle under ${XDG_DATA_HOME:-$HOME/.local/share}/portmap-client
-# and manages an atomic ~/.local/bin/portmap-client symlink.
+# versioned bundle under ${XDG_DATA_HOME:-$HOME/.local/share}/portmap and
+# manages an atomic ~/.local/bin/portmap symlink. Installing does NOT
+# configure DNS or take over port 80. Setup configures split DNS; SSH
+# connections and local publishing use the shared private HTTP ingress.
 
 set -eu
 
-PROGRAM=portmap-client
-MANIFEST_PATH=/api/client
-INSTALL_ROOT=${XDG_DATA_HOME:-$HOME/.local/share}/portmap-client
+PROGRAM=portmap
+MANIFEST_PATH=/api/downloads
+INSTALL_ROOT=${XDG_DATA_HOME:-$HOME/.local/share}/portmap
 BIN_DIR=$HOME/.local/bin
 BIN_LINK=$BIN_DIR/$PROGRAM
-MARKER=.portmap-client-install
+MARKER=.portmap-install
+
+# Legacy standalone-client installs owned by the previous installer. Old
+# bundles are deliberately RETAINED: running portmap-client workers live in
+# them until the unified `portmap setup` migration stops them safely. Only a
+# launcher that positively points into the legacy bundle root is removed.
+LEGACY_PROGRAM=portmap-client
+LEGACY_INSTALL_ROOT=${XDG_DATA_HOME:-$HOME/.local/share}/portmap-client
+LEGACY_BIN_LINK=$BIN_DIR/$LEGACY_PROGRAM
+LEGACY_MARKER=.portmap-client-install
 
 note() { printf '%s\n' "$*"; }
-die() { printf 'install-client: %s\n' "$*" >&2; exit 1; }
+die() { printf 'install: %s\n' "$*" >&2; exit 1; }
 
 ARCHIVE_TMP=
 STAGE_DIR=
@@ -31,7 +42,7 @@ cleanup() {
 trap cleanup EXIT
 
 # --- origin argument -------------------------------------------------------
-[ "$#" -eq 1 ] || die "usage: install-client.sh <origin>  (e.g. https://catalog.example.com)"
+[ "$#" -eq 1 ] || die "usage: install.sh <origin>  (e.g. https://catalog.example.com)"
 ORIGIN=$1
 case $ORIGIN in
     http://*|https://*) ;;
@@ -101,11 +112,11 @@ if [ "$CLIENT_OS" = linux ]; then
 fi
 
 # --- manifest --------------------------------------------------------------
-note "Fetching client manifest from $ORIGIN$MANIFEST_PATH"
+note "Fetching portmap release manifest from $ORIGIN$MANIFEST_PATH"
 manifest=$(curl -fsSL "$ORIGIN$MANIFEST_PATH") || die "failed to fetch $ORIGIN$MANIFEST_PATH"
 case $manifest in
-    *'"available": true'*|*'"available":true'*) ;;
-    *) die "server reports client downloads as unavailable" ;;
+    *"available"*true*) ;;
+    *) die "server reports portmap downloads as unavailable" ;;
 esac
 
 version=$(printf '%s\n' "$manifest" | awk '
@@ -131,7 +142,10 @@ entry=$(printf '%s\n' "$manifest" | awk -v os="\"os\": \"$CLIENT_OS\"" -v arch="
         if (match($0, /"size": [0-9]+/)) {
             size = substr($0, RSTART + 8, RLENGTH - 8)
         }
-        printf "%s %s %s\n", filename, sha, size
+        if (match($0, /"source_url": "[^"]+"/)) {
+            source_url = substr($0, RSTART + 15, RLENGTH - 16)
+        }
+        printf "%s %s %s %s\n", filename, sha, size, source_url
         exit
     }
 ')
@@ -139,6 +153,7 @@ set -- $entry
 filename=${1:-}
 expected_sha=${2:-}
 expected_size=${3:-}
+source_url=${4:-}
 [ -n "$filename" ] || die "no download published for $CLIENT_OS/$CLIENT_ARCH"
 case $filename in
     "$PROGRAM-$version-"*.tar.gz) ;;
@@ -153,6 +168,11 @@ esac
 [ "${#expected_sha}" -eq 64 ] || die "manifest checksum is malformed for $filename"
 case $expected_size in
     ''|*[!0-9]*) die "manifest size is malformed for $filename" ;;
+esac
+
+case $source_url in
+    https://github.com/ylang-ylang/portmap/releases/download/*"$filename") ;;
+    *) die "manifest did not pin a trusted source URL for $filename" ;;
 esac
 
 # --- refuse to clobber unrelated state before touching anything ------------
@@ -174,14 +194,14 @@ fi
 
 # --- download and verify ---------------------------------------------------
 note "Downloading $filename ($expected_size bytes)"
-ARCHIVE_TMP=$(mktemp "${TMPDIR:-/tmp}/portmap-client.XXXXXX")
+ARCHIVE_TMP=$(mktemp "${TMPDIR:-/tmp}/portmap.XXXXXX")
 # The installer's stdin is a pipe; progress belongs on terminal stderr.
 curl_progress=--silent
 if [ -t 2 ]; then
     curl_progress=--no-silent
 fi
-curl -fSL "$curl_progress" "$ORIGIN/downloads/client/$filename" -o "$ARCHIVE_TMP" \
-    || die "failed to download $ORIGIN/downloads/client/$filename"
+curl -fSL "$curl_progress" "$ORIGIN/downloads/portmap/$filename" -o "$ARCHIVE_TMP" \
+    || die "failed to download $ORIGIN/downloads/portmap/$filename"
 
 note "Verifying download..."
 actual_size=$(wc -c < "$ARCHIVE_TMP" | tr -d ' ')
@@ -204,7 +224,7 @@ fi
 # --- stage, then swap in atomically ----------------------------------------
 mkdir -p "$INSTALL_ROOT"
 STAGE_DIR=$(mktemp -d "$INSTALL_ROOT/.stage.XXXXXX")
-note "Extracting client..."
+note "Extracting portmap..."
 if ! tar -xzf "$ARCHIVE_TMP" -C "$STAGE_DIR"; then
     rm -rf "$STAGE_DIR"; STAGE_DIR=
     die "failed to extract $filename"
@@ -220,7 +240,20 @@ if [ ! -x "$STAGE_DIR/$PROGRAM" ]; then
     rm -rf "$STAGE_DIR"; STAGE_DIR=
     die "archive $filename does not ship an executable ./$PROGRAM"
 fi
-printf 'installed by install-client.sh\n' > "$STAGE_DIR/$MARKER"
+# Self-checksums cannot be embedded in the archive. Commit the verified release
+# metadata in the same staged directory, before changing the current launcher.
+if ! {
+    printf '{\n  "version": "%s",\n  "assets": [\n    {\n' "$version"
+    printf '      "os": "%s",\n      "arch": "%s",\n' "$CLIENT_OS" "$CLIENT_ARCH"
+    printf '      "filename": "%s",\n' "$filename"
+    printf '      "sha256": "%s",\n' "$expected_sha"
+    printf '      "size": %s,\n' "$expected_size"
+    printf '      "source_url": "%s"\n' "$source_url"
+    printf '    }\n  ]\n}\n'
+} > "$STAGE_DIR/release.json"; then
+    die "failed to stage the verified release manifest"
+fi
+printf 'installed by install.sh\n' > "$STAGE_DIR/$MARKER"
 rm -f "$ARCHIVE_TMP"; ARCHIVE_TMP=
 if [ -e "$target" ] || [ -L "$target" ]; then
     rm -rf "$target"
@@ -237,9 +270,49 @@ if ! mv -f "$link_tmp" "$BIN_LINK"; then
     die "failed to update $BIN_LINK"
 fi
 
+
+# --- retire the legacy standalone-client launcher ---------------------------
+# Only remove a launcher this toolchain provably owns: a symlink into the
+# legacy portmap-client bundle root. Anything else stays untouched, and the
+# old bundles always remain for the runtime state migration.
+legacy_note=
+if [ -e "$LEGACY_BIN_LINK" ] || [ -L "$LEGACY_BIN_LINK" ]; then
+    if [ -L "$LEGACY_BIN_LINK" ]; then
+        legacy_target=$(readlink "$LEGACY_BIN_LINK" 2>/dev/null || printf '%s' "")
+        case $legacy_target in
+            "$LEGACY_INSTALL_ROOT"/*"/$LEGACY_PROGRAM")
+                legacy_relative=${legacy_target#"$LEGACY_INSTALL_ROOT"/}
+                legacy_version=${legacy_relative%/"$LEGACY_PROGRAM"}
+                legacy_bundle=$LEGACY_INSTALL_ROOT/$legacy_version
+                if printf '%s\n' "$legacy_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+                    && [ ! -L "$legacy_bundle" ] \
+                    && [ -f "$legacy_bundle/$LEGACY_PROGRAM" ] \
+                    && [ ! -L "$legacy_bundle/$LEGACY_PROGRAM" ] \
+                    && [ -f "$legacy_bundle/$LEGACY_MARKER" ] \
+                    && [ ! -L "$legacy_bundle/$LEGACY_MARKER" ] \
+                    && grep -qx 'installed by install-client.sh' "$legacy_bundle/$LEGACY_MARKER"; then
+                    if rm -f "$LEGACY_BIN_LINK"; then
+                        legacy_note="removed legacy launcher $LEGACY_BIN_LINK"
+                    else
+                        legacy_note="could not remove owned legacy launcher $LEGACY_BIN_LINK; remove it manually"
+                    fi
+                else
+                    legacy_note="left unverified $LEGACY_BIN_LINK in place"
+                fi
+                ;;
+            *)
+                legacy_note="left unrelated $LEGACY_BIN_LINK in place (points to $legacy_target)"
+                ;;
+        esac
+    else
+        legacy_note="left unrelated $LEGACY_BIN_LINK in place (not installed by portmap)"
+    fi
+fi
+
 note "Installed $PROGRAM $version"
 note "  bundle: $target"
 note "  launcher: $BIN_LINK"
+note "  release manifest: $target/release.json"
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *) note "note: $BIN_DIR is not on your PATH; add it with:"
@@ -247,4 +320,9 @@ case ":$PATH:" in
 esac
 note "Next steps:"
 note "  $PROGRAM --version"
-note "  $PROGRAM --help"
+note "  $PROGRAM setup            # configure local split DNS (asks for sudo)"
+note "  $PROGRAM connect <target> # direct to a remote IP, or through SSH"
+note "  $PROGRAM up               # optional: publish local Docker/Podman projects"
+note "Installing did not configure DNS or claim port 80."
+note "Direct access needs no local HTTP listener; SSH/local publishing share the private HTTP entry."
+note "Run \`$PROGRAM status\` any time to see local publishing and access state."

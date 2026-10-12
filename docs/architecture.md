@@ -49,88 +49,102 @@ the same socket discovery but requires host sysctl tuning for the
 gateway's privileged ports; it was not part of the verification spike
 ([podman-spike.md](podman-spike.md)).
 
-## Local Client Access
+## Unified Local and Remote Access
 
-Client access is separate from the server runtime. A workstation connects to
-remote portmap gateways using exactly two transports: direct IP reachability
-(including an already configured LAN or Tailscale route), or an OpenSSH local
-forward. No Coder API, VPN implementation, or custom traffic proxy is involved.
+The public executable is `portmap`. Local publishing and remote access are
+optional roles of the same command, not separate server/client installations.
+The frozen one-directory bundle includes Python, native CoreDNS/Traefik,
+server/client modules, the host agent, gateway/demo/scaffold assets, and the
+frontend. Client-only commands do not require a container runtime.
 
-The public client command is `portmap-client`, not a subcommand of the server's
-`portmap` CLI. The downloadable one-directory bundle includes a frozen Python
-runtime and pinned CoreDNS/Traefik executables. It excludes the server CLI,
-agent, planner, container runtime integration, and server settings. Shared HTTP
-static-file support lives in `web_static.py`, so the local catalog does not
-import the server catalog. No local server installation is required.
+The frozen executable re-executes itself for catalog-view and host-agent
+workers. Native/OS subprocesses receive an environment without bundle-specific
+dynamic-library search paths. The shared state root is
+`$XDG_STATE_HOME/portmap` (default `~/.local/state/portmap`); `client/` contains
+access ownership, profiles and resolver state, while `server/` records local
+publishing ownership and the effective runtime settings.
 
-The frozen executable re-executes itself for its private catalog-view worker.
-Native and OS children receive an environment without bundle-specific dynamic
-library search paths, keeping ordinary OpenSSH and system tools independent of
-the bundled Python libraries. Client state defaults to
-`$XDG_STATE_HOME/portmap-client` (or `~/.local/state/portmap-client`), not the
-server state directory.
+Exactly two remote transports are supported: direct IP reachability,
+including existing LAN/Tailscale routing, and ordinary OpenSSH forwarding.
+No Coder API, VPN implementation, or custom HTTP data plane is introduced.
+Discovery inventories literal SSH aliases and static Include globs, not
+unknown users, keys, or workspace names. Existing authentication,
+ProxyCommand and ProxyJump remain authoritative.
 
-The server owns distribution, not workstation connection state. Its immutable
-`client_release.json` selects versioned assets with size and SHA-256; `/api/client`
-exposes same-origin download URLs, and `/downloads/client/<filename>` serves a
-verified cache entry or fetches the pinned trusted upstream. The web panel
-advertises only manifest-backed platforms. `/install-client.sh` verifies and
-extracts the flat archive into an owned versioned directory and creates a
-user-space executable symlink. Installation never starts services or edits DNS.
-The currently shipped standalone target is Linux amd64, glibc 2.31+.
-Manifest URLs pin query-free canonical GitHub release URLs. Redirects may carry
-signed queries only on trusted GitHub asset CDN hosts; every hop still rejects
-HTTP, credentials, explicit ports, fragments, and untrusted hosts. The downloaded
-bytes must match the manifest's size and SHA-256 before entering the cache.
+Direct profiles resolve to the reachable IP verified on the workstation.
+They retain the remote HTTP port and need no local HTTP gateway. Equivalent
+default-port address spellings are normalized without weakening hostname-zone
+collision checks.
 
-```text
-local resolver -- .portmap only --> local CoreDNS
-                                      |
-                         registered host zones -> 127.0.0.1
+SSH and local profiles resolve to loopback and share one public local HTTP
+port, default 80. Each SSH remote has its own private high-port forward.
+Native Traefik routes by HTTP Host; HTTP does not use TLS SNI.
 
-browser --> one local Traefik HTTP listener
-              | Host: service.branch.repo.machine.portmap
-              +--> direct remote gateway IP:port
-              +--> private SSH forward --> remote gateway:port
-
-browser --> machine.portmap catalog
-              +--> local read-only catalog view
-                     +--> remote /registry.json
-                     +--> project HTTP links onto the shared local port
+```mermaid
+flowchart LR
+  Browser[Workstation browser] --> Direct[Direct remote IP and HTTP port]
+  Browser --> Private[127.0.0.1:80 socket]
+  Private --> Native[Native Traefik: private high port]
+  Native --> SSH1[Private SSH forward 1]
+  Native --> SSH2[Private SSH forward 2]
+  Native --> Backend[Local container gateway: loopback high port]
+  LAN[LAN client] --> Public[LAN IP:80 socket]
+  Public --> Backend
+  SSH1 --> Remote1[Remote gateway 1]
+  SSH2 --> Remote2[Remote gateway 2]
+  Backend --> Projects[Local project containers and catalog]
 ```
 
-The remote catalog describes services and the remote HTTP listener; the
-workstation chooses its own connection path. Discovery can inventory positive
-literal SSH aliases and static Include globs, but does not infer unknown users,
-keys, jump paths, or workspace names. Wildcard SSH rules cannot enumerate
-machines. A manually supplied target is passed to ordinary OpenSSH with the
-user's authentication and ProxyCommand/ProxyJump settings.
+The public LAN ingress never targets the native private-access gateway.
+Enabling local publishing cannot expose SSH routes to other LAN clients.
+Systemd binds only the exact requested addresses; DynamicUser
+`systemd-socket-proxyd` services with empty capabilities forward to fixed
+loopback targets. Unit changes use explicit sudo operations, not root
+execution of user-writable portmap code. No sudoers, global low-port sysctl,
+binary capabilities, or boot enablement are added. Conflicting listeners cause
+an error, never a silent high-port fallback or a foreign-process shutdown.
 
-CoreDNS serves only registered hostname zones locally; it is not a DNS relay
-to every remote machine. Linux uses an owned dummy interface for `~portmap`,
-with DNS bound to that interface's link-local address on port 1053. This avoids
-both global DNS-server mixing and the per-link loopback-server limitation in
-systemd-resolved 249. Global/physical resolver configuration stays unchanged.
+The private native-backend forwarder uses a loopback-only cgroup IP policy
+where the kernel supports it. The public container-backend forwarder does not:
+Podman can DNAT the fixed loopback destination to a container bridge address,
+which that policy would silently drop. Its exact listening address, fixed
+target, DynamicUser and empty capability sets still apply.
 
-Traefik preserves the Host header for remote application routing. Its exact
-apex catalog route has priority over the remote suffix route; apex
-`/actions/*` has still higher priority and passes through to the remote catalog.
-An application's own `/registry.json` on a subdomain is never intercepted.
-The apex name is reserved for the local catalog; custom apex app endpoints
-are marked unsupported rather than silently serving the wrong application.
+CoreDNS serves only registered hostname zones. Linux setup creates an owned
+dummy interface for `~portmap`, using `169.254.254.53:1053`; this also avoids
+systemd-resolved 249's per-link loopback-server limitation. Physical/global
+resolver configuration is unchanged. Dormant SSH profiles have no active DNS
+mapping until restoration succeeds.
 
-The local catalog view reuses packaged frontend assets and projects only
-client-visible addresses. Unsupported custom hosts, unforwarded TCP, and
-SSH-inaccessible UDP/ranges are explicitly marked. It does not execute Docker
-actions locally and does not expose tunnel ownership or control-socket data.
+For SSH, the apex catalog projects client-visible URLs, while `/actions/*`
+passes through to the remote catalog. Application subdomains preserve Host
+and their own `/registry.json` is not intercepted. Local-domain catalogs and
+actions pass directly to the local backend, including the private bare-IP
+fallback; they are not replaced with a read-only remote view.
 
-Connection state is private, serialized and atomically published. A connect
-is successful only after the remote catalog, local gateway configuration,
-system DNS mapping and public local catalog all respond correctly. Failed
-publication restores the previous connections and removes the new owned
-tunnel. Disconnect affects only the selected client's route; remote application
-containers remain running. The client processes and resolver route are removed
-by explicit teardown.
+Connection state is private, serialized and atomically published. Failed
+connect publication restores previous routes and removes the newly owned
+tunnel. Disconnect leaves remote containers untouched. Stopping local
+publishing preserves remote access; teardown refuses while local publishing
+is active. Default-state setup can import the old `portmap-client` layout,
+stopping only verified legacy workers and retaining saved targets/configuration.
+Each stale SSH profile gets one explicit restoration attempt; failures are
+reported without inventing a replacement identity.
+
+Distribution uses `/api/downloads`, `/install.sh`, and
+`/downloads/portmap/<filename>`. The Web offers standalone download/installation
+and optional Homebrew install/upgrade, distinguishing installation from setup.
+The old client-only endpoints and executable alias are removed.
+
+`release.json` pins real versioned assets, size and SHA-256. Frozen installs
+resolve an adjacent sidecar first, source/Brew use packaged metadata, and raw
+bundles without metadata can fetch a bounded manifest from the version-pinned
+trusted release. The archive never embeds its own checksum manifest: build
+and installer write the sidecar separately. Invalid local metadata fails
+honestly instead of selecting another release. Archive cache entries are
+verified before serving. Canonical HTTPS GitHub URLs and trusted signed-CDN
+redirects remain constrained; arbitrary hosts and credential-bearing URLs
+are rejected. Installation itself changes no DNS, processes or listeners.
 
 ## Fixed Model
 
@@ -194,76 +208,49 @@ Caddy when Traefik is the default.
 
 ## Host Agent And Shared Gateway
 
-Start portmap from the `portmap` repository:
-
 ```bash
 portmap up
 ```
 
-This starts the host agent, then starts the gateway containers. The lower-level
-`portmap gateway ...` command remains available when only the Docker gateway
-containers should be controlled.
+Local publishing needs a local Docker/Podman socket and Docker Compose CLI.
+The host agent scans Git worktrees and handles host-side Compose operations.
+Container-network Traefik, CoreDNS and the catalog retain direct access to the
+runtime's project network, including rootless Podman networking.
 
-The agent and gateway read the tracked root-level `portmap.toml` directly.
-Runtime-only values such as the host LAN IP and agent Unix-socket runtime
-directory are detected when the command runs instead of being stored in config.
+The container gateway publishes only a loopback high HTTP port. Its catalog
+listens on container port 8081 with no separate host publication. Traefik's
+``HostRegexp(`.+`)`` fallback has explicit priority 1, below service Host
+routes, so bare IPs and unmatched Hosts reach the local catalog. The
+`portmap.gateway=true` label keeps infrastructure out of the project list and
+project lifecycle controls.
 
-Default shape (unchanged host-port allocations):
+The public HTTP port is separately advertised in endpoint metadata. The
+native private-access gateway receives a local profile pointing at this
+backend; the public LAN socket independently targets the same backend.
+`http_bind = "0.0.0.0"` selects the detected LAN IPv4 address, not a wildcard
+listener. Loopback-only configuration creates no public ingress.
+There is no separate catalog-port configuration or single-port overlay.
 
-```text
-host agent
-  -> Unix socket under XDG_RUNTIME_DIR
-  -> host Git worktree list
-  -> host docker compose up
+`server/instance.json` records uid, effective settings, backend port and
+access-state directory under a lock. Stop uses those saved settings, not
+newly changed environment values. Up validates configuration, sets up the
+access resolver, starts the agent/backend, publishes the local profile and
+public ingress, and commits ownership. Failed first startup cleans new owned
+resources; existing publishing state remains recoverable.
+Down removes only that local role, public ingress, backend and agent.
+SSH/direct profiles and any still-needed private HTTP ingress survive.
 
-host:80 catalog
-  -> portmap-catalog
-  -> Docker socket labels
-  -> host agent socket
-  -> current portmap-managed services, stopped worktrees, and endpoints
+Source/Brew catalog containers import the packaged Python modules. Frozen
+mode adds `docker-compose.frozen.yml`, mounting the complete bundle read-only
+and running `portmap _serve-server-catalog` inside a glibc-compatible catalog
+image. Frozen agent workers re-execute the unified executable rather than
+assuming an external Python interpreter.
 
-host:8080 HTTP
-  -> portmap-traefik
-  -> portmap_gateway Docker network
-  -> managed project service:container_port
-  -> unmatched Host (including a bare IP): portmap-catalog:8081
-
-host:53 DNS
-  -> portmap-dns
-  -> *.debug.lan A <detected-host-ip>
-```
-
-For HTTP-only access through a firewall permitting just TCP `80`, configure
-`[gateway] http_port = 80` and `catalog_port = 80` in `portmap.toml`. The gateway
-CLI (`up`, `down`, `restart`, and `gateway`) compares the effective ports after
-environment overrides. Equal ports select `docker-compose.single-port.yml`,
-whose `!reset []` removes catalog host-port publication:
-
-```text
-host:80 HTTP -> portmap-traefik -> portmap_gateway
-  -> registered Host: managed project service:container_port
-  -> bare IP / unmatched Host: portmap-catalog:8081
-```
-
-The catalog is a normal backend on the shared network in both modes. Its Docker
-labels define a ``HostRegexp(`.+`)`` router on `web` with explicit priority `1`
-and service port `8081`. Generated Host routes keep Traefik's higher default
-rule-length priority. Priority `0` would not mean lowest priority in Traefik;
-it restores automatic rule-length ordering. The catalog backend is marked
-`portmap.gateway=true` so discovery does not list infrastructure as an
-application project or offer project lifecycle controls for it.
-
-Equal non-80 ports use the same consolidated layout. `http_bind` owns the
-shared listener and `catalog_bind` is ignored in that mode. Unequal ports retain
-the separately configurable catalog mapping for compatibility. Raw
-`docker compose` needs the overlay selected explicitly; it does not read
-`portmap.toml`. See the [single-port setup and migration](../README.md#one-http-port-per-development-machine)
-for configuration, safe cutover, and rollback commands.
-
-DNS and raw TCP/UDP/range endpoints are not multiplexed onto HTTP. Keep DNS
-private or use external wildcard DNS/hosts entries when inbound `53` is closed.
-Existing containers retain their old endpoint URL labels until their generated
-overrides are refreshed and Compose recreates them with the new HTTP port.
+DNS and raw TCP/UDP/range endpoints remain separate from HTTP. Unified access
+does not need remote port 53. Rootless runtimes can use an unprivileged
+server DNS port without lowering the host's low-port threshold. Existing
+project containers keep their endpoint labels until their generated override
+is refreshed; the gateway cutover does not recreate those projects.
 
 The gateway compose creates the named Docker network:
 
@@ -293,26 +280,11 @@ networks:
 This keeps Traefik out of individual project compose files while still allowing
 Traefik to reach Docker bridge services without per-service host port mappings.
 
-Development machines should use split DNS:
-
-```text
-*.debug.lan -> portmap host DNS, for example <detected-host-ip>
-all other names -> normal DNS
-```
-
-This lets every generated Host-routing URL resolve externally without adding
-per-endpoint entries to `/etc/hosts`.
-
-Linux setup command shape:
-
-```bash
-DNS_SERVER=<detected-host-ip>
-DNS_DOMAIN=debug.lan
-DNS_IFACE="$(ip route get "$DNS_SERVER" | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
-
-sudo resolvectl dns "$DNS_IFACE" "$DNS_SERVER"
-sudo resolvectl domain "$DNS_IFACE" "~$DNS_DOMAIN"
-```
+Workstations use `portmap setup` and `portmap connect`, not physical-interface
+DNS rewrites or per-endpoint hosts entries. The separately exposed server DNS
+listener is for explicit DNS/container consumers, not the unified client
+transport. The advanced `portmap dns set/unset` drop-in utility is independent
+of the access resolver and is not invoked by setup.
 
 ## Endpoint Classes
 
@@ -380,7 +352,7 @@ Request path:
 
 ```text
 browser
-  -> http://frontend.feat-a.comap.debug.lan:8080
+  -> http://frontend.feat-a.comap.example-host.portmap
   -> Traefik web entrypoint
   -> portmap_gateway
   -> frontend container:5173
@@ -681,14 +653,13 @@ which endpoints each instance exposes
 which URL or host:port each endpoint uses
 ```
 
-The catalog is derived from Docker labels on running containers. By default it
-has a direct host-port `80` mapping and is also Traefik's fallback on `8080`.
-In single-port mode only Traefik publishes `80`; the same catalog URLs work
-through the fallback router:
+The catalog is derived from Docker/Podman labels on running containers. It has
+no host-port mapping of its own; the backend Traefik fallback serves it through
+the controlled public or private HTTP entry:
 
 ```text
-http://portmap.debug.lan/
-http://portmap.debug.lan/registry.json
+http://example-host.portmap/
+http://example-host.portmap/registry.json
 ```
 
 Minimal JSON shape:
@@ -706,7 +677,7 @@ Minimal JSON shape:
         {
           "name": "frontend",
           "kind": "http",
-          "url": "http://frontend.feat-a.comap.debug.lan:8080"
+          "url": "http://frontend.feat-a.comap.example-host.portmap"
         },
         {
           "name": "mqtt",

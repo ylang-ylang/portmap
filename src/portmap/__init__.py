@@ -2,10 +2,9 @@
 
 from importlib import import_module
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
-# Keep the existing Python API lazy: importing the standalone client must not
-# import the Compose planner or other server runtime modules.
+# The Python API stays lazy; remote-only access needs no container runtime.
 _EXPORTS = {
     "EndpointDeclaration": ".model",
     "EndpointKind": ".model",

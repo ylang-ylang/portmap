@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from .client_runtime import frozen
+from .settings import resolve_portmap_root
 from .errors import PortmapError
 
 
@@ -50,11 +53,6 @@ def compose_plugin_shim_path(docker_config: Path) -> Path:
     return docker_config / "cli-plugins" / "docker-compose"
 
 
-def default_portmap_root() -> Path:
-    env_root = os.environ.get("PORTMAP_ROOT")
-    if env_root:
-        return Path(env_root).expanduser().resolve()
-    return Path(__file__).resolve().parents[2]
 
 
 def find_real_compose_plugin(
@@ -166,10 +164,12 @@ def is_portmap_shim(path: Path) -> bool:
 def detect_portmap_bin(portmap_root: Path) -> Path | None:
     """Installed-mode entrypoint for the shim's takeover path.
 
-    Source checkouts (a pyproject.toml at the root) run through
-    `uv run --project`; installed packages (brew/pip/uv tool) call the
-    portmap executable on PATH directly.
+    Source checkouts run through uv; installed packages use PATH. A frozen
+    executable uses its own absolute path, including when invoked before the
+    user's launcher directory has been added to PATH.
     """
+    if frozen():
+        return Path(sys.executable).resolve()
     if (portmap_root / "pyproject.toml").exists():
         return None
     found = shutil.which("portmap")
@@ -194,7 +194,7 @@ def install_compose_plugin_shim(
     if shim_path.exists() and not is_portmap_shim(shim_path) and not force:
         raise PortmapError(f"refusing to overwrite non-portmap compose plugin: {shim_path}")
 
-    root = (portmap_root or default_portmap_root()).resolve()
+    root = (portmap_root or resolve_portmap_root()).resolve()
     resolved_bin = portmap_bin or detect_portmap_bin(root)
     if resolved_bin is None and not (root / "pyproject.toml").exists():
         raise PortmapError(

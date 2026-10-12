@@ -33,7 +33,11 @@ from .errors import PortmapError
 
 
 _ADDRESS = "127.0.0.1"
+_DEFAULT_HTTP_PORT = 80
 _HEALTH_HOST = "portmap-gateway.invalid"
+_INGRESS_NAME = "private"
+_MANAGED_VIA = ("ssh", "local")
+_PRIVILEGED_PORT = 1024
 _START_TIMEOUT = 15.0
 _STOP_TIMEOUT = 5.0
 _MAX_JSON = 4 * 1024 * 1024
@@ -42,14 +46,20 @@ _ORIGIN = re.compile(r"http://(?:\[[0-9A-Fa-f:.]+\]|[0-9.]+)(?::[0-9]{1,5})?/?\Z
 _CHILDREN: dict[int, subprocess.Popen[bytes]] = {}
 
 
-def sync_gateway(state_dir: Path, profiles: Mapping[str, dict], *, http_port: int | None = None) -> dict:
-    """Publish all client routes, returning only after the native gateway loads them.
+def sync_gateway(state_dir: Path, profiles: Mapping[str, dict], *, http_port: int | None = None, use_sudo: bool = True) -> dict:
+    """Publish the SSH/local routes, returning only after the gateway loads them.
 
-    The chosen HTTP port persists in gateway.json. Changing a live gateway's port
-    requires stop_gateway first. Both children detach from the invoking CLI;
-    their private logs remain in state_dir/gateway/<owner>/ after shutdown.
+    Only SSH and local-server profiles are managed here: direct connections
+    resolve straight to their verified remote address and never need this
+    gateway or the native Traefik binary. With no managed profile left, the
+    owned gateway and ingress are stopped and a stopped state is returned while
+    direct DNS stays intact. The browser-facing ``http_port`` is separated from
+    the unprivileged ``listen_port`` Traefik binds: a privileged public port is
+    owned by the private systemd ingress socket forwarding to that listener,
+    and there is never a silent fallback to another port. A legacy (version 1)
+    descriptor is only ever stopped through ownership validation, never reused.
     """
-    backends = _backends(profiles)
+    backends, local_domains = _backends(_managed_profiles(profiles))
     if http_port is not None:
         _port(http_port)
     state_dir = Path(state_dir).expanduser().resolve()
@@ -57,39 +67,49 @@ def sync_gateway(state_dir: Path, profiles: Mapping[str, dict], *, http_port: in
         previous = _load(state_dir)
         if previous is not None:
             active = any(_owned_process(previous, kind) for kind in ("traefik", "view"))
-            if active:
+            if active and previous["version"] == 2:
                 if http_port is not None and http_port != previous["http_port"]:
                     raise PortmapError("The local gateway is active; stop it before changing --http-port")
                 if not all(_owned_process(previous, kind) for kind in ("traefik", "view")):
                     raise PortmapError("The local gateway is incomplete; stop it before reconnecting")
-                return _publish(state_dir, previous, backends)
-            if http_port is None:
+                if not backends:
+                    _stop(state_dir, previous, use_sudo=use_sudo)
+                    return _stopped_state()
+                return _publish(state_dir, previous, backends, local_domains)
+            # A live legacy descriptor, or a dead one of any version, is
+            # replaced. Stopping validates ownership before signaling anything.
+            _stop(state_dir, previous, use_sudo=use_sudo)
+        if not backends:
+            return _stopped_state()
+        if http_port is None:
+            http_port = preferred_http_port(state_dir)
+            if http_port is None and previous is not None and previous["version"] == 2:
                 http_port = previous["http_port"]
-            _stop(state_dir, previous)
+            if http_port is None:
+                http_port = _DEFAULT_HTTP_PORT
         binary = find_native_binary("traefik")
         if binary is None:
-            raise PortmapError("Native Traefik is required: use a portmap-client release bundle or run 'brew install traefik' and put traefik on PATH")
-        return _start(state_dir, backends, str(binary.resolve()), http_port)
+            raise PortmapError("Native Traefik is required: use a portmap release bundle or run 'brew install traefik' and put traefik on PATH")
+        return _start(state_dir, backends, local_domains, str(binary.resolve()), http_port, use_sudo=use_sudo)
 
 
 def gateway_status(state_dir: Path) -> dict:
     """Report verified ownership, child liveness, and the loaded route revision."""
     state_dir = Path(state_dir).expanduser().resolve()
-    absent = {"running": False, "address": _ADDRESS, "http_port": None, "view_port": None}
     if not state_dir.exists():
-        return absent
+        return _stopped_state()
     try:
         with _lock(state_dir):
             state = _load(state_dir)
             if state is None:
-                return absent
+                return _stopped_state()
             config = _read_json(Path(state["dynamic_path"]))
             return _status(state, config)
     except (PortmapError, OSError, ValueError) as exc:
-        return {**absent, "error": str(exc)}
+        return {**_stopped_state(), "error": str(exc)}
 
 
-def stop_gateway(state_dir: Path) -> None:
+def stop_gateway(state_dir: Path, *, use_sudo: bool = True) -> None:
     """Stop only children matching this user's private descriptor and start identity."""
     state_dir = Path(state_dir).expanduser().resolve()
     if not state_dir.exists():
@@ -97,7 +117,32 @@ def stop_gateway(state_dir: Path) -> None:
     with _lock(state_dir):
         state = _load(state_dir)
         if state is not None:
-            _stop(state_dir, state)
+            _stop(state_dir, state, use_sudo=use_sudo)
+
+
+def save_public_http_port(state_dir: Path, port: int) -> None:
+    """Persist the preferred browser-facing port without starting a gateway."""
+    _port(port)
+    state_dir = Path(state_dir).expanduser().resolve()
+    _atomic_write(state_dir / "settings.json", _json_bytes({"version": 1, "public_http_port": port}))
+
+
+def preferred_http_port(state_dir: Path) -> int | None:
+    state_dir = Path(state_dir).expanduser().resolve()
+    try:
+        settings = _read_json(state_dir / "settings.json")
+    except FileNotFoundError:
+        return None
+    if settings.get("version") != 1:
+        raise PortmapError(f"Invalid gateway settings in {state_dir / 'settings.json'}")
+    return _port(settings.get("public_http_port"))
+
+
+def _stopped_state() -> dict:
+    return {
+        "running": False, "address": _ADDRESS, "http_port": None, "listen_port": None,
+        "view_port": None, "management_port": None, "ingress": None,
+    }
 
 
 def _port(value: object) -> int:
@@ -106,14 +151,25 @@ def _port(value: object) -> int:
     return value
 
 
-def _backends(profiles: Mapping[str, dict]) -> dict[str, str]:
+def _managed_profiles(profiles: Mapping[str, dict]) -> dict[str, dict]:
     if not isinstance(profiles, Mapping):
         raise PortmapError("Gateway profiles must be a mapping of domains to connection profiles")
-    backends = {}
+    managed = {}
     for domain, profile in profiles.items():
+        if not isinstance(profile, dict):
+            raise PortmapError(f"Gateway profile for {domain!r} must be an object")
+        if profile.get("via") in _MANAGED_VIA:
+            managed[domain] = profile
+    return managed
+
+
+def _backends(managed: Mapping[str, dict]) -> tuple[dict[str, str], set[str]]:
+    backends: dict[str, str] = {}
+    local_domains: set[str] = set()
+    for domain, profile in managed.items():
         if not isinstance(domain, str) or not _DOMAIN.fullmatch(domain):
             raise PortmapError("Gateway domains must be lowercase <hostname>.portmap DNS names")
-        if not isinstance(profile, dict) or profile.get("domain", domain) != domain:
+        if profile.get("domain", domain) != domain:
             raise PortmapError(f"Gateway profile does not match its domain {domain!r}")
         value = profile.get("backend_url")
         if not isinstance(value, str) or not _ORIGIN.fullmatch(value):
@@ -126,12 +182,16 @@ def _backends(profiles: Mapping[str, dict]) -> dict[str, str]:
             raise PortmapError(f"Backend for {domain} has an invalid IP address or port") from exc
         if address.is_unspecified or address.is_multicast:
             raise PortmapError(f"Backend for {domain} must be a unicast IP address")
+        if profile.get("via") == "local" and not address.is_loopback:
+            raise PortmapError(f"Local backend for {domain} must be a loopback address")
         host = f"[{address}]" if address.version == 6 else str(address)
         backends[domain] = f"http://{host}:{port}"
-    return backends
+        if profile.get("via") == "local":
+            local_domains.add(domain)
+    return backends, local_domains
 
 
-def _routes(state: dict, backends: Mapping[str, str]) -> tuple[str, dict]:
+def _routes(state: dict, backends: Mapping[str, str], local_domains: set[str]) -> tuple[str, dict]:
     services = {
         "catalog-view": {
             "loadBalancer": {
@@ -141,6 +201,7 @@ def _routes(state: dict, backends: Mapping[str, str]) -> tuple[str, dict]:
         }
     }
     routers = {}
+    fallback: str | None = None
     for domain, backend in sorted(backends.items()):
         name = hashlib.sha256(domain.encode("ascii")).hexdigest()[:20]
         remote = f"remote-{name}"
@@ -152,6 +213,12 @@ def _routes(state: dict, backends: Mapping[str, str]) -> tuple[str, dict]:
             "service": remote,
             "priority": 100,
         }
+        if domain in local_domains:
+            # The local server owns its whole domain: catalog, actions, and app
+            # paths all proxy straight to its backend instead of a read-only
+            # client view, and bare-IP requests may fall back to it privately.
+            fallback = fallback or remote
+            continue
         routers[f"catalog-{name}"] = {
             "entryPoints": ["web"], "rule": apex, "service": "catalog-view", "priority": 200,
         }
@@ -160,6 +227,13 @@ def _routes(state: dict, backends: Mapping[str, str]) -> tuple[str, dict]:
             "rule": f"{apex} && PathPrefix(`/actions/`)",
             "service": remote,
             "priority": 300,
+        }
+    if fallback is not None:
+        routers["local-bare-ip"] = {
+            "entryPoints": ["web"],
+            "rule": "Host(`127.0.0.1`) || Host(`localhost`)",
+            "service": fallback,
+            "priority": 1,
         }
     config = {
         "http": {
@@ -187,7 +261,7 @@ def _static_config(state: dict) -> dict:
     return {
         "global": {"checkNewVersion": False, "sendAnonymousUsage": False},
         "entryPoints": {
-            "web": {"address": f"{_ADDRESS}:{state['http_port']}"},
+            "web": {"address": f"{_ADDRESS}:{state['listen_port']}"},
             "traefik": {"address": f"{_ADDRESS}:{state['management_port']}"},
         },
         "api": {"insecure": True, "dashboard": False},
@@ -287,7 +361,7 @@ def _load(state_dir: Path) -> dict | None:
         return None
     owner = state.get("owner")
     if (
-        type(state.get("version")) is not int or state["version"] != 1
+        type(state.get("version")) is not int or state["version"] not in (1, 2)
         or type(state.get("uid")) is not int or state["uid"] != os.getuid()
         or not isinstance(owner, str) or not re.fullmatch(r"[0-9a-f]{32}", owner)
         or state.get("state_dir") != str(state_dir) or state.get("address") != _ADDRESS
@@ -300,10 +374,26 @@ def _load(state_dir: Path) -> dict | None:
         or state.get("dynamic_path") != str(runtime / "dynamic" / "routes.yaml")
     ):
         raise PortmapError("Gateway configuration is not inside its private instance directory")
-    for name in ("http_port", "view_port", "management_port"):
-        _port(state.get(name))
-    if len({state[name] for name in ("http_port", "view_port", "management_port")}) != 3:
-        raise PortmapError("Gateway listeners must use distinct ports")
+    if state["version"] == 2:
+        for name in ("http_port", "listen_port", "view_port", "management_port"):
+            _port(state.get(name))
+        if len({state["listen_port"], state["view_port"], state["management_port"]}) != 3:
+            raise PortmapError("Gateway listeners must use distinct private ports")
+        ingress = state.get("ingress")
+        if ingress is not None:
+            if (
+                not isinstance(ingress, dict)
+                or ingress.get("name") != _INGRESS_NAME
+                or ingress.get("port") != state["http_port"]
+                or ingress.get("target_port") != state["listen_port"]
+                or state["http_port"] == state["listen_port"]
+            ):
+                raise PortmapError("Invalid private ingress record in local gateway descriptor")
+    else:
+        for name in ("http_port", "view_port", "management_port"):
+            _port(state.get(name))
+        if len({state[name] for name in ("http_port", "view_port", "management_port")}) != 3:
+            raise PortmapError("Gateway listeners must use distinct ports")
     if not isinstance(state.get("revision"), str) or not re.fullmatch(r"[0-9a-f]{64}", state["revision"]):
         raise PortmapError("Invalid local gateway route revision")
     for directory in (runtime.parent, runtime, runtime / "dynamic"):
@@ -321,6 +411,27 @@ def _load(state_dir: Path) -> dict | None:
         ):
             raise PortmapError(f"Invalid {kind} process identity in local gateway descriptor")
     return state
+
+
+def _listen_port(state: dict) -> int:
+    return state["listen_port"] if "listen_port" in state else state["http_port"]
+
+
+def _ingress(state: dict) -> dict | None:
+    return state.get("ingress")
+
+
+def _ensure_ingress(state_dir: Path, *, name: str, bind_address: str, port: int, target_port: int, use_sudo: bool = True) -> dict:
+    # Imported lazily: direct-only clients never load the systemd ingress path.
+    from .ingress import ensure_ingress
+
+    return ensure_ingress(state_dir, name=name, bind_address=bind_address, port=port, target_port=target_port, use_sudo=use_sudo)
+
+
+def _stop_ingress(state_dir: Path, *, name: str, use_sudo: bool = True) -> dict:
+    from .ingress import stop_ingress
+
+    return stop_ingress(state_dir, name=name, use_sudo=use_sudo)
 
 
 def _valid_recorded_command(state: dict, kind: str, command: object) -> bool:
@@ -411,21 +522,6 @@ def _reserve(port: int) -> socket.socket:
         raise
 
 
-def _http_reservation(port: int | None) -> socket.socket:
-    if port is not None:
-        try:
-            return _reserve(port)
-        except OSError as exc:
-            raise PortmapError(f"Cannot bind local HTTP gateway on {_ADDRESS}:{port}: {exc}") from exc
-    for candidate in (80, 18080, 0):
-        try:
-            return _reserve(candidate)
-        except OSError as exc:
-            if exc.errno not in (errno.EACCES, errno.EPERM, errno.EADDRINUSE) or candidate == 0:
-                raise
-    raise PortmapError("No loopback HTTP port is available")
-
-
 def _launch(state: dict, kind: str, command: list[str], children: list[subprocess.Popen[bytes]]) -> None:
     log_path = Path(state["instance_dir"]) / f"{kind}.log"
     with os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log:
@@ -443,13 +539,21 @@ def _launch(state: dict, kind: str, command: list[str], children: list[subproces
     state[kind] = {"pid": child.pid, "start_time": identity[1], "command": list(command)}
 
 
-def _start(state_dir: Path, backends: dict[str, str], binary: str, http_port: int | None) -> dict:
-    reservations = []
+def _start(state_dir: Path, backends: dict[str, str], local_domains: set[str], binary: str, http_port: int, *, use_sudo: bool = True) -> dict:
+    reservations: list[socket.socket] = []
     children: list[subprocess.Popen[bytes]] = []
-    state = None
+    state: dict | None = None
+    ingress_active = False
     try:
-        http = _http_reservation(http_port)
-        reservations.append(http)
+        if http_port < _PRIVILEGED_PORT:
+            # The browser-facing port is owned by the private ingress socket;
+            # native Traefik stays unprivileged on a high private listener.
+            listen = _reserve(0)
+        else:
+            # An explicit unprivileged public port binds natively with no
+            # privileged ingress in the path.
+            listen = _reserve(http_port)
+        reservations.append(listen)
         view = _reserve(0)
         reservations.append(view)
         management = _reserve(0)
@@ -460,13 +564,14 @@ def _start(state_dir: Path, backends: dict[str, str], binary: str, http_port: in
         runtime.mkdir(mode=0o700)
         (runtime / "dynamic").mkdir(mode=0o700)
         state = {
-            "version": 1, "owner": owner, "uid": os.getuid(), "state_dir": str(state_dir),
-            "address": _ADDRESS, "http_port": http.getsockname()[1],
+            "version": 2, "owner": owner, "uid": os.getuid(), "state_dir": str(state_dir),
+            "address": _ADDRESS, "http_port": http_port, "listen_port": listen.getsockname()[1],
             "view_port": view.getsockname()[1], "management_port": management.getsockname()[1],
+            "ingress": None,
             "instance_dir": str(runtime), "config_path": str(runtime / "traefik.yaml"),
             "dynamic_path": str(runtime / "dynamic" / "routes.yaml"), "traefik": None, "view": None,
         }
-        state["revision"], config = _routes(state, backends)
+        state["revision"], config = _routes(state, backends, local_domains)
         # Traefik accepts JSON syntax as YAML but ignores .json file-provider files.
         _atomic_write(Path(state["config_path"]), _json_bytes(_static_config(state)))
         _atomic_write(Path(state["dynamic_path"]), _json_bytes(config))
@@ -474,13 +579,31 @@ def _start(state_dir: Path, backends: dict[str, str], binary: str, http_port: in
         view.close()
         _launch(state, "view", serve_catalog_command(state_dir=state["state_dir"], port=state["view_port"], owner=state["owner"]), children)
         _save(state_dir, state, ownership=True)
-        http.close()
+        listen.close()
         management.close()
         _launch(state, "traefik", [binary, f"--configFile={state['config_path']}"], children)
         _save(state_dir, state, ownership=True)
-        return _wait_ready(state, config)
+        # Prove the private listener serves the route revision before anything
+        # faces the public port.
+        status = _wait_ready(state, config, probe_port=state["listen_port"])
+        if state["http_port"] != state["listen_port"]:
+            state["ingress"] = _ensure_ingress(
+                state_dir, name=_INGRESS_NAME, bind_address=_ADDRESS,
+                port=http_port, target_port=state["listen_port"], use_sudo=use_sudo,
+            )
+            ingress_active = True
+            _save(state_dir, state, ownership=True)
+            # The final probe crosses ingress -> proxyd -> Traefik -> view,
+            # proving the whole browser-facing chain, not just the listener.
+            status = _wait_ready(state, config, probe_port=http_port)
+        return status
     except BaseException as exc:
         cleanup_errors = []
+        if ingress_active:
+            try:
+                _stop_ingress(state_dir, name=_INGRESS_NAME, use_sudo=use_sudo)
+            except Exception as cleanup:
+                cleanup_errors.append(str(cleanup))
         for child in reversed(children):
             try:
                 _terminate_child(child)
@@ -492,7 +615,7 @@ def _start(state_dir: Path, backends: dict[str, str], binary: str, http_port: in
         if isinstance(exc, (OSError, PortmapError)):
             message = f"Could not start local gateway: {exc}{detail}"
             if cleanup_errors:
-                message += "; child cleanup failed: " + "; ".join(cleanup_errors)
+                message += "; cleanup failed: " + "; ".join(cleanup_errors)
             raise PortmapError(message) from exc
         raise
     finally:
@@ -547,14 +670,14 @@ def _loaded(raw: dict, config: dict) -> bool:
     return True
 
 
-def _health(state: dict, config: dict, *, timeout: float = 0.4) -> tuple[bool, str | None]:
+def _health(state: dict, config: dict, *, port: int | None = None, timeout: float = 0.4) -> tuple[bool, str | None]:
     try:
         expected = {"ok": True, "owner": state["owner"]}
         if _json_get(state["view_port"], "/healthz", timeout=timeout) != expected:
             return False, "Catalog-view ownership readiness failed"
         if not _loaded(_json_get(state["management_port"], "/api/rawdata", timeout=timeout), config):
             return False, "Traefik has not enabled the requested route revision"
-        if _json_get(state["http_port"], _ready_path(state), host=_HEALTH_HOST, timeout=timeout) != expected:
+        if _json_get(port if port is not None else state["http_port"], _ready_path(state), host=_HEALTH_HOST, timeout=timeout) != expected:
             return False, "HTTP gateway ownership readiness failed"
         return True, None
     except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as exc:
@@ -566,7 +689,7 @@ def _status(state: dict, config: dict) -> dict:
     view_running = _owned_process(state, "view")
     ready, error = _health(state, config) if traefik_running and view_running else (False, "An owned gateway process is not running")
     status = {
-        **state, "running": ready, "traefik_running": traefik_running,
+        **state, "listen_port": _listen_port(state), "running": ready, "traefik_running": traefik_running,
         "view_running": view_running, "routes_loaded": ready,
     }
     if error:
@@ -574,13 +697,13 @@ def _status(state: dict, config: dict) -> dict:
     return status
 
 
-def _wait_ready(state: dict, config: dict) -> dict:
+def _wait_ready(state: dict, config: dict, *, probe_port: int | None = None) -> dict:
     deadline = time.monotonic() + _START_TIMEOUT
     error = "Gateway readiness timed out"
     while time.monotonic() < deadline:
         if not all(_owned_process(state, kind) for kind in ("traefik", "view")):
             raise PortmapError("An owned local gateway process exited before becoming ready")
-        ready, error = _health(state, config, timeout=min(0.4, max(0.01, (deadline - time.monotonic()) / 3)))
+        ready, error = _health(state, config, port=probe_port, timeout=min(0.4, max(0.01, (deadline - time.monotonic()) / 3)))
         if ready:
             return {
                 **state, "running": True, "traefik_running": True,
@@ -590,10 +713,10 @@ def _wait_ready(state: dict, config: dict) -> dict:
     raise PortmapError(error or "Gateway readiness timed out")
 
 
-def _publish(state_dir: Path, state: dict, backends: dict[str, str]) -> dict:
+def _publish(state_dir: Path, state: dict, backends: dict[str, str], local_domains: set[str]) -> dict:
     path = Path(state["dynamic_path"])
     previous = _read_bytes(path)
-    revision, config = _routes(state, backends)
+    revision, config = _routes(state, backends, local_domains)
     candidate = {**state, "revision": revision}
     payload = _json_bytes(config)
     try:
@@ -639,7 +762,7 @@ def _signal_owned(state: dict, kind: str, sig: int) -> None:
             os.close(pidfd)
 
 
-def _stop(state_dir: Path, state: dict) -> None:
+def _stop(state_dir: Path, state: dict, *, use_sudo: bool = True) -> None:
     for kind in ("traefik", "view"):
         _signal_owned(state, kind, signal.SIGTERM)
     deadline = time.monotonic() + _STOP_TIMEOUT
@@ -658,6 +781,10 @@ def _stop(state_dir: Path, state: dict) -> None:
         child = _CHILDREN.pop(process["pid"], None) if process else None
         if child is not None:
             child.wait(timeout=1)
+    if _ingress(state) is not None:
+        # The ingress unit is only removed once the backend it proxies is gone;
+        # its own removal revalidates unit ownership before touching systemd.
+        _stop_ingress(state_dir, name=_INGRESS_NAME, use_sudo=use_sudo)
     (state_dir / "gateway.json").unlink(missing_ok=True)
 
 
@@ -672,7 +799,9 @@ def _terminate_child(child: subprocess.Popen[bytes]) -> None:
     _CHILDREN.pop(child.pid, None)
 
 
-def _diagnostic(state: dict) -> str:
+def _diagnostic(state: dict | None) -> str:
+    if state is None:
+        return ""
     runtime = Path(state["instance_dir"])
     details = []
     for name in ("traefik.log", "view.log"):
