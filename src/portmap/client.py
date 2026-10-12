@@ -237,6 +237,7 @@ def _open_ssh_upstream(
     remote_port: int | None,
     timeout: float,
     expected_domain: str | None = None,
+    use_sudo: bool = True,
 ) -> tuple[dict[str, Any], GatewayInfo, str]:
     """Start an SSH master and forward the remote HTTP gateway to loopback.
 
@@ -245,7 +246,7 @@ def _open_ssh_upstream(
     the failure surfaces, so the caller only ever owns a live transport.
     """
     key = hashlib.sha256(chosen_ssh.encode()).hexdigest()[:20]
-    tunnel = start_tunnel(chosen_ssh, state_dir=state_dir, key=key, config_file=ssh_config, timeout=max(timeout, 30))
+    tunnel = start_tunnel(chosen_ssh, state_dir=state_dir, key=key, config_file=ssh_config, timeout=max(timeout, 30), use_sudo=use_sudo)
     bootstrap_port = _free_port()
     try:
         candidate = _port(remote_port) if remote_port is not None else 80
@@ -461,7 +462,7 @@ def setup_client(state_dir: Path, *, use_sudo: bool = True, http_port: int | Non
             # Linux DNS binds the dedicated dummy address, which must exist
             # before CoreDNS starts (also works with systemd-resolved 249).
             resolver = setup_resolver(state_dir, use_sudo=use_sudo)
-            dns = sync_dns(state_dir, _records(_published_profiles(state_dir, profiles)))
+            dns = sync_dns(state_dir, _records(_published_profiles(state_dir, profiles)), use_sudo=use_sudo)
             # Direct-only setups get DNS with no HTTP gateway at all; the
             # preferred public port is still remembered for later SSH/local use.
             gateway = sync_gateway(state_dir, _gateway_profiles(profiles, local), http_port=http_port, use_sudo=use_sudo)
@@ -503,7 +504,7 @@ def _publish(state_dir: Path, profiles: dict[str, dict[str, Any]], *, use_sudo: 
     # SSH publication never disturbs them.
     _save(state_dir, profiles)
     sync_gateway(state_dir, _gateway_profiles(profiles, _load_local(state_dir)), use_sudo=use_sudo)
-    sync_dns(state_dir, _records(_published_profiles(state_dir, profiles)))
+    sync_dns(state_dir, _records(_published_profiles(state_dir, profiles)), use_sudo=use_sudo)
 
 
 def _restore_ssh_profile(
@@ -543,7 +544,7 @@ def _restore_ssh_profile(
         public = _public_gateway_port(state_dir)
         tunnel, info, backend_url = _open_ssh_upstream(
             state_dir, identity, ssh_config=ssh_config, remote_port=profile.get("remote_http_port"),
-            timeout=timeout, expected_domain=domain,
+            timeout=timeout, expected_domain=domain, use_sudo=use_sudo,
         )
         mutated = True
         tcp_address = profile.get("tcp_address") or _tcp_loopback(domain, profiles)
@@ -721,7 +722,7 @@ def connect(
                 local_gateway_port = _public_gateway_port(state_dir)
                 tunnel, info, backend_url = _open_ssh_upstream(
                     state_dir, chosen_ssh, ssh_config=ssh_config,
-                    remote_port=remote_port, timeout=timeout,
+                    remote_port=remote_port, timeout=timeout, use_sudo=use_sudo,
                 )
                 domain = info.domain
                 tcp_address = _tcp_loopback(domain, profiles)

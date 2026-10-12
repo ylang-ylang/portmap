@@ -22,6 +22,7 @@ from typing import Iterator, Mapping
 from urllib.parse import urlsplit
 
 from .client_runtime import (
+    ensure_persistent_scope,
     find_native_binary,
     frozen,
     native_environment,
@@ -522,7 +523,9 @@ def _reserve(port: int) -> socket.socket:
         raise
 
 
-def _launch(state: dict, kind: str, command: list[str], children: list[subprocess.Popen[bytes]]) -> None:
+def _launch(state: dict, kind: str, command: list[str], children: list[subprocess.Popen[bytes]], *, use_sudo: bool = True) -> None:
+    # The gateway worker must outlive the login session that started it.
+    ensure_persistent_scope(use_sudo=use_sudo)
     log_path = Path(state["instance_dir"]) / f"{kind}.log"
     with os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log:
         child = subprocess.Popen(
@@ -577,11 +580,11 @@ def _start(state_dir: Path, backends: dict[str, str], local_domains: set[str], b
         _atomic_write(Path(state["dynamic_path"]), _json_bytes(config))
         _save(state_dir, state, ownership=True)
         view.close()
-        _launch(state, "view", serve_catalog_command(state_dir=state["state_dir"], port=state["view_port"], owner=state["owner"]), children)
+        _launch(state, "view", serve_catalog_command(state_dir=state["state_dir"], port=state["view_port"], owner=state["owner"]), children, use_sudo=use_sudo)
         _save(state_dir, state, ownership=True)
         listen.close()
         management.close()
-        _launch(state, "traefik", [binary, f"--configFile={state['config_path']}"], children)
+        _launch(state, "traefik", [binary, f"--configFile={state['config_path']}"], children, use_sudo=use_sudo)
         _save(state_dir, state, ownership=True)
         # Prove the private listener serves the route revision before anything
         # faces the public port.

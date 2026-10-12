@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from portmap import client_gateway
+from portmap import client_gateway, client_runtime
 from portmap.errors import PortmapError
 
 
@@ -62,6 +62,12 @@ def local_profile(domain, backend_port, public_port):
 def native_traefik():
     if shutil.which("traefik") is None:
         pytest.skip("Native Traefik is required for gateway routing regression tests")
+
+
+@pytest.fixture(autouse=True)
+def scope_adoption(monkeypatch):
+    """Never move the test runner out of its own session."""
+    monkeypatch.setattr(client_gateway, "ensure_persistent_scope", lambda **kwargs: None)
 
 
 @pytest.fixture
@@ -229,7 +235,11 @@ def test_preferred_public_port_roundtrip(tmp_path):
 def test_gateway_survives_launcher_exit_and_can_be_stopped_by_another_process(tmp_path, native_traefik, backend):
     environment = {**os.environ, "PYTHONPATH": str(Path(client_gateway.__file__).resolve().parent.parent)}
     program = (
-        "import sys; from pathlib import Path; from portmap.client_gateway import sync_gateway; "
+        "import sys; from pathlib import Path; import portmap.client_gateway as cg; "
+        "from portmap.client_gateway import sync_gateway; "
+        # Stay inside this test's login session; worker survival here is the
+        # launcher-exit property, not the session-scope escape.
+        "cg.ensure_persistent_scope = lambda **kwargs: None; "
         "sync_gateway(Path(sys.argv[1]), "
         "{'remote.portmap': {'domain': 'remote.portmap', 'via': 'ssh', 'backend_url': 'http://127.0.0.1:' + sys.argv[3]}}, "
         "http_port=int(sys.argv[2]))"
@@ -430,9 +440,9 @@ def test_native_start_failure_reaps_both_children_and_retains_private_diagnostic
         config["entryPoints"]["web"]["address"] = "invalid-listen-address"
         return config
 
-    def record_launch(state, kind, executable, started):
+    def record_launch(state, kind, executable, started, **kwargs):
         try:
-            return original_launch(state, kind, executable, started)
+            return original_launch(state, kind, executable, started, **kwargs)
         finally:
             children[:] = started
 
@@ -453,6 +463,21 @@ def test_native_start_failure_reaps_both_children_and_retains_private_diagnostic
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=5)
+
+
+def test_gateway_refuses_session_escape_without_sudo_before_any_worker(tmp_path, backend, native_traefik, monkeypatch):
+    monkeypatch.setattr(client_runtime.sys, "platform", "linux")
+    monkeypatch.setattr(client_runtime, "_persistent_scope", None)
+    monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: ["/user.slice/user-1000.slice/session-1.scope"])
+    monkeypatch.setattr(client_runtime.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(client_gateway, "ensure_persistent_scope", client_runtime.ensure_persistent_scope)
+    with pytest.raises(PortmapError):
+        client_gateway.sync_gateway(
+            tmp_path, {"remote.portmap": ssh_profile("remote.portmap", backend.server_port)},
+            http_port=free_port(), use_sudo=False,
+        )
+    assert not (tmp_path / "gateway.json").exists()
+    assert list((tmp_path / "gateway").glob("*/traefik.log")) == []
 
 
 def test_privileged_public_port_is_owned_by_private_ingress(tmp_path, backend, native_traefik, monkeypatch):

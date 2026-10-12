@@ -240,6 +240,17 @@ resources; existing publishing state remains recoverable.
 Down removes only that local role, public ingress, backend and agent.
 SSH/direct profiles and any still-needed private HTTP ingress survive.
 
+Background portmap workers inherit the invoking CLI user's credentials;
+scope creation does not elevate them or enable boot services. On Linux, when that process sits in
+a disposable logind `session-*.scope`, it first adopts its own PID into a
+transient system-manager scope (one exact privileged `busctl
+StartTransientUnit`, mode `fail`, `CollectMode=inactive-or-failed`) so the
+workers survive the session that started them; outside such a session, and on
+other platforms, nothing is attempted. Installing or upgrading portmap does
+not restart or rescue workers that an earlier version left running. They must
+stop and start again before the new lifetime rule applies; an idempotent
+setup, up, connect, or agent start may reuse a running worker.
+
 Source/Brew catalog containers import the packaged Python modules. Frozen
 mode adds `docker-compose.frozen.yml`, mounting the complete bundle read-only
 and running `portmap _serve-server-catalog` inside a glibc-compatible catalog

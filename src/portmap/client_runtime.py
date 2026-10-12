@@ -1,15 +1,22 @@
 """Runtime helpers for the portmap client role: state paths, bundled native
-binaries, child environments, and frozen worker commands.
+binaries, child environments, frozen worker commands, and the login-session
+scope escape that keeps background workers alive.
 
 This module must stay free of server-runtime imports (settings, planner,
 agent, catalog): the unified frozen portmap executable imports it first."""
 from __future__ import annotations
 
 import os
+import re
+import secrets
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Mapping, Sequence
+
+from .errors import PortmapError
 
 # In a source checkout this is src/portmap/native_bin; in the frozen onedir
 # bundle it is <install>/_internal/portmap/native_bin, because __file__ of
@@ -125,6 +132,103 @@ def worker_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     if frozen():
         environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     return environment
+
+
+# logind keeps each login session's processes in a session-<id>.scope cgroup;
+# when the session ends (an SSH disconnect under KillUserProcesses=yes) every
+# process in that scope is SIGTERMed, including portmap's background workers.
+_LOGIN_SESSION_SCOPE = re.compile(r"(?:^|/)session-[0-9A-Za-z]+\.scope(?:/|$)")
+_SCOPE_ADOPT_WAIT = 5.0
+_SCOPE_ADOPT_POLL = 0.05
+# Name (adopted scope), "" (no escape was needed), or None (not yet decided).
+_persistent_scope: str | None = None
+
+
+def _cgroup_paths() -> list[str]:
+    """Cgroup membership paths of this process, unified or legacy hierarchy."""
+    try:
+        content = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [line.rpartition(":")[2] for line in content.splitlines()]
+
+
+def _login_session_scope() -> str | None:
+    """The disposable logind session scope holding this process, if any."""
+    for path in _cgroup_paths():
+        if _LOGIN_SESSION_SCOPE.search(path):
+            return path
+    return None
+
+
+def ensure_persistent_scope(*, use_sudo: bool = True) -> str | None:
+    """Keep this process's background workers past the login session that
+    started them.
+
+    On Linux, when this process runs inside a disposable logind
+    session-<id>.scope, it first adopts its own PID into a transient
+    system-manager scope through one exact StartTransientUnit call (mode fail,
+    CollectMode inactive-or-failed, no unit files and no boot enablement).
+    Only the calling PID moves: every worker keeps running as this same
+    unprivileged user with unchanged groups, environment, recorded Popen PID
+    and argv. Outside such a login session, and on non-Linux systems, nothing
+    is done because no session escape is needed. One process requests at most
+    one scope; later calls are no-ops.
+
+    Root calls busctl directly. An ordinary caller that declined elevation
+    fails here, before any killable worker exists, rather than silently
+    spawning one that logind would terminate with the session."""
+    global _persistent_scope
+    if _persistent_scope is not None or not sys.platform.startswith("linux"):
+        return _persistent_scope
+    session = _login_session_scope()
+    if session is None:
+        _persistent_scope = ""
+        return None
+    root = hasattr(os, "geteuid") and os.geteuid() == 0
+    if not root and not use_sudo:
+        raise PortmapError(
+            "keeping portmap background workers past this login session needs administrator "
+            "privileges: drop --no-sudo (portmap runs one exact sudo command) or run as root"
+        )
+    name = f"portmap-{os.getuid()}-{os.getpid()}-{secrets.token_hex(4)}.scope"
+    command = [
+        "busctl", "call",
+        "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+        "org.freedesktop.systemd1.Manager", "StartTransientUnit",
+        "ssa(sv)a(sa(sv))",
+        name, "fail",
+        "2", "PIDs", "au", "1", str(os.getpid()),
+        "CollectMode", "s", "inactive-or-failed",
+        "0",
+    ]
+    if not root:
+        command = ["sudo", "--", *command]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=20, check=False,
+            env=native_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PortmapError(
+            f"could not move this process out of login session {session}: {exc}. "
+            "No background portmap worker was started"
+        ) from exc
+    if result.returncode != 0:
+        raise PortmapError(
+            f"could not move this process out of login session {session}: "
+            f"{(result.stderr or result.stdout).strip()[:1000]}. No background portmap worker was started"
+        )
+    deadline = time.monotonic() + _SCOPE_ADOPT_WAIT
+    while time.monotonic() < deadline:
+        if any(name in path for path in _cgroup_paths()):
+            _persistent_scope = name
+            return name
+        time.sleep(_SCOPE_ADOPT_POLL)
+    raise PortmapError(
+        f"this process did not enter transient scope {name} within {_SCOPE_ADOPT_WAIT:g}s; "
+        "no background portmap worker was started"
+    )
 
 
 def serve_catalog_command(*, state_dir: str, port: int | str, owner: str) -> list[str]:

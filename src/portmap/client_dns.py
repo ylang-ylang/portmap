@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from .client_runtime import find_native_binary, native_environment
+from .client_runtime import ensure_persistent_scope, find_native_binary, native_environment
 from .errors import PortmapError
 
 # Older systemd-resolved (including Ubuntu 22.04's 249) cannot contact a
@@ -188,7 +188,7 @@ def dns_status(state_dir: Path) -> dict[str, Any]:
     return {"running": running, "address": DNS_ADDRESS, "port": DNS_PORT, "pid": state.get("pid"), "marker": marker}
 
 
-def sync_dns(state_dir: Path, records: Mapping[str, str]) -> dict[str, Any]:
+def sync_dns(state_dir: Path, records: Mapping[str, str], *, use_sudo: bool = True) -> dict[str, Any]:
     """Caller serializes client mutations. Publish only after reload is observable."""
     state_dir = state_dir.expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -212,6 +212,9 @@ def sync_dns(state_dir: Path, records: Mapping[str, str]) -> dict[str, Any]:
             binary = find_native_binary("coredns")
             if binary is None:
                 raise PortmapError("client DNS needs CoreDNS: use a portmap release bundle or install coredns on PATH (brew install coredns)")
+            # CoreDNS must outlive the login session that started it; adopt
+            # this process into a persistent scope before spawning it.
+            ensure_persistent_scope(use_sudo=use_sudo)
             with (state_dir / "dns.log").open("ab") as log:
                 process = subprocess.Popen([str(binary), "-conf", str(config)], env=native_environment(), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             state = {"pid": process.pid, "owner": owner}

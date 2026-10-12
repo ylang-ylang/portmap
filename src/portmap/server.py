@@ -182,7 +182,7 @@ def start_server(
             raise PortmapError("invalid local gateway configuration")
         setup_client(access_dir, use_sudo=use_sudo, http_port=settings.http_port)
         was_running = agent_status(settings).running
-        agent = ensure_agent_started(settings)
+        agent = ensure_agent_started(settings, use_sudo=use_sudo)
         if not agent.running:
             raise PortmapError(agent.message)
         port = previous["backend_port"] if previous else _available_port()
