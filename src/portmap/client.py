@@ -463,8 +463,8 @@ def setup_client(state_dir: Path, *, use_sudo: bool = True, http_port: int | Non
             # before CoreDNS starts (also works with systemd-resolved 249).
             resolver = setup_resolver(state_dir, use_sudo=use_sudo)
             dns = sync_dns(state_dir, _records(_published_profiles(state_dir, profiles)), use_sudo=use_sudo)
-            # Direct-only setups get DNS with no HTTP gateway at all; the
-            # preferred public port is still remembered for later SSH/local use.
+            # Keep the private HTTP entry ready even before an SSH connection
+            # or local publishing role exists. Direct DNS still bypasses it.
             gateway = sync_gateway(state_dir, _gateway_profiles(profiles, local), http_port=http_port, use_sudo=use_sudo)
             if http_port is not None:
                 _apply_public_http_port(state_dir, profiles, http_port)

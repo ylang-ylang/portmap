@@ -56,7 +56,7 @@ class Transport:
         return gateway(domain=kwargs.get("expected_domain") or "remote.portmap")
 
 
-def test_direct_connect_publishes_remote_dns_without_gateway(tmp_path: Path, monkeypatch):
+def test_direct_connect_publishes_remote_dns_bypassing_local_gateway(tmp_path: Path, monkeypatch):
     resolver_installed(monkeypatch)
     transport = Transport(monkeypatch)
     result = client.connect(tmp_path, "192.0.2.10", via="direct")
@@ -66,8 +66,8 @@ def test_direct_connect_publishes_remote_dns_without_gateway(tmp_path: Path, mon
     assert result["dns_ready"] is True
     assert transport.records == {"remote.portmap": "192.0.2.10"}
     assert transport.verified == [("remote.portmap", "192.0.2.10")]
-    # No SSH/local profile exists: the gateway is only asked to manage nothing
-    # and no local port is needed for a direct route.
+    # The private entry gets no route for direct hosts: their DNS and URL
+    # keep pointing at the remote gateway.
     assert transport.gateway_profiles == [{}]
     assert "http://remote.portmap:8080" in transport.probes
     profile = client._load(tmp_path)["remote.portmap"]
@@ -349,27 +349,6 @@ def test_teardown_reaps_dns_even_when_gateway_cleanup_fails(tmp_path: Path, monk
     with pytest.raises(PortmapError):
         client.teardown_client(tmp_path)
     assert active == {"resolver": False, "dns": False}
-
-
-def test_setup_direct_only_starts_dns_without_any_gateway(tmp_path: Path, monkeypatch):
-    from portmap import client_gateway
-
-    monkeypatch.setattr(client, "resolver_status", lambda path: {"installed": True})
-    monkeypatch.setattr(client, "setup_resolver", lambda *args, **kwargs: {"installed": True})
-    monkeypatch.setattr(client, "dns_status", lambda path: {"running": True})
-    monkeypatch.setattr(client, "gateway_status", lambda path: {"running": False})
-    monkeypatch.setattr(client, "stop_gateway", lambda *args, **kwargs: None)
-    monkeypatch.setattr(client, "teardown_resolver", lambda *args, **kwargs: None)
-    monkeypatch.setattr(client, "stop_dns", lambda *args: None)
-    # A missing Traefik binary must not matter for direct-only setups: the real
-    # sync_gateway returns a stopped state without ever resolving a binary.
-    monkeypatch.setattr(client_gateway, "find_native_binary", lambda _name: pytest.fail("direct-only setup must not need Traefik"))
-    client._save(tmp_path, {"remote.portmap": {"domain": "remote.portmap", "via": "direct", "address": "192.0.2.10", "target": "192.0.2.10", "backend_url": "http://192.0.2.10:8080"}})
-    records = {}
-    monkeypatch.setattr(client, "sync_dns", lambda path, value, **kwargs: records.update(value))
-    result = client.setup_client(tmp_path)
-    assert result["gateway"]["running"] is False
-    assert records == {"remote.portmap": "192.0.2.10"}
 
 
 def test_setup_saves_preferred_public_port_and_refreshes_stale_endpoints(tmp_path: Path, monkeypatch):

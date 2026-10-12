@@ -1038,15 +1038,18 @@ function DownloadPanel({ catalog }) {
             <p>After install, on the computer that needs access:</p>
             <pre><code>{`portmap setup\nportmap connect <IP-or-SSH-target>\nportmap status --check`}</code></pre>
             <p>
-              Installing only places the command. <code>portmap setup</code> configures local
-              split DNS; <code>portmap connect</code> reaches a remote gateway. Direct access
-              uses the remote server's address and HTTP port, without a local HTTP listener.
-              SSH access uses the shared private HTTP entry on port 80.
+              Installing only places the command. <code>portmap setup</code> configures split
+              DNS and keeps <code>127.0.0.1:80</code> ready, even with no connections.
+              Direct access still goes straight to the remote server; SSH and local
+              projects share this private entry. Setup does not start Docker projects
+              or expose an entry to the LAN.
             </p>
             <p>
               To also publish this computer's projects, run <code>portmap up</code>.
               Local publishing needs Docker or Podman; remote-only access does not.
               DNS integration and restricted HTTP ingress request sudo when required.
+              Disconnecting a remote keeps the local entry; <code>portmap teardown</code>{" "}
+              releases it after local publishing has been stopped.
             </p>
           </div>
         </div>

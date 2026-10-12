@@ -72,9 +72,14 @@ unknown users, keys, or workspace names. Existing authentication,
 ProxyCommand and ProxyJump remain authoritative.
 
 Direct profiles resolve to the reachable IP verified on the workstation.
-They retain the remote HTTP port and need no local HTTP gateway. Equivalent
+They retain the remote HTTP port and bypass the local HTTP gateway. Equivalent
 default-port address spellings are normalized without weakening hostname-zone
 collision checks.
+
+Setup always prepares split DNS and the private `127.0.0.1:80` entry.
+An empty profile set, direct-only access and the last disconnect retain this
+entry. Only explicit teardown releases it, after local publishing has stopped.
+Setup neither starts application projects nor enables LAN ingress or boot units.
 
 SSH and local profiles resolve to loopback and share one public local HTTP
 port, default 80. Each SSH remote has its own private high-port forward.
@@ -238,7 +243,7 @@ access resolver, starts the agent/backend, publishes the local profile and
 public ingress, and commits ownership. Failed first startup cleans new owned
 resources; existing publishing state remains recoverable.
 Down removes only that local role, public ingress, backend and agent.
-SSH/direct profiles and any still-needed private HTTP ingress survive.
+SSH/direct profiles and the prepared private HTTP ingress survive.
 
 Background portmap workers inherit the invoking CLI user's credentials;
 scope creation does not elevate them or enable boot services. On Linux, when that process sits in

@@ -198,28 +198,44 @@ def test_hot_reload_removes_old_routes(local_gateway, backend, native_traefik):
     assert updated["traefik"]["pid"] == initial["traefik"]["pid"]
     assert request(updated["http_port"], "web.local.portmap")[0] == 404
     assert request(updated["http_port"], "web.other.portmap")[0] == 200
-    # With no SSH/local profile left, the owned gateway stops entirely; the
-    # descriptor is removed and every listener is closed.
-    stopped = client_gateway.sync_gateway(local_gateway.state_dir, {})
-    assert stopped["running"] is False
-    assert stopped["http_port"] is None
+    # Removing the last route keeps the shared listener and worker identities.
+    empty = client_gateway.sync_gateway(local_gateway.state_dir, {})
+    assert empty["running"] is True
+    assert empty["http_port"] == initial["http_port"]
+    assert empty["traefik"]["pid"] == initial["traefik"]["pid"]
+    assert empty["view"]["pid"] == initial["view"]["pid"]
+    assert request(empty["http_port"], "web.other.portmap")[0] == 404
+    assert request(empty["http_port"], "web.local.portmap")[0] == 404
+    client_gateway.stop_gateway(local_gateway.state_dir)
     assert client_gateway.gateway_status(local_gateway.state_dir)["running"] is False
-    assert not (local_gateway.state_dir / "gateway.json").exists()
     for port in (initial["http_port"], initial["listen_port"], initial["view_port"], initial["management_port"]):
         with pytest.raises(OSError):
             with socket.create_connection(("127.0.0.1", port), timeout=1):
                 pass
 
 
-def test_direct_only_profiles_need_no_gateway_or_traefik(tmp_path, monkeypatch):
-    def unreachable(*_args, **_kwargs):
-        pytest.fail("direct-only connections must never require the native Traefik binary")
-
-    monkeypatch.setattr(client_gateway, "find_native_binary", unreachable)
-    status = client_gateway.sync_gateway(tmp_path, {"remote.portmap": {"domain": "remote.portmap", "via": "direct", "backend_url": "http://192.0.2.10:8080"}})
-    assert status == {"running": False, "address": "127.0.0.1", "http_port": None, "listen_port": None, "view_port": None, "management_port": None, "ingress": None}
-    assert not (tmp_path / "gateway.json").exists()
-    assert not (tmp_path / "gateway").exists()
+@pytest.mark.parametrize("direct", [False, True], ids=["empty", "direct-only"])
+def test_idle_gateway_reserves_entry_without_routing_direct_hosts(tmp_path, backend, native_traefik, direct):
+    profiles = {
+        "remote.portmap": {
+            "domain": "remote.portmap", "via": "direct",
+            "backend_url": f"http://127.0.0.1:{backend.server_port}",
+        }
+    } if direct else {}
+    port = free_port()
+    try:
+        state = client_gateway.sync_gateway(tmp_path, profiles, http_port=port)
+        assert state["running"] is True
+        assert state["http_port"] == port
+        assert request(port, "127.0.0.1")[0] == 404
+        assert request(port, "web.remote.portmap")[0] == 404
+        with socket.socket() as competing:
+            competing.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            with pytest.raises(OSError):
+                competing.bind(("127.0.0.1", port))
+                competing.listen(1)
+    finally:
+        client_gateway.stop_gateway(tmp_path)
 
 
 def test_preferred_public_port_roundtrip(tmp_path):

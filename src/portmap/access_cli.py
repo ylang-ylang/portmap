@@ -13,12 +13,12 @@ from .errors import PortmapError
 
 
 def register_commands(subparsers: argparse._SubParsersAction) -> None:
-    setup = subparsers.add_parser("setup", help="configure isolated split DNS and import existing access connections")
+    setup = subparsers.add_parser("setup", help="configure isolated split DNS and the shared loopback HTTP entry")
     setup.add_argument("--no-sudo", action="store_true")
-    setup.add_argument("--http-port", type=int, help="explicit browser-facing HTTP port for SSH/local access; defaults to 80")
+    setup.add_argument("--http-port", type=int, help="explicit shared loopback HTTP port; defaults to 80, including direct-only access")
     setup.set_defaults(func=cmd_setup)
 
-    teardown = subparsers.add_parser("teardown", help="disconnect remote access and remove only portmap's resolver route")
+    teardown = subparsers.add_parser("teardown", help="disconnect remote access and remove portmap's DNS and local HTTP entry")
     teardown.add_argument("--no-sudo", action="store_true")
     teardown.set_defaults(func=cmd_teardown)
 

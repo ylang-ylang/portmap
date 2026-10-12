@@ -8,8 +8,8 @@
 # (sha256sum or shasum). No sudo, Python, jq, Brew, or autostart. Installs a
 # versioned bundle under ${XDG_DATA_HOME:-$HOME/.local/share}/portmap and
 # manages an atomic ~/.local/bin/portmap symlink. Installing does NOT
-# configure DNS or take over port 80. Setup configures split DNS; SSH
-# connections and local publishing use the shared private HTTP ingress.
+# configure DNS or take over port 80. Setup configures split DNS and keeps
+# 127.0.0.1:80 ready for SSH connections and local publishing.
 
 set -eu
 
@@ -320,9 +320,10 @@ case ":$PATH:" in
 esac
 note "Next steps:"
 note "  $PROGRAM --version"
-note "  $PROGRAM setup            # configure local split DNS (asks for sudo)"
+note "  $PROGRAM setup            # configure split DNS and 127.0.0.1:80 (asks for sudo)"
 note "  $PROGRAM connect <target> # direct to a remote IP, or through SSH"
 note "  $PROGRAM up               # optional: publish local Docker/Podman projects"
 note "Installing did not configure DNS or claim port 80."
-note "Direct access needs no local HTTP listener; SSH/local publishing share the private HTTP entry."
+note "Setup keeps the private HTTP entry ready, even with no connections. Direct traffic still goes straight to the remote server."
+note "Disconnecting a remote keeps the entry; run \`$PROGRAM teardown\` to release it."
 note "Run \`$PROGRAM status\` any time to see local publishing and access state."

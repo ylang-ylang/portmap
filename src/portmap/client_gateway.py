@@ -48,17 +48,16 @@ _CHILDREN: dict[int, subprocess.Popen[bytes]] = {}
 
 
 def sync_gateway(state_dir: Path, profiles: Mapping[str, dict], *, http_port: int | None = None, use_sudo: bool = True) -> dict:
-    """Publish the SSH/local routes, returning only after the gateway loads them.
+    """Keep the private HTTP entry running and publish its SSH/local routes.
 
-    Only SSH and local-server profiles are managed here: direct connections
-    resolve straight to their verified remote address and never need this
-    gateway or the native Traefik binary. With no managed profile left, the
-    owned gateway and ingress are stopped and a stopped state is returned while
-    direct DNS stays intact. The browser-facing ``http_port`` is separated from
-    the unprivileged ``listen_port`` Traefik binds: a privileged public port is
-    owned by the private systemd ingress socket forwarding to that listener,
-    and there is never a silent fallback to another port. A legacy (version 1)
-    descriptor is only ever stopped through ownership validation, never reused.
+    The entry is prepared even with no managed profiles and remains available
+    after the last route is removed. Only explicit teardown stops it. Direct
+    connections still resolve to the verified remote IP and bypass this entry.
+    The browser-facing ``http_port`` is separated from the unprivileged
+    ``listen_port`` Traefik binds: a privileged public port is owned by the
+    private systemd ingress socket forwarding to that listener, with no silent
+    fallback. A legacy (version 1) descriptor is stopped through ownership
+    validation, never reused.
     """
     backends, local_domains = _backends(_managed_profiles(profiles))
     if http_port is not None:
@@ -73,15 +72,10 @@ def sync_gateway(state_dir: Path, profiles: Mapping[str, dict], *, http_port: in
                     raise PortmapError("The local gateway is active; stop it before changing --http-port")
                 if not all(_owned_process(previous, kind) for kind in ("traefik", "view")):
                     raise PortmapError("The local gateway is incomplete; stop it before reconnecting")
-                if not backends:
-                    _stop(state_dir, previous, use_sudo=use_sudo)
-                    return _stopped_state()
                 return _publish(state_dir, previous, backends, local_domains)
             # A live legacy descriptor, or a dead one of any version, is
             # replaced. Stopping validates ownership before signaling anything.
             _stop(state_dir, previous, use_sudo=use_sudo)
-        if not backends:
-            return _stopped_state()
         if http_port is None:
             http_port = preferred_http_port(state_dir)
             if http_port is None and previous is not None and previous["version"] == 2:
@@ -423,7 +417,6 @@ def _ingress(state: dict) -> dict | None:
 
 
 def _ensure_ingress(state_dir: Path, *, name: str, bind_address: str, port: int, target_port: int, use_sudo: bool = True) -> dict:
-    # Imported lazily: direct-only clients never load the systemd ingress path.
     from .ingress import ensure_ingress
 
     return ensure_ingress(state_dir, name=name, bind_address=bind_address, port=port, target_port=target_port, use_sudo=use_sudo)

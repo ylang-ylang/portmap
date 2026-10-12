@@ -293,10 +293,16 @@ ingress; it does **not** create a wildcard HTTP listener. Set
 
 | Access path | DNS result | Browser port | Local HTTP listener |
 |---|---|---|---|
-| Direct remote | Verified remote IP | Remote gateway's port, normally 80 | None required |
+| Direct remote | Verified remote IP | Remote gateway's port, normally 80 | Prepared by setup, bypassed by direct traffic |
 | SSH remote | `127.0.0.1` | 80 | Shared private ingress |
 | Local project | `127.0.0.1` | 80 | Same private ingress |
 | LAN client of this server | This server's LAN IP | 80 | Separate public ingress |
+
+`portmap setup` configures split DNS and reserves the private
+`127.0.0.1:80` entry, including when there are no profiles or only direct
+connections. Disconnecting the last remote does not release the entry.
+After stopping local publishing, `portmap teardown` releases the owned
+entry and DNS integration. Installation alone performs none of these steps.
 
 The private ingress forwards to native Traefik on a private high port. Traefik
 routes each SSH domain to its own private SSH forward, and the local domain to
@@ -341,9 +347,9 @@ single-port overlay are no longer used. Use `portmap up`, not a raw gateway
 `portmap gateway config` remains available for configuration inspection.
 
 `portmap down` stops the local publishing role and its public ingress while
-preserving remote connections. The shared private HTTP ingress disappears
-when neither local publishing nor SSH connections need it. Direct DNS
-mappings remain independent.
+preserving remote connections and the prepared private HTTP entry.
+Only `portmap teardown` releases that entry and the split DNS integration.
+Direct DNS mappings remain independent of the local HTTP data path.
 
 Only HTTP is multiplexed here. HTTPS, DNS, raw TCP/UDP, and port ranges are not
 tunneled through port 80. Server CoreDNS remains separately configurable for
@@ -392,7 +398,7 @@ is required. Historical runtime comparison evidence is in
 Install the same `portmap` command on the computer running your browser:
 
 ```bash
-# DNS setup only; this does not start an HTTP gateway.
+# Configure split DNS and keep the private 127.0.0.1:80 entry ready.
 portmap setup
 
 # Inspect configured SSH aliases or probe one explicit address.
