@@ -40,7 +40,7 @@ class Transport:
         monkeypatch.setattr(client, "dns_status", lambda path: {"running": bool(self.records)})
         monkeypatch.setattr(client, "gateway_status", lambda path: dict(self.gateway_state))
 
-    def _sync_dns(self, path, records):
+    def _sync_dns(self, path, records, **kwargs):
         self.records = dict(records)
     def _sync_gateway(self, path, profiles, **kwargs):
         self.gateway_profiles.append(dict(profiles))
@@ -106,7 +106,7 @@ def test_direct_target_hostname_and_port_variants_stay_distinct(tmp_path: Path, 
 def test_separate_catalog_is_not_gateway_readiness(tmp_path: Path, monkeypatch):
     resolver_installed(monkeypatch)
     published = {}
-    monkeypatch.setattr(client, "sync_dns", lambda path, records: published.update(records))
+    monkeypatch.setattr(client, "sync_dns", lambda path, records, **kwargs: published.update(records))
     monkeypatch.setattr(client, "sync_gateway", lambda path, profiles, **kwargs: {"running": False, "http_port": None})
 
     def probe(target, **kwargs):
@@ -160,7 +160,7 @@ def test_failed_dns_publication_closes_new_ssh_connection(tmp_path: Path, monkey
     def stop(tunnel, **kwargs):
         live_tunnels.discard(tunnel["target"])
 
-    def publish(path, records):
+    def publish(path, records, **kwargs):
         if records:
             raise PortmapError("DNS refused the new configuration")
 
@@ -184,7 +184,7 @@ def test_failed_disconnect_preserves_connection_for_retry(tmp_path: Path, monkey
     client._save(tmp_path, existing)
     published = {"remote.portmap": "127.0.0.1"}
 
-    def publish(path, records):
+    def publish(path, records, **kwargs):
         published.clear()
         published.update(records)
 
@@ -366,7 +366,7 @@ def test_setup_direct_only_starts_dns_without_any_gateway(tmp_path: Path, monkey
     monkeypatch.setattr(client_gateway, "find_native_binary", lambda _name: pytest.fail("direct-only setup must not need Traefik"))
     client._save(tmp_path, {"remote.portmap": {"domain": "remote.portmap", "via": "direct", "address": "192.0.2.10", "target": "192.0.2.10", "backend_url": "http://192.0.2.10:8080"}})
     records = {}
-    monkeypatch.setattr(client, "sync_dns", lambda path, value: records.update(value))
+    monkeypatch.setattr(client, "sync_dns", lambda path, value, **kwargs: records.update(value))
     result = client.setup_client(tmp_path)
     assert result["gateway"]["running"] is False
     assert records == {"remote.portmap": "192.0.2.10"}

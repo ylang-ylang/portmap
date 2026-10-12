@@ -314,6 +314,20 @@ sudo commands; it does not run the entire CLI as root, modify sudoers, apply
 binary capabilities, or lower `net.ipv4.ip_unprivileged_port_start`.
 Units are not enabled at boot. Rerun `setup` and `up` as needed after reboot.
 
+The background workers (client CoreDNS, native Traefik with its catalog view,
+SSH masters, and the host agent) must outlive the terminal or SSH login that
+started them. When portmap detects it is running inside a disposable logind
+`session-*.scope`, it first moves its own process into a transient systemd
+scope through one exact privileged `busctl StartTransientUnit` call, before
+the first worker starts. Workers then survive the launching session's
+disconnect while still running as the same unprivileged user, with no unit
+files and no boot enablement; outside such a login session (and on non-Linux
+systems) nothing is attempted. `--no-sudo` refuses a new worker if this escape
+needs elevation. Installing or upgrading portmap alone neither restarts
+already-running workers nor changes their lifetime. Existing workers must
+stop and start again before the new launch rule applies; an idempotent
+`setup`, `up`, `connect`, or `agent start` may reuse a running worker.
+
 Port 80 is exclusive per address. A competing `docker -p 80:80` wildcard
 mapping is a conflict, not another independent virtual host. Portmap never
 stops unrelated listeners or silently falls back to `18080`.
@@ -442,8 +456,10 @@ portmap teardown
 
 Teardown refuses while the local publishing role is active. Disconnecting a
 remote does not stop its containers. Use `--no-sudo` on setup, teardown,
-connect, disconnect, up, or down when privilege elevation must not be invoked;
-operations that need an administrative change fail explicitly instead.
+connect, disconnect, up, down, or agent start when privilege elevation must
+not be invoked; operations that need an administrative change fail explicitly
+instead. This includes the login-session escape above: with `--no-sudo` a
+background worker that cannot be kept alive past the session is never started.
 The older `portmap dns set/unset` commands manage an explicit server-DNS
 drop-in, not this access resolver, and are not part of the unified setup path.
 

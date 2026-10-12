@@ -115,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_serve.set_defaults(func=cmd_agent_serve)
 
     agent_start = agent_subparsers.add_parser("start", help="start the host agent in the background")
+    agent_start.add_argument("--no-sudo", action="store_true", help="do not elevate to keep the agent past this login session")
     agent_start.set_defaults(func=cmd_agent_start)
 
     agent_stop = agent_subparsers.add_parser("stop", help="stop the background host agent")
@@ -350,7 +351,7 @@ def cmd_agent_serve(args: argparse.Namespace) -> int:
 
 
 def cmd_agent_start(args: argparse.Namespace) -> int:
-    status = ensure_agent_started(load_portmap_settings(environ=os.environ))
+    status = ensure_agent_started(load_portmap_settings(environ=os.environ), use_sudo=not args.no_sudo)
     print_json(status.as_dict())
     return 0 if status.running else 1
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_client import AgentUnavailable, agent_health
-from .client_runtime import frozen, worker_environment
+from .client_runtime import ensure_persistent_scope, frozen, worker_environment
 from .settings import PortmapSettings
 
 
@@ -173,7 +173,7 @@ def agent_status(settings: PortmapSettings) -> AgentProcessStatus:
     )
 
 
-def ensure_agent_started(settings: PortmapSettings) -> AgentProcessStatus:
+def ensure_agent_started(settings: PortmapSettings, *, use_sudo: bool = True) -> AgentProcessStatus:
     current = agent_status(settings)
     if current.running:
         return current
@@ -193,6 +193,8 @@ def ensure_agent_started(settings: PortmapSettings) -> AgentProcessStatus:
         else [sys.executable, "-m", "portmap.agent", "serve"]
     )
     command += ["--socket", str(settings.agent_socket), "--pid-file", str(settings.agent_pid_file)]
+    # The agent serves later CLI calls; it must outlive this login session.
+    ensure_persistent_scope(use_sudo=use_sudo)
     with log_file.open("ab") as log:
         process = subprocess.Popen(
             command,
