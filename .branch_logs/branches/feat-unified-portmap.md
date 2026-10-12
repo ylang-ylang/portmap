@@ -50,3 +50,5 @@
   unpublished source change from the published dev base in a clean, guarded
   workspace; preserve the original workspace and verified release bundle without
   rewriting protected refs or importing the accidental binary commit history.
+- Sync the clean dev integration and include the required main release ledger
+  for the guarded `V0.10` merge; application and test sources are unchanged.
