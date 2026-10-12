@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .broker import ensure_generated_override
+from .client_runtime import native_environment
 from .compose_takeover import plan_docker_compose_command
 from .repo_identity import git
 from .settings import PortmapSettings, load_portmap_settings
@@ -58,7 +59,7 @@ def demo_up(settings: PortmapSettings) -> DemoResult:
             endpoints={},
             message="broker did not inject the generated override",
         )
-    env = os.environ.copy()
+    env = native_environment()
     env["PORTMAP_BROKER_BYPASS"] = "1"
     env["DOCKER_HOST"] = settings.docker_host
     result = subprocess.run(plan.command, cwd=project_dir, env=env, check=False)
@@ -83,7 +84,7 @@ def demo_down(settings: PortmapSettings, *, purge: bool = False) -> DemoResult:
     if not project_dir.exists():
         return DemoResult(ok=True, action="down", project_dir=project_dir, endpoints={}, message="no demo project")
     plan = plan_docker_compose_command(["down", "-v"], cwd=project_dir)
-    env = os.environ.copy()
+    env = native_environment()
     env["PORTMAP_BROKER_BYPASS"] = "1"
     env["DOCKER_HOST"] = settings.docker_host
     result = subprocess.run(plan.command, cwd=project_dir, env=env, check=False)

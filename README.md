@@ -33,8 +33,8 @@ portmap keeps the branch network entrypoints organized.
 HTTP, WebSocket, and CDP-like services get stable URLs:
 
 ```text
-http://frontend.dev.myrepo.ylang-u22.portmap:8080
-http://frontend.feat-a.myrepo.ylang-u22.portmap:8080
+http://frontend.dev.myrepo.ylang-u22.portmap
+http://frontend.feat-a.myrepo.ylang-u22.portmap
 ```
 
 TCP, UDP, TURN, and other raw-port services get non-conflicting host ports.
@@ -73,8 +73,11 @@ or range exposure is delegated to Docker Compose port mappings.
 
 ## Requirements
 
-Your project should use Docker Compose, and services managed by `portmap`
-should have:
+Remote-only access needs no local container runtime. The standalone download
+includes Python, CoreDNS, and Traefik; see [Unified CLI](#unified-cli).
+
+For local publishing, your project should use Docker Compose with Docker or
+Podman, and managed services should have:
 
 ```text
 Docker bridge network
@@ -205,142 +208,135 @@ application needs the original external Host, set `preserve_host = true` for
 that endpoint. If a service needs a specific upstream Host, set
 `upstream_host = "host:port"`.
 
-## Server CLI
+## Unified CLI
 
-Install the **server tooling** with Homebrew (Linux or macOS tap):
+One `portmap` command can access remote machines, publish this machine's
+projects, or do both. Installing it does not enable either role.
+
+Open a trusted server's catalog and use **Download portmap**, or run its
+installer:
+
+```bash
+SERVER=http://192.0.2.10
+curl -fsSL "$SERVER/install.sh" | sh -s -- "$SERVER"
+export PATH="$HOME/.local/bin:$PATH"  # if not already configured
+portmap --version
+```
+
+Use an address reachable before `.portmap` DNS is configured. When the Web page
+is opened through a `.portmap` name, its install command uses the advertised
+server IP and retains the current HTTP port instead of requiring that name.
+
+The standalone package supports **Linux amd64 with glibc 2.31+** and bundles
+its Python runtime, CoreDNS, and Traefik. Client-only operation does not need
+Python, Homebrew, or Docker installed separately. OpenSSH is needed for SSH
+connections. Linux DNS integration needs `systemd-resolved` and `iproute2`;
+the default HTTP 80 ingress needs a systemd system manager.
+Applications must actually use systemd-resolved, through its NSS integration
+(for example `libnss-resolve` on Debian) or its configured DNS stub.
+A running resolver service alone is insufficient when `/etc/nsswitch.conf`
+and `/etc/resolv.conf` still bypass it. Portmap does not rewrite those global
+files; enable the OS resolver integration separately.
+
+The Web page also offers Homebrew installation and upgrade:
 
 ```bash
 brew install ylang-ylang/tap/portmap
+brew upgrade ylang-ylang/tap/portmap
 ```
 
-Or install a source checkout as a `uv` tool so other repos can call the short
-`portmap` command:
+The formula installs Python and the native DNS/HTTP dependencies, not Docker.
+Source installations are also supported:
 
 ```bash
-uv tool install --editable /home/ylang/ylangs_ws/portmap@wt/portmap@dev --force
+uv tool install --editable /path/to/portmap --force
 ```
 
-Both modes are equivalent. Installed packages read gateway assets
-(`docker-compose.yml`, single-port overlay, Corefile) from the Python package
-and keep editable settings in `~/.config/portmap/portmap.toml` when the
-gateway's own `portmap.toml` is absent; `PORTMAP_ROOT` still overrides the
-asset root explicitly.
+Source installs need CoreDNS and Traefik on `PATH`. Standalone downloads for
+macOS, Windows, ARM64, and musl/Alpine are not published. The Linux workflow
+below is the supported default-port workflow; the presence of other resolver
+adapters does not imply a verified port-80 implementation on those platforms.
 
-For workstation access, use the separate **`portmap-client` download** below.
-Installing the server CLI is not a client prerequisite.
+### Publish Local Projects
 
-On a machine that runs your Compose projects, start the server-side gateway:
+Run as your normal login user, with access to a local Docker or Podman socket:
 
 ```bash
 portmap up
+portmap status --check
+portmap demo up
 ```
 
-This starts the host-side agent, then starts the shared gateway containers. The
-agent scans host Git worktrees and handles host-side compose starts for the
-catalog page; the gateway containers provide Traefik, CoreDNS, and the catalog
-UI.
+`up` configures the isolated access resolver, starts the host-side agent and
+container-network gateway, then publishes the local role. The catalog and
+HTTP projects share port **80**. `demo up` starts a separate verification
+project, not your existing application.
 
-This creates the `portmap_gateway` Docker network. The default ports stay
-compatible with existing deployments; single-port mode shares the HTTP entrypoint:
-
-| Entry | Default | Single-port mode |
-|---|---|---|
-| Traefik / managed HTTP services | `http://<host-ip>:8080` | `http://<host-ip>:80` |
-| Catalog (bare IP or unmatched Host) | `http://<host-ip>:80`, also via Traefik on `:8080` | Via Traefik on `:80`; no catalog host-port mapping |
-| CoreDNS (TCP/UDP) | `<host-ip>:53` | Unchanged; keep local/private if the firewall only permits HTTP |
-
-CoreDNS answers every A record under the host's domain with the
-detected host LAN IP. The default domain is the machine hostname — a
-host named `ylang-U22` serves `*.ylang-u22.portmap` — so multiple
-portmap hosts coexist in one client resolver: delegate each
-`<hostname>.portmap` subzone to its own machine. Set
-`[gateway] dns_domain` in `portmap.toml` (or `PORTMAP_DNS_DOMAIN`) to pin
-a custom suffix such as the legacy shared `debug.lan`.
-Other DNS queries are forwarded to the configured upstream resolver, defaulting
-to `/etc/resolv.conf`, so portmap-managed containers can still resolve public
-domains after their DNS is pointed at portmap. Configure development machines
-with split DNS so only the debug domain's queries go to this DNS server.
-
-Gateway runtime settings are tracked in the portmap repo root:
-
-```text
-portmap.toml
-```
-
-`portmap up` and the lower-level `portmap gateway ...` command read that file
-directly and detect the current host LAN IP at runtime. The detected IP is used
-for DNS answers and raw/range endpoint advertisement, so the LAN IP does not
-need to be stored in config.
-
-### One HTTP Port Per Development Machine
-
-For a machine whose firewall only allows inbound TCP `80`, set this in the
-gateway's `portmap.toml`:
+Gateway assets are packaged with the command. Settings come from the gateway
+root's `portmap.toml`, or `~/.config/portmap/portmap.toml` for an installed
+package. `PORTMAP_ROOT` explicitly selects another asset root. Example:
 
 ```toml
 [gateway]
-http_bind = "0.0.0.0"
 http_port = 80
-catalog_port = 80
-dns_bind = "0.0.0.0"
-dns_port = 53
-dns_domain = "debug.lan"
-network = "portmap_gateway"
+http_bind = "0.0.0.0"
+dns_bind = "127.0.0.1"
 ```
 
-When `http_port == catalog_port`, `portmap up` / `portmap gateway` automatically
-apply `docker-compose.single-port.yml` to remove the catalog's host-port mapping.
-The catalog stays on `portmap_gateway`, listening on container port `8081`.
-Traefik's ``HostRegexp(`.+`)`` fallback router has priority `1`, below generated
-service Host routes. Bare IPs and unknown Hosts therefore serve the catalog,
-while registered Hosts reach their services on the same HTTP port. In this mode
-`catalog_bind` is ignored; `http_bind` controls the shared listener. Equal
-non-80 ports work the same way. Unequal ports keep the separate catalog mapping,
-including a custom `catalog_bind` / `catalog_port`.
+`http_bind = "0.0.0.0"` selects the detected LAN IPv4 address for the public
+ingress; it does **not** create a wildcard HTTP listener. Set
+`http_bind = "127.0.0.1"` to publish locally only. The default domain is
+`<hostname>.portmap`; `dns_domain` can select another host zone under
+`.portmap`.
 
-Preview before changing running services:
+### HTTP 80 Ownership and Isolation
 
-```bash
-portmap gateway config
-```
+| Access path | DNS result | Browser port | Local HTTP listener |
+|---|---|---|---|
+| Direct remote | Verified remote IP | Remote gateway's port, normally 80 | None required |
+| SSH remote | `127.0.0.1` | 80 | Shared private ingress |
+| Local project | `127.0.0.1` | 80 | Same private ingress |
+| LAN client of this server | This server's LAN IP | 80 | Separate public ingress |
 
-For an existing default deployment, first validate a separate stack on an unused
-loopback port (use distinct container names and an external `portmap_gateway`
-network; `-p` alone does not change the fixed gateway container names). At cutover,
-release the old catalog's port `80` before starting Traefik on it:
+The private ingress forwards to native Traefik on a private high port. Traefik
+routes each SSH domain to its own private SSH forward, and the local domain to
+the container gateway's loopback backend. Adding another SSH machine does not
+add another browser-facing port.
 
-```bash
-portmap gateway stop catalog
-portmap gateway up -d
-curl http://127.0.0.1/
-curl -H 'Host: unknown.debug.lan' http://127.0.0.1/
-curl -H 'Host: web.dev.lushu.debug.lan' http://127.0.0.1/map.html
-```
+The LAN ingress forwards **directly to the local container backend**, never to
+the private SSH gateway. Remote SSH routes therefore do not become available
+to other LAN machines when local publishing is enabled.
 
-Changing the gateway port does not rewrite labels on existing project containers.
-Run `portmap docker-compose -- up -d` in each managed worktree (including
-`lushu@dev`) with the same gateway settings so generated URLs and catalog links
-move from `:8080` to `:80`. `PORTMAP_HTTP_PORT=80` is an explicit override if the
-project's broker points at another portmap checkout. To roll back, restore
-`http_port = 8080` / `catalog_port = 80`, stop Traefik to free `80`, run
-`portmap gateway up -d`, and regenerate project URLs with the restored settings.
+Systemd owns the exact `127.0.0.1:80` and, when enabled, `<LAN-IP>:80` sockets.
+An unprivileged `systemd-socket-proxyd` service forwards each socket to its
+fixed loopback backend. Portmap installs owned units with narrowly scoped
+sudo commands; it does not run the entire CLI as root, modify sudoers, apply
+binary capabilities, or lower `net.ipv4.ip_unprivileged_port_start`.
+Units are not enabled at boot. Rerun `setup` and `up` as needed after reboot.
 
-Raw `docker compose` does not read `portmap.toml` or choose the overlay. Its
-equivalent single-port invocation is:
+Port 80 is exclusive per address. A competing `docker -p 80:80` wildcard
+mapping is a conflict, not another independent virtual host. Portmap never
+stops unrelated listeners or silently falls back to `18080`.
+`setup --http-port N` explicitly selects an alternative private HTTP port;
+local publishing must use the same configured `http_port`.
 
-```bash
-PORTMAP_HTTP_PORT=80 PORTMAP_CATALOG_PORT=80 docker compose \
-  -f docker-compose.yml -f docker-compose.single-port.yml up -d
-```
+The container Traefik binds only a private loopback high port. The catalog has
+no separate host-port mapping; `catalog_port`, `catalog_bind`, and the former
+single-port overlay are no longer used. Use `portmap up`, not a raw gateway
+`docker compose up`, to allocate and maintain the backend port and ingress.
+`portmap gateway config` remains available for configuration inspection.
 
-Use Docker Compose with `!reset` support. This mode combines **HTTP** ports only:
-it does not tunnel DNS, raw TCP/UDP, or ranges through port `80`. With external
-DNS port `53` closed, clients need a separately managed wildcard DNS record or
-hosts entries for individual service names pointing at the development machine.
-`dns_bind = "0.0.0.0"` resolves to the detected LAN IP; restrict DNS to trusted
-local/container clients instead of opening it publicly. The catalog and its
-control actions are unauthenticated: exposing the fallback on `80` does not make
-the gateway safe for the public Internet.
+`portmap down` stops the local publishing role and its public ingress while
+preserving remote connections. The shared private HTTP ingress disappears
+when neither local publishing nor SSH connections need it. Direct DNS
+mappings remain independent.
+
+Only HTTP is multiplexed here. HTTPS, DNS, raw TCP/UDP, and port ranges are not
+tunneled through port 80. Server CoreDNS remains separately configurable for
+container/external DNS consumers; unified access clients use their own split
+DNS and do not require remote port 53. The catalog and control actions remain
+unauthenticated: restrict publishing to trusted networks, not the public
+Internet.
 
 ### Container Runtime: Docker or Podman
 
@@ -360,225 +356,168 @@ Liveness is checked by connecting, so a stale socket file left by a
 stopped dockerd does not win the probe. `PORTMAP_RUNTIME` /
 `PORTMAP_RUNTIME_SOCKET` environment variables override the file.
 
-Podman hosts still use the docker compose CLI as the client: portmap
-points it at the Podman API socket through `DOCKER_HOST`, so generated
-override semantics (including `!reset` for single-port mode) are
-identical on both runtimes. Traefik and CoreDNS are unchanged — Traefik's
-Docker provider talks to whichever socket the gateway mounts. Rootful
-Podman needs no extra setup; rootless Podman must allow privileged ports
-(`sysctl net.ipv4.ip_unprivileged_port_start=53`) for the gateway's DNS
-and HTTP listeners.
+Podman hosts still use the Docker Compose CLI as the client: portmap points it
+at the Podman API socket through `DOCKER_HOST`. The user running portmap must
+already have permission to access that socket, just as with Docker. Generated
+project overrides need Compose `!reset` support.
 
-The compose takeover shim auto-detects the runtime the same way, and it
-also covers `podman compose`: Podman's provider search path includes
-`~/.docker/cli-plugins/docker-compose`, so one shim shadows both
-`docker compose` and `podman compose`. On Podman-only hosts make sure the
-docker CLI and its compose plugin are installed as client-only packages
-(no dockerd required).
+HTTP 80 is owned by the restricted systemd ingress, not the container runtime.
+For rootless Podman, configure an unprivileged server DNS port such as
+`[gateway] dns_port = 1053` rather than globally permitting low-port binds.
+That server DNS listener is separate from the client resolver at
+`169.254.254.53:1053`.
 
-Runtime support was verified end-to-end on Debian 13 with Docker 29.6 /
-compose v5.3 and rootful Podman 5.4; see
-[docs/podman-spike.md](docs/podman-spike.md) for the spike evidence.
+The compose takeover shim also covers `podman compose`: Podman's provider
+search includes `~/.docker/cli-plugins/docker-compose`. On Podman-only hosts
+install the Docker CLI and Compose plugin as client-only packages; no dockerd
+is required. Historical runtime comparison evidence is in
+[docs/podman-spike.md](docs/podman-spike.md).
 
-### Client Access: Direct IP or SSH
+### Remote Access: Direct IP or SSH
 
-`portmap-client` is a separate workstation tool. Open your server's catalog and
-use **Download client**, or copy the install command shown there. The downloadable
-bundle includes its Python runtime, CoreDNS, and Traefik: **no local Python,
-Homebrew, Docker, or portmap server installation is needed**. OpenSSH remains an
-OS dependency for SSH connections; existing SSH configuration and credentials
-are reused.
-
-The published package currently supports **Linux x86-64 with glibc 2.31+**.
-Linux split-DNS setup also requires `systemd-resolved`, `iproute2`, and permission
-to make privileged resolver changes. macOS, Windows, ARM64, and musl/Alpine
-downloads are not published; the page lists only real release artifacts.
-
-The installer requires ordinary shell tools (`curl`, `tar`, `awk`, `grep`,
-`readlink`, and `sha256sum` or `shasum`). Use a catalog you trust: the installer
-verifies the archive against that server's manifest, not an independent signature.
-Use HTTPS or a trusted network when downloading.
+Install the same `portmap` command on the computer running your browser:
 
 ```bash
-# Replace this example with the catalog origin shown in your browser.
-SERVER=http://192.0.2.10
-curl -fsSL "$SERVER/install-client.sh" | sh -s -- "$SERVER"
-# If ~/.local/bin is not already on PATH:
-export PATH="$HOME/.local/bin:$PATH"
-portmap-client --version
+# DNS setup only; this does not start an HTTP gateway.
+portmap setup
 
-# Run as your normal login user. Setup elevates only OS resolver changes.
-portmap-client setup
+# Inspect configured SSH aliases or probe one explicit address.
+portmap discover
+portmap discover 192.0.2.10
 
-# Inventory literal Host aliases from local SSH config and Include files.
-# This does not scan the network, authenticate, or expand Host *.coder.
-portmap-client discover
+# Direct access uses the verified remote IP and remote HTTP port.
+portmap connect 192.0.2.10 --via direct
 
-# Probe only the supplied gateway address.
-portmap-client discover 192.0.2.10:8080
-portmap-client connect 192.0.2.10:8080
+# SSH access uses a private tunnel behind the shared local HTTP 80 ingress.
+portmap connect devbox --via ssh
+portmap connect main.workspace.owner.coder --via ssh
 
-# Reuse a configured SSH alias, or supply the full target explicitly.
-portmap-client connect devbox
-portmap-client connect main.workspace.owner.coder --via ssh
-
-portmap-client connections --check
-portmap-client disconnect devbox
-portmap-client teardown
+portmap connections --check
+portmap status --check
+portmap disconnect devbox
 ```
 
-Installation does not start processes or modify DNS. It places a versioned
-bundle under `${XDG_DATA_HOME:-$HOME/.local/share}/portmap-client/<version>` and
-an executable symlink at `~/.local/bin/portmap-client`. Keep the whole bundle:
-the executable uses its adjacent `_internal` directory. The installer refuses
-to replace unrelated files or accept an unsafe or checksum-mismatched archive.
-When stderr is a terminal, downloads show percentage, received bytes, transfer
-speed, and estimated time remaining, including when the installer is piped into
-`sh`. Redirected/non-interactive logs omit the progress meter but retain errors
-and verification/extraction stage messages.
+Without `--via`, `auto` tries direct access and may use a concrete configured
+SSH alias as fallback. It does not invent usernames, keys, workspace names, or
+unknown hosts. Interactive use can prompt for an SSH target; scripts should
+supply `--via ssh` or `--ssh-target`. Existing OpenSSH configuration,
+`ProxyCommand`, `ProxyJump`, and credentials remain authoritative.
 
-**Migrating from 0.6:** if the old combined CLI has active client connections,
-run `portmap client teardown` with that old version before upgrading the server
-CLI. Then install the separate client, run setup, and reconnect your targets.
-Client commands were removed from the server CLI; there are no compatibility
-aliases or automatic imports of old process ownership/state.
+Bootstrap defaults to port 80. Supply an explicit address port for a
+non-default direct gateway, or `--remote-port N` for SSH. Direct URLs retain
+the remote port; SSH URLs use the shared local public port. These are separate
+from the private high ports allocated for tunnels and backend listeners.
 
-Replace documentation addresses and SSH names with your own. In `auto` mode,
-the client tries direct access and can use a concrete local SSH alias as a
-fallback. It does not guess usernames, keys, workspace names, or unknown
-hosts. When no SSH target can be inferred, an interactive terminal prompts
-for one; scripts must supply `--via ssh` or `--ssh-target`. Existing
-`ProxyCommand`/`ProxyJump` and authentication settings remain authoritative;
-Coder needs no special backend.
+`192.0.2.10`, `192.0.2.10:80`, and `http://192.0.2.10` identify the same direct
+target, so reconnecting does not force a disconnect. A different target with
+the same hostname zone is rejected rather than overwriting its DNS mapping.
+The remote catalog cannot choose your workstation's reachable IP.
 
-All connected HTTP gateways share **one local HTTP listener**. Each registered
-`<hostname>.portmap` zone resolves to `127.0.0.1`; local Traefik routes by Host
-to either a reachable remote IP or an internally allocated SSH forward.
-The client never forwards remote DNS servers. Catalogs at each
-`http://<hostname>.portmap:<local-port>/` rewrite application links to that
-same local port, regardless of the remote gateway's port.
+`connect --tcp` additionally forwards advertised raw TCP ports. UDP and port
+ranges do not travel over ordinary SSH forwards and are marked unsupported.
+SSH apex catalogs project client-visible URLs; application subdomains and
+catalog control actions preserve the remote Host-routing path.
 
-The listener prefers port `80`, then `18080`, then a free high port, without
-replacing existing listeners. Select a fixed shared port with
-`portmap-client setup --http-port 28080`. Port changes require teardown while
-saved connections exist. Individual SSH backend ports are private implementation
-details, not ports you need to remember.
+### Split DNS and State
 
-On Linux, setup requires `systemd-resolved`, `iproute2`, and administrative
-permission. It creates an owned dummy interface and directs only `~portmap`
-to CoreDNS at `169.254.254.53:1053`. Using that link-local address also supports
-systemd 249; loopback DNS on a separate routing interface does not work there.
-Global/physical-interface DNS and `/etc/resolv.conf` are left unchanged.
-The source contains a macOS resolver adapter, but there is no published or
-verified macOS standalone package. Rerun setup after an OS restart to restore
-transient Linux resolver state.
+`portmap setup` creates an owned dummy interface on Linux and routes only
+`~portmap` to local CoreDNS at `169.254.254.53:1053`. Direct records use remote
+IP addresses; SSH and local records use loopback. Unconnected zones return
+NXDOMAIN. Physical-interface DNS and `/etc/resolv.conf` are not rewritten.
+Do not combine this setup with the former per-interface Web DNS commands.
 
-Client state lives under `${XDG_STATE_HOME:-$HOME/.local/state}/portmap-client`,
-created with mode `0700`, independently of server settings.
-`PORTMAP_CLIENT_STATE_DIR` selects an isolated private directory for testing.
-Disconnect removes one local route and its owned tunnel, not remote containers;
-teardown removes the local resolver route and client-owned processes.
-
-Boundaries:
-
-- A remote must already run a portmap gateway with a `<hostname>.portmap`
-  domain. Discovery reads its existing `/registry.json`; the remote does not
-  decide which IP or SSH path your workstation should use.
-- Gateway bootstrap tries `8080` and `80`; `connect --remote-port N` supplies
-  a custom SSH-side bootstrap port. A listener alone is not readiness: catalog,
-  routing, and OS DNS are checked before reporting a successful connection.
-- Duplicate hostname zones are rejected instead of overwriting another
-  connection. The apex hostname is reserved for the local catalog; application
-  endpoints must use subdomains.
-- HTTP/WebSocket/SSE use the shared HTTP gateway. `connect --tcp` additionally
-  forwards advertised raw TCP ports at separate local addresses. Ordinary SSH
-  forwarding does not carry UDP or port ranges; unsupported endpoints are
-  explicitly marked in the client catalog.
-- Client HTTP listeners bind loopback only. Catalog actions still control
-  the connected remote gateway and inherit its trust model. A private suffix
-  does not add authentication.
-
-#### Building and hosting the client package
-
-The pinned builder targets Debian 11's glibc 2.31 baseline. Run from a source
-checkout (Docker is a **build-time** dependency, not a client dependency):
+The unified state root defaults to
+`${XDG_STATE_HOME:-$HOME/.local/state}/portmap`; access state is in `client/`
+and local publishing ownership is in `server/`.
+`PORTMAP_STATE_DIR` overrides the shared root; `PORTMAP_CLIENT_STATE_DIR`
+selects an isolated access state for advanced use. Private ownership records
+prevent cleanup from signaling unrelated processes or removing foreign units.
 
 ```bash
+# Stop local publishing first, if enabled; remote connections survive down.
+portmap down
+# Remove the access resolver, owned workers and remote connections.
+portmap teardown
+```
+
+Teardown refuses while the local publishing role is active. Disconnecting a
+remote does not stop its containers. Use `--no-sudo` on setup, teardown,
+connect, disconnect, up, or down when privilege elevation must not be invoked;
+operations that need an administrative change fail explicitly instead.
+The older `portmap dns set/unset` commands manage an explicit server-DNS
+drop-in, not this access resolver, and are not part of the unified setup path.
+
+### Installing and Migrating from 0.9
+
+The installer requires `curl`, `tar`, `awk`, `grep`, `readlink`, and either
+`sha256sum` or `shasum`. It verifies the archive using the trusted server's
+manifest, not an independent signature. Use HTTPS or a trusted network.
+Interactive stderr shows download progress; redirected logs retain stage
+messages and failures without the progress meter.
+
+Installation only places the versioned bundle at
+`${XDG_DATA_HOME:-$HOME/.local/share}/portmap/<version>` and atomically manages
+`~/.local/bin/portmap`. Keep the adjacent `_internal` directory.
+No processes, DNS routes, or HTTP sockets are started by installation.
+Unrelated launchers, unsafe archives, and checksum mismatches are rejected.
+
+After replacing `portmap-client` with `portmap`, run `portmap setup` as the same
+login user. Before the new default access state has saved its first connections
+file, setup imports `~/.local/state/portmap-client` profiles, stops only verified owned
+legacy workers/tunnels, and rebuilds the resolver. The old directory is kept;
+explicit isolated state overrides do not trigger this import.
+An empty saved connections file is intentional: disconnected or torn-down legacy
+profiles are not imported again by a later setup or local-server start.
+Saved SSH identities and custom remote ports are retained. Setup attempts to
+restore each saved SSH connection and reports individual restoration failures;
+reconnecting the same saved target can revive it without a forced disconnect.
+
+The installer retires only a positively identified legacy launcher, keeping
+old bundles available while their running workers are migrated. There is no
+`portmap-client` command alias. If a machine had a direct connection to its
+own hostname, disconnect that profile before enabling its local publishing
+role. Run `portmap up` to move the existing gateway to its private backend and
+controlled public ingress; existing project containers are not recreated by
+this operation.
+
+### Building and Hosting the Unified Package
+
+The pinned builder targets Debian 11's glibc 2.31 baseline. Docker is a build
+dependency, not a remote-access dependency:
+
+```bash
+npm ci
+npm run build
 BUILD_DIR=$(mktemp -d)
-docker build -f packaging/client.Dockerfile -t portmap-client-builder packaging
+docker build -f packaging/portmap.Dockerfile -t portmap-builder packaging
 docker run --rm --cpus=1 --memory=1g \
-  --user "$(id -u):$(id -g)" -e HOME=/tmp/portmap-client-build \
+  --user "$(id -u):$(id -g)" -e PYINSTALLER_CONFIG_DIR=/tmp/pyinstaller \
   -v "$PWD:/src:ro" -v "$BUILD_DIR:/out" \
-  portmap-client-builder --out-dir /out
+  portmap-builder --out-dir /out
 ```
 
-`tools/build_client.py` verifies the pinned native dependencies, freezes only
-client modules, and emits the archive, SHA-256 sidecar, and `client_release.json`.
-Before a release, copy the verified manifest to
-`src/portmap/client_release.json` and upload those exact bytes to the indicated
-release URL. The source manifest is not generated or changed at server startup.
+`tools/build_portmap.py` verifies pinned native dependencies and freezes the
+unified CLI, host agent, server/client modules, gateway/demo/scaffold assets,
+frontend, and redistribution notices. It emits the real archive, SHA-256
+sidecar, and `release.json`. Copy that manifest to `src/portmap/release.json`
+for source/Brew publication and upload both the archive and `release.json`
+to the indicated versioned GitHub release.
 
-The catalog serves `/api/client`, `/install-client.sh`, and
-`/downloads/client/<filename>` from its own origin. It validates archive size
-and SHA-256 before serving. Seed `<server-state-dir>/client-downloads/<filename>`
-to serve offline, or let the server fetch the pinned GitHub release once.
-`PORTMAP_CLIENT_DOWNLOAD_DIR` can select another server cache directory.
-Clients download from the catalog, not directly from GitHub.
+The archive deliberately cannot contain its own checksum manifest. The
+builder writes a sidecar next to the unpacked executable after hashing; the
+installer writes one from the server metadata before activating the bundle.
+A raw extracted bundle without a sidecar can retrieve the bounded, version-
+pinned manifest from the trusted release. An invalid present manifest is an
+error, not permission to use a different release.
 
-### Split DNS
+The catalog serves `/api/downloads`, `/install.sh`, and
+`/downloads/portmap/<filename>`. The old client-only routes are removed.
+Seed `<server-state-dir>/downloads/<filename>` or set `PORTMAP_DOWNLOAD_DIR`
+to a verified artifact directory for offline distribution; otherwise the
+server fetches and checks the pinned upstream archive once. Clients download
+from the catalog's own origin.
 
-Configure split DNS on a Linux development machine without manually looking up
-the network interface:
-
-```bash
-DNS_SERVER=<detected-host-ip>
-DNS_DOMAIN=<hostname>.portmap
-DNS_IFACE="$(ip route get "$DNS_SERVER" | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
-
-sudo resolvectl dns "$DNS_IFACE" "$DNS_SERVER"
-sudo resolvectl domain "$DNS_IFACE" "~$DNS_DOMAIN"
-resolvectl query "portmap.$DNS_DOMAIN"
-curl -I "http://portmap.$DNS_DOMAIN/"
-```
-
-On machines where the active network stack is not managed by
-`systemd-networkd`, the per-link `resolvectl dns` and `resolvectl domain`
-commands may fail with:
-
-```text
-Failed to set DNS configuration: Unit dbus-org.freedesktop.network1.service not found.
-Failed to set domain configuration: Unit dbus-org.freedesktop.network1.service not found.
-```
-
-That failure does not mean portmap DNS is broken. It means the host cannot
-accept per-link DNS settings through `resolvectl`. Do not install or enable
-`systemd-networkd` solely for portmap on a machine already managed by another
-network stack, such as NetworkManager. Configure a host-level
-`systemd-resolved` drop-in instead. The CLI can install and remove this drop-in:
-
-```bash
-portmap dns set
-portmap dns unset
-```
-
-The equivalent manual setup is:
-
-```bash
-DNS_SERVER=<detected-host-ip>
-DNS_DOMAIN=debug.lan
-
-sudo mkdir -p /etc/systemd/resolved.conf.d
-
-sudo tee /etc/systemd/resolved.conf.d/90-portmap-debug-lan.conf >/dev/null <<EOF
-[Resolve]
-DNS=$DNS_SERVER
-Domains=~$DNS_DOMAIN
-EOF
-
-sudo systemctl restart systemd-resolved
-resolvectl query "portmap.$DNS_DOMAIN"
-curl -I "http://portmap.$DNS_DOMAIN/"
-```
+### Project Catalog and Compose Integration
 
 The catalog page lists currently visible `portmap`/Traefik-managed services and
 their generated endpoints. When the host agent is running, the catalog also

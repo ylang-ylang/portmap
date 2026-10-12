@@ -52,8 +52,9 @@ def verify_resolution(domain: str, address: str, *, timeout: float = 5) -> None:
         values = set()
     if values != {address}:
         raise PortmapError(
-            f"system DNS does not resolve *.{domain} to {address}; check existing "
-            "more-specific resolver routes and /etc/resolv.conf before connecting"
+            f"system DNS does not resolve *.{domain} to {address}; check OS resolver integration "
+            "(for example systemd-resolved through libnss-resolve on Linux), more-specific "
+            "resolver routes, and /etc/resolv.conf before connecting"
         )
 
 
@@ -210,7 +211,7 @@ def sync_dns(state_dir: Path, records: Mapping[str, str]) -> dict[str, Any]:
         if not owned:
             binary = find_native_binary("coredns")
             if binary is None:
-                raise PortmapError("client DNS needs CoreDNS: use a portmap-client release bundle or install coredns on PATH (brew install coredns)")
+                raise PortmapError("client DNS needs CoreDNS: use a portmap release bundle or install coredns on PATH (brew install coredns)")
             with (state_dir / "dns.log").open("ab") as log:
                 process = subprocess.Popen([str(binary), "-conf", str(config)], env=native_environment(), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             state = {"pid": process.pid, "owner": owner}

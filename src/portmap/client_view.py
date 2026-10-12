@@ -1,4 +1,4 @@
-"""Read-only, loopback catalog views for the client's registered gateways."""
+"""Read-only, loopback catalog views for the client's SSH-connected gateways."""
 from __future__ import annotations
 
 import argparse
@@ -47,6 +47,7 @@ def _managed_host(host: str, domain: str) -> bool:
 def _project_endpoint(endpoint: dict[str, Any], profile: dict[str, Any], http_port: int) -> dict[str, Any]:
     result = dict(endpoint)
     kind = endpoint.get("kind")
+    via = profile["via"]
     reason = "endpoint kind is not supported by this client"
     if kind == "http":
         try:
@@ -70,16 +71,26 @@ def _project_endpoint(endpoint: dict[str, Any], profile: dict[str, Any], http_po
                 )
             ):
                 raise ValueError("unmanaged URL")
-            if host.lower() == domain:
+            if host.lower() == domain and via == "ssh":
+                # Only the SSH aggregate reserves the apex for its projected
+                # catalog view; direct traffic reaches the remote gateway and
+                # the local role proxies its whole domain to its backend.
                 result["transport_supported"] = False
                 result["reason"] = "the apex hostname is reserved for the local catalog; use an application subdomain"
                 return result
-            # Retain the URL's host spelling and path, but use the local HTTP
-            # listener rather than a remote port or an unavailable TLS listener.
-            original_host = parsed.netloc.rsplit(":", 1)[0] if original_port is not None else parsed.netloc
-            authority = original_host if http_port == 80 else f"{original_host}:{http_port}"
-            result["url"] = urlunsplit(("http", authority, parsed.path, parsed.query, parsed.fragment))
-            result["host_port"] = http_port
+            if via == "direct":
+                # DNS maps the domain straight to the verified remote IP, so
+                # the remote catalog URL (host and port) is already reachable.
+                # Nothing is rewritten for direct connections.
+                pass
+            else:
+                # SSH/local: retain the URL's host spelling and path, but use
+                # the shared local HTTP listener rather than a remote port or
+                # an unavailable TLS listener.
+                original_host = parsed.netloc.rsplit(":", 1)[0] if original_port is not None else parsed.netloc
+                authority = original_host if http_port == 80 else f"{original_host}:{http_port}"
+                result["url"] = urlunsplit(("http", authority, parsed.path, parsed.query, parsed.fragment))
+                result["host_port"] = http_port
         except ValueError:
             reason = "HTTP endpoint does not use a valid host in this managed DNS zone"
         else:
@@ -88,7 +99,6 @@ def _project_endpoint(endpoint: dict[str, Any], profile: dict[str, Any], http_po
             return result
     elif kind in ("tcp", "udp", "range"):
         port = endpoint.get("host_port")
-        via = profile["via"]
         has_range = kind == "range" or endpoint.get("range_start") is not None or endpoint.get("range_end") is not None
         if via == "ssh" and has_range:
             reason = "port ranges are not forwarded over this SSH connection"
@@ -124,7 +134,7 @@ def _project_endpoint(endpoint: dict[str, Any], profile: dict[str, Any], http_po
 
 def project_catalog(catalog: dict[str, Any], profile: dict[str, Any], http_port: int) -> dict[str, Any]:
     """Project catalog endpoints without copying any private controller state."""
-    if not _port(http_port) or profile.get("via") not in {"direct", "ssh"}:
+    if not _port(http_port) or profile.get("via") not in {"direct", "ssh", "local"}:
         raise PortmapError("invalid local gateway state")
     domain = profile.get("domain")
     if not isinstance(domain, str) or not _dns_name(domain):
@@ -137,8 +147,8 @@ def project_catalog(catalog: dict[str, Any], profile: dict[str, Any], http_port:
         "transport": profile["via"],
         "domain": domain,
         "http_port": http_port,
-        "dns_setup_command": "portmap-client setup",
-        "dns_unset_command": "portmap-client teardown",
+        "dns_setup_command": "portmap setup",
+        "dns_unset_command": "portmap teardown",
     }
     result["services"] = [
         {
@@ -171,7 +181,7 @@ class ClientViewServer(ThreadingHTTPServer):
 
 class ClientViewHandler(StaticHandler):
     server: ClientViewServer
-    server_version = f"portmap-client-catalog/{__version__}"
+    server_version = f"portmap-catalog/{__version__}"
 
     def _host(self) -> str | None:
         values = self.headers.get_all("Host", [])
@@ -234,7 +244,7 @@ class ClientViewHandler(StaticHandler):
             except PortmapError:
                 # Probe errors may include remote details. Expose neither the
                 # controller profile nor backend/tunnel diagnostics over HTTP.
-                self.write_json({"error": "remote catalog unavailable; check portmap-client connections"}, status=502, send_body=send_body)
+                self.write_json({"error": "remote catalog unavailable; check portmap connections"}, status=502, send_body=send_body)
                 return
             self.write_json(projected, send_body=send_body)
             return

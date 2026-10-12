@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import __version__
+from .access_cli import register_commands
 from .agent import ensure_agent_started, run_agent_server, stop_agent
 from .agent import agent_status as get_agent_status
 from .broker import allocation_state_file as env_allocation_state_file
@@ -21,6 +23,7 @@ from .broker_shim import (
     uninstall_compose_plugin_shim,
 )
 from .compose_takeover import plan_docker_compose_command
+from .client_runtime import native_environment
 from .errors import PortmapError
 from .host_dns import DEFAULT_RESOLVED_CONF_DIR, set_resolved_dropin, unset_resolved_dropin
 from .model import GenerateRequest
@@ -42,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="portmap")
+    parser.add_argument("--version", action="version", version=f"portmap {__version__}")
     parser.add_argument(
         "--registry",
         type=Path,
@@ -54,7 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    up = subparsers.add_parser("up", help="start the host agent and shared gateway containers")
+    up = subparsers.add_parser("up", help="publish local projects through the shared HTTP gateway")
+    up.add_argument("--no-sudo", action="store_true", help="do not invoke sudo for split DNS and HTTP ingress")
     up.add_argument("compose_args", nargs=argparse.REMAINDER, help="gateway compose args; defaults to 'up -d'")
     up.set_defaults(func=cmd_up)
 
@@ -66,11 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
     demo_down.add_argument("--purge", action="store_true", help="also delete the demo project directory")
     demo_down.set_defaults(func=cmd_demo_down)
 
-    down = subparsers.add_parser("down", help="stop shared gateway containers and the host agent")
+    down = subparsers.add_parser("down", help="stop local publishing while preserving remote connections")
+    down.add_argument("--no-sudo", action="store_true")
     down.add_argument("compose_args", nargs=argparse.REMAINDER, help="gateway compose args; defaults to 'down'")
     down.set_defaults(func=cmd_down)
 
     restart = subparsers.add_parser("restart", help="restart the host agent and shared gateway containers")
+    restart.add_argument("--no-sudo", action="store_true")
     restart.set_defaults(func=cmd_restart)
 
     init = subparsers.add_parser("init", help="create .portmap scaffold files for a compose project")
@@ -91,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         "gateway",
         help="run the shared gateway compose from portmap.toml settings",
     )
+    gateway.add_argument("--no-sudo", action="store_true")
     gateway.add_argument(
         "compose_args",
         nargs=argparse.REMAINDER,
@@ -191,28 +199,35 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--repo-root", type=Path)
     generate.add_argument("--repo-id")
     generate.add_argument("--repo-name")
-    generate_defaults = env_generate_defaults()
-    generate.add_argument("--http-port", type=int, default=generate_defaults["http_port"])
-    generate.add_argument("--tcp-port-start", type=int, default=generate_defaults["tcp_port_start"])
-    generate.add_argument("--udp-port-start", type=int, default=generate_defaults["udp_port_start"])
-    generate.add_argument("--range-port-start", type=int, default=generate_defaults["range_port_start"])
-    generate.add_argument("--host-ip", default=generate_defaults["host_ip"])
-    generate.add_argument("--domain-suffix", default=generate_defaults["domain_suffix"])
-    generate.add_argument("--gateway-network", default=generate_defaults["gateway_network"])
-    generate.add_argument("--allocation-state-file", type=Path, default=generate_defaults["allocation_state_file"])
+    generate.add_argument("--http-port", type=int)
+    generate.add_argument("--tcp-port-start", type=int)
+    generate.add_argument("--udp-port-start", type=int)
+    generate.add_argument("--range-port-start", type=int)
+    generate.add_argument("--host-ip")
+    generate.add_argument("--domain-suffix")
+    generate.add_argument("--gateway-network")
+    generate.add_argument("--allocation-state-file", type=Path)
     generate.add_argument("--compose-project")
     generate.set_defaults(func=cmd_generate)
 
     list_cmd = subparsers.add_parser("list", help="list repos in a registry")
     list_cmd.set_defaults(func=cmd_list)
 
-    status = subparsers.add_parser("status", help="print registry status")
+    status = subparsers.add_parser("status", help="show local publishing, split DNS and remote connections")
+    status.add_argument("--check", action="store_true", help="probe configured local and remote backends")
     status.set_defaults(func=cmd_status)
 
     endpoints = subparsers.add_parser("endpoints", help="print endpoints for one repo instance")
     endpoints.add_argument("repo")
     endpoints.add_argument("instance")
     endpoints.set_defaults(func=cmd_endpoints)
+
+    register_commands(subparsers)
+    catalog_worker = subparsers.add_parser("_serve-server-catalog", help=argparse.SUPPRESS)
+    catalog_worker.set_defaults(func=cmd_serve_server_catalog)
+    subparsers._choices_actions = [
+        action for action in subparsers._choices_actions if not action.dest.startswith("_")
+    ]
     return parser
 
 
@@ -256,7 +271,7 @@ def cmd_docker_compose(args: argparse.Namespace) -> int:
             f"{project_hint} -f {plan.compose_file} -f {plan.override_file}",
             file=sys.stderr,
         )
-    env = os.environ.copy()
+    env = native_environment()
     env["PORTMAP_BROKER_BYPASS"] = "1"
     env["DOCKER_HOST"] = load_portmap_settings(environ=os.environ).docker_host
     return subprocess.run(plan.command, check=False, env=env).returncode
@@ -284,56 +299,46 @@ def cmd_demo_down(args: argparse.Namespace) -> int:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
-    settings = load_portmap_settings(environ=os.environ)
-    status = ensure_agent_started(settings)
-    if not status.running:
-        print_json(status.as_dict())
-        return 1
+    from .server import start_server
+
     compose_args = strip_remainder(args.compose_args) or ["up", "-d"]
-    return run_gateway_compose(settings, compose_args)
+    print_json(start_server(load_portmap_settings(), compose_args, use_sudo=not args.no_sudo))
+    return 0
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    settings = load_portmap_settings(environ=os.environ)
+    from .server import stop_server
+
     compose_args = strip_remainder(args.compose_args) or ["down"]
-    gateway_result = run_gateway_compose(settings, compose_args)
-    stop_agent(settings)
-    return gateway_result
+    print_json(stop_server(load_portmap_settings(), compose_args, use_sudo=not args.no_sudo))
+    return 0
 
 
 def cmd_restart(args: argparse.Namespace) -> int:
-    settings = load_portmap_settings(environ=os.environ)
-    gateway_result = run_gateway_compose(settings, ["down"])
-    stop_agent(settings)
-    status = ensure_agent_started(settings)
-    if not status.running:
-        print_json(status.as_dict())
-        return 1
-    up_result = run_gateway_compose(settings, ["up", "-d"])
-    return gateway_result or up_result
+    from .server import start_server, stop_server
+
+    settings = load_portmap_settings()
+    stop_server(settings, ["down"], use_sudo=not args.no_sudo)
+    print_json(start_server(settings, ["up", "-d"], use_sudo=not args.no_sudo))
+    return 0
 
 
 def cmd_gateway(args: argparse.Namespace) -> int:
-    settings = load_portmap_settings(environ=os.environ)
+    from .server import run_gateway_compose
+
     compose_args = strip_remainder(args.compose_args) or ["up", "-d"]
-    return run_gateway_compose(settings, compose_args)
+    if compose_args[0] == "up":
+        return cmd_up(args)
+    if compose_args[0] == "down":
+        return cmd_down(args)
+    return run_gateway_compose(load_portmap_settings(), compose_args)
 
 
-def run_gateway_compose(settings, compose_args: list[str]) -> int:
-    env = os.environ.copy()
-    env.update(settings.gateway_env())
-    env["PORTMAP_ROOT"] = str(settings.root)
-    env["PORTMAP_BROKER_BYPASS"] = "1"
-    command = [
-        "docker",
-        "compose",
-        "-f",
-        str(settings.root / "docker-compose.yml"),
-    ]
-    if settings.http_port == settings.catalog_port:
-        command += ["-f", str(settings.root / "docker-compose.single-port.yml")]
-    command += compose_args
-    return subprocess.run(command, check=False, env=env).returncode
+def cmd_serve_server_catalog(args: argparse.Namespace) -> int:
+    from .catalog import main as catalog_main
+
+    catalog_main()
+    return 0
 
 
 def cmd_agent_serve(args: argparse.Namespace) -> int:
@@ -412,6 +417,9 @@ def cmd_broker_status(args: argparse.Namespace) -> int:
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
+    for name, value in env_generate_defaults().items():
+        if getattr(args, name) is None:
+            setattr(args, name, value)
     compose_file = None if args.compose_json else args.compose_file
     project_dir = args.project_dir.resolve()
     out_dir = resolve_project_path(project_dir, args.out_dir)
@@ -472,7 +480,13 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    print_json(load_query_registry(args))
+    from .client import connections
+    from .client_runtime import client_state_dir
+    from .server import server_status
+
+    result = connections(client_state_dir(), check=args.check)
+    result["server"] = server_status(load_portmap_settings(), check=args.check)
+    print_json(result)
     return 0
 
 

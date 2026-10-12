@@ -9,6 +9,7 @@ import pytest
 
 from portmap.web_static import read_static_asset
 from portmap.client_view import ClientViewServer, project_catalog
+from portmap.errors import PortmapError
 
 
 def connection_profile(**changes) -> dict:
@@ -27,6 +28,19 @@ def connection_profile(**changes) -> dict:
         "tunnel": {"control_path": "/private/controller/socket", "owner_token": "private-tunnel-token"},
         **changes,
     }
+
+
+def local_profile(**changes) -> dict:
+    return connection_profile(
+        via="local",
+        target="local",
+        backend_url="http://127.0.0.1:39080",
+        remote_http_port=80,
+        http_port=80,
+        tcp_address="127.0.0.1",
+        tunnel=None,
+        **changes,
+    )
 
 
 def remote_catalog(endpoints: list[dict]) -> dict:
@@ -56,7 +70,7 @@ def remote_catalog(endpoints: list[dict]) -> dict:
     }
 
 
-def test_http_projection_uses_local_listener_and_preserves_remote_context() -> None:
+def test_ssh_projection_uses_local_listener_and_preserves_remote_context() -> None:
     source = remote_catalog([{
         "kind": "http",
         "host": "web.dev.sample.remote.portmap",
@@ -66,7 +80,7 @@ def test_http_projection_uses_local_listener_and_preserves_remote_context() -> N
         "preserve_host": "true",
     }])
     source_json = json.dumps(source, sort_keys=True)
-    result = project_catalog(source, connection_profile(), 18080)
+    result = project_catalog(source, connection_profile(via="ssh"), 18080)
     endpoint = result["services"][0]["endpoints"][0]
     assert endpoint["url"] == "http://web.dev.sample.remote.portmap:18080/path%2Fpart?q=one#two"
     assert endpoint["host"] == "web.dev.sample.remote.portmap"
@@ -79,13 +93,73 @@ def test_http_projection_uses_local_listener_and_preserves_remote_context() -> N
     assert {key: value for key, value in result["services"][0].items() if key != "endpoints"} == {
         key: value for key, value in source["services"][0].items() if key != "endpoints"
     }
-    assert result["client_access"]["dns_setup_command"] == "portmap-client setup"
-    assert result["client_access"]["dns_unset_command"] == "portmap-client teardown"
+    assert result["client_access"]["transport"] == "ssh"
+    assert result["client_access"]["dns_setup_command"] == "portmap setup"
+    assert result["client_access"]["dns_unset_command"] == "portmap teardown"
     assert "private-tunnel-token" not in json.dumps(result)
     assert "/private/controller/socket" not in json.dumps(result)
     assert json.dumps(source, sort_keys=True) == source_json
-    default_port = project_catalog(source, connection_profile(), 80)
+    default_port = project_catalog(source, connection_profile(via="ssh"), 80)
     assert default_port["services"][0]["endpoints"][0]["url"] == "http://web.dev.sample.remote.portmap/path%2Fpart?q=one#two"
+
+
+def test_direct_projection_keeps_remote_urls_and_ports() -> None:
+    source = remote_catalog([{
+        "kind": "http",
+        "host": "web.dev.sample.remote.portmap",
+        "host_port": 8080,
+        "url": "http://web.dev.sample.remote.portmap:8080/path%2Fpart?q=one#two",
+    }])
+    result = project_catalog(source, connection_profile(), 8080)
+    endpoint = result["services"][0]["endpoints"][0]
+    # DNS maps the domain to the verified remote IP, so the remote catalog URL
+    # is already reachable exactly as advertised; nothing is rewritten.
+    assert endpoint["url"] == "http://web.dev.sample.remote.portmap:8080/path%2Fpart?q=one#two"
+    assert endpoint["host_port"] == 8080
+    assert endpoint["transport_supported"] is True
+    assert result["http_port"] == 8080
+    assert result["client_access"]["transport"] == "direct"
+
+
+def test_direct_apex_endpoint_is_reachable_without_local_interception() -> None:
+    result = project_catalog(
+        remote_catalog([{"kind": "http", "host": "remote.portmap", "url": "http://remote.portmap:8080/"}]),
+        connection_profile(),
+        8080,
+    )
+    assert result["services"][0]["endpoints"][0]["transport_supported"] is True
+
+
+def test_ssh_apex_application_is_not_advertised_over_the_local_catalog():
+    result = project_catalog(
+        remote_catalog([{"kind": "http", "host": "remote.portmap", "url": "http://remote.portmap:8080/"}]),
+        connection_profile(via="ssh"),
+        18080,
+    )
+    assert result["services"][0]["endpoints"][0]["transport_supported"] is False
+
+
+def test_local_projection_uses_public_port_and_local_raw_addresses() -> None:
+    endpoints = [
+        {"kind": "http", "host": "web.dev.sample.remote.portmap", "host_port": 8080, "url": "https://web.dev.sample.remote.portmap:8443/"},
+        {"kind": "http", "host": "remote.portmap", "url": "http://remote.portmap:8080/"},
+        {"kind": "tcp", "host_port": 15432},
+        {"kind": "udp", "host_port": 15353},
+        {"kind": "range", "protocol": "tcp", "host_port": 16000, "range_start": 16000, "range_end": 16010},
+    ]
+    result = project_catalog(remote_catalog(endpoints), local_profile(), 80)
+    http_endpoint, apex, tcp, udp, port_range = result["services"][0]["endpoints"]
+    assert http_endpoint["url"] == "http://web.dev.sample.remote.portmap/"
+    assert http_endpoint["host_port"] == 80
+    assert http_endpoint["transport_supported"] is True
+    # The local backend owns its whole domain, including the apex.
+    assert apex["transport_supported"] is True
+    assert apex["url"] == "http://remote.portmap/"
+    for endpoint in (tcp, udp, port_range):
+        assert endpoint["host"] == "127.0.0.1"
+        assert endpoint["transport_supported"] is True
+    assert (tcp["host_port"], udp["host_port"]) == (15432, 15353)
+    assert result["client_access"]["transport"] == "local"
 
 
 def test_custom_or_malformed_http_hosts_are_not_advertised_as_local_routes() -> None:
@@ -144,6 +218,11 @@ def test_ssh_only_advertises_individually_forwarded_tcp_ports() -> None:
     assert result["client_access"]["transport"] == "ssh"
 
 
+def test_unsupported_transport_is_rejected() -> None:
+    with pytest.raises(PortmapError, match="invalid local gateway state"):
+        project_catalog(remote_catalog([]), connection_profile(via="weird"), 80)
+
+
 @contextmanager
 def serving(server):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -196,7 +275,7 @@ def local_view(tmp_path):
             pass
 
     with serving(ThreadingHTTPServer(("127.0.0.1", 0), RemoteHandler)) as remote:
-        profile = connection_profile(backend_url=f"http://127.0.0.1:{remote.server_port}")
+        profile = connection_profile(via="ssh", backend_url=f"http://127.0.0.1:{remote.server_port}")
         replace_json(tmp_path / "connections.json", {"version": 1, "connections": {"remote.portmap": profile}})
         replace_json(tmp_path / "gateway.json", {"http_port": 18080, "owner": "private-gateway-owner"})
         with serving(ClientViewServer(tmp_path, 0, "view-owner")) as server:
@@ -208,6 +287,7 @@ def test_registry_fetches_real_remote_catalog_and_reloads_atomic_state(local_vie
     status, _, body = request(server, "/registry.json", host="remote.portmap:18080")
     assert status == 200
     projected = json.loads(body)
+    # An SSH connection rewrites endpoint URLs onto the shared public port.
     assert projected["services"][0]["endpoints"][0]["url"] == "http://app.remote.portmap:18080/"
     assert projected["worktrees"] == catalog["worktrees"]
     for private in (b"private-gateway-owner", b"private-tunnel-token", b"/private/controller/socket", b"view-owner"):
@@ -285,7 +365,7 @@ def test_mismatched_remote_domain_does_not_project_another_catalog(local_view) -
     catalog["dns_domain"] = "unexpected.portmap"
     status, _, body = request(server, "/registry.json")
     assert status == 502
-    assert json.loads(body) == {"error": "remote catalog unavailable; check portmap-client connections"}
+    assert json.loads(body) == {"error": "remote catalog unavailable; check portmap connections"}
 
 
 def test_health_is_available_before_connections_exist(tmp_path) -> None:
@@ -299,12 +379,3 @@ def test_health_is_available_before_connections_exist(tmp_path) -> None:
         assert request(server, "/registry.json", host="portmap-gateway.invalid")[0] == 404
         assert request(server, "/registry.json", host="127.0.0.1")[0] == 404
         assert request(server, "/healthz", host="unregistered.portmap")[0] == 404
-
-
-def test_apex_application_is_not_advertised_over_the_local_catalog():
-    result = project_catalog(
-        remote_catalog([{"kind": "http", "host": "remote.portmap", "url": "http://remote.portmap:8080/"}]),
-        connection_profile(),
-        18080,
-    )
-    assert result["services"][0]["endpoints"][0]["transport_supported"] is False

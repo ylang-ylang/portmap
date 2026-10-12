@@ -23,31 +23,31 @@ import pytest
 
 from portmap import __version__
 from portmap.catalog import CatalogHandler
-from portmap.client_downloads import (
+from portmap.downloads import (
     INSTALL_SCRIPT_PATH,
-    ClientAsset,
-    ClientDownloadUnavailable,
+    DownloadUnavailable,
+    ReleaseAsset,
     TrustedAssetRedirectHandler,
     archive_matches,
-    client_download_dir,
-    client_download_info,
-    client_release_state,
-    fetch_client_archive,
-    parse_client_release,
-    resolve_client_archive,
+    download_cache_dir,
+    download_info,
+    fetch_archive,
+    parse_release,
+    published_manifest_url,
+    release_state,
+    resolve_archive,
     validate_trusted_source_url,
 )
-
 VERSION = __version__
-LINUX_ASSET = f"portmap-client-{VERSION}-linux-amd64.tar.gz"
-DARWIN_ASSET = f"portmap-client-{VERSION}-darwin-arm64.tar.gz"
+LINUX_ASSET = f"portmap-{VERSION}-linux-amd64.tar.gz"
+DARWIN_ASSET = f"portmap-{VERSION}-darwin-arm64.tar.gz"
 
 
 @pytest.fixture(autouse=True)
 def isolated_client_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PORTMAP_ROOT", str(tmp_path / "config-root"))
     monkeypatch.setenv("PORTMAP_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("PORTMAP_CLIENT_DOWNLOAD_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("PORTMAP_DOWNLOAD_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("PORTMAP_AGENT_SOCKET", str(tmp_path / "missing-agent.sock"))
 
 
@@ -59,7 +59,7 @@ def forbid_network(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom():
         raise AssertionError("unexpected network fetch during test")
 
-    monkeypatch.setattr("portmap.client_downloads.trusted_opener", boom)
+    monkeypatch.setattr("portmap.downloads.trusted_opener", boom)
 
 
 def sha256_hex(data: bytes) -> str:
@@ -72,15 +72,15 @@ def build_archive(files: dict[str, bytes]) -> bytes:
         for name, data in files.items():
             info = tarfile.TarInfo(name)
             info.size = len(data)
-            info.mode = 0o755 if name == "portmap-client" else 0o644
+            info.mode = 0o755 if name == "portmap" else 0o644
             tar.addfile(info, io.BytesIO(data))
     return buffer.getvalue()
 
 
-def fake_client_archive() -> bytes:
+def fake_portmap_archive() -> bytes:
     return build_archive(
         {
-            "portmap-client": f"#!/bin/sh\necho fake-client {VERSION}\n".encode(),
+            "portmap": f"#!/bin/sh\necho fake-portmap {VERSION}\n".encode(),
             "_internal/portmap/note.txt": b"payload\n",
         }
     )
@@ -95,7 +95,7 @@ def asset_payload(
     size: int | None = None,
     source_url: str | None = None,
 ) -> dict:
-    resolved_filename = filename or f"portmap-client-{VERSION}-{os}-{arch}.tar.gz"
+    resolved_filename = filename or f"portmap-{VERSION}-{os}-{arch}.tar.gz"
     return {
         "os": os,
         "arch": arch,
@@ -112,21 +112,21 @@ def valid_manifest_payload() -> dict:
 
 
 def publish_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload) -> Path:
-    manifest_path = tmp_path / "client_release.json"
+    manifest_path = tmp_path / "release.json"
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-    monkeypatch.setattr("portmap.client_downloads.RELEASE_MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr("portmap.downloads.RELEASE_MANIFEST_PATH", manifest_path)
     return manifest_path
 
 
 def unpublish_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
-        "portmap.client_downloads.RELEASE_MANIFEST_PATH",
-        tmp_path / "absent-client_release.json",
+        "portmap.downloads.RELEASE_MANIFEST_PATH",
+        tmp_path / "absent-release.json",
     )
 
 
-def make_asset(**overrides) -> ClientAsset:
-    return parse_client_release({"version": VERSION, "assets": [asset_payload(**overrides)]}).assets[0]
+def make_asset(**overrides) -> ReleaseAsset:
+    return parse_release({"version": VERSION, "assets": [asset_payload(**overrides)]}).assets[0]
 
 
 def publish_release(
@@ -135,7 +135,7 @@ def publish_release(
     """Publish a checksum-consistent release with a preseeded offline cache."""
     asset = asset_payload(filename=filename, sha256=sha256_hex(archive), size=len(archive))
     publish_manifest(monkeypatch, tmp_path, {"version": VERSION, "assets": [asset]})
-    cache = Path(os.environ["PORTMAP_CLIENT_DOWNLOAD_DIR"])
+    cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
     cache.mkdir(parents=True, exist_ok=True)
     (cache / filename).write_bytes(archive)
     return asset
@@ -178,8 +178,8 @@ def catalog() -> CatalogServer:
 # --- manifest validation ----------------------------------------------------
 
 
-def test_parse_client_release_accepts_valid_manifest() -> None:
-    release = parse_client_release(valid_manifest_payload())
+def test_parse_release_accepts_valid_manifest() -> None:
+    release = parse_release(valid_manifest_payload())
     assert release.version == VERSION
     assert [asset.platform for asset in release.assets] == [("linux", "amd64"), ("darwin", "arm64")]
     assert release.assets[0].filename == LINUX_ASSET
@@ -200,17 +200,22 @@ def test_parse_client_release_accepts_valid_manifest() -> None:
             id="filename-traversal",
         ),
         pytest.param(
-            lambda p: p["assets"][0].update(filename="portmap-client.zip"),
+            lambda p: p["assets"][0].update(filename="portmap.zip"),
             "filename is malformed",
             id="filename-pattern",
         ),
         pytest.param(
-            lambda p: p["assets"][0].update(filename="portmap-client-0.0.1-linux-amd64.tar.gz"),
+            lambda p: p["assets"][0].update(filename=f"portmap-client-{VERSION}-linux-amd64.tar.gz"),
+            "filename is malformed",
+            id="filename-legacy-program-name",
+        ),
+        pytest.param(
+            lambda p: p["assets"][0].update(filename="portmap-0.0.1-linux-amd64.tar.gz"),
             "does not match manifest version",
             id="filename-version",
         ),
         pytest.param(
-            lambda p: p["assets"][0].update(filename=f"portmap-client-{VERSION}-darwin-amd64.tar.gz"),
+            lambda p: p["assets"][0].update(filename=f"portmap-{VERSION}-darwin-amd64.tar.gz"),
             "does not match its platform",
             id="filename-platform",
         ),
@@ -283,11 +288,11 @@ def test_parse_client_release_accepts_valid_manifest() -> None:
         pytest.param(lambda p: p.pop("assets"), "non-empty list", id="assets-missing"),
     ],
 )
-def test_parse_client_release_rejects_malformed_manifests(mutate, match: str) -> None:
+def test_parse_release_rejects_malformed_manifests(mutate, match: str) -> None:
     payload = valid_manifest_payload()
     mutate(payload)
     with pytest.raises(ValueError, match=match):
-        parse_client_release(payload)
+        parse_release(payload)
 
 
 def test_validate_trusted_source_url_hosts() -> None:
@@ -321,7 +326,7 @@ def test_trusted_redirect_handler_blocks_untrusted_hops() -> None:
 def test_downloads_follow_signed_cdn_redirect_into_verified_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     asset = asset_payload(sha256=sha256_hex(archive), size=len(archive))
     publish_manifest(monkeypatch, tmp_path, {"version": VERSION, "assets": [asset]})
     signed_url = (
@@ -345,20 +350,35 @@ def test_downloads_follow_signed_cdn_redirect_into_verified_cache(
             return response
 
     monkeypatch.setattr(
-        "portmap.client_downloads.trusted_opener",
+        "portmap.downloads.trusted_opener",
         lambda: urllib.request.build_opener(AssetHTTPSHandler(), TrustedAssetRedirectHandler()),
     )
-    assert resolve_client_archive(LINUX_ASSET).read_bytes() == archive
+    assert resolve_archive(LINUX_ASSET).read_bytes() == archive
 
 
-def test_client_release_state_reports_missing_manifest(
+def unreachable_opener(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the trusted opener at an unreachable upstream."""
+
+    def factory():
+        class StubOpener:
+            def open(self, request, timeout=None):
+                raise OSError("connection refused")
+
+        return StubOpener()
+
+    monkeypatch.setattr("portmap.downloads.trusted_opener", factory)
+
+
+def test_release_state_reports_missing_manifest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     unpublish_manifest(monkeypatch, tmp_path)
-    message, release = client_release_state()
+    unreachable_opener(monkeypatch)
+    message, release = release_state()
     assert release is None
     assert "not published" in message
-    info = client_download_info()
+    assert published_manifest_url() in message
+    info = download_info()
     assert info["available"] is False
     assert info["platforms"] == []
     assert info["install_script"] is None
@@ -366,32 +386,121 @@ def test_client_release_state_reports_missing_manifest(
     assert info["message"] == message
 
 
-def test_client_release_state_reports_malformed_manifest(
+def test_release_state_reports_malformed_manifest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     publish_manifest(monkeypatch, tmp_path, {"version": "not-semver", "assets": [asset_payload()]})
-    message, release = client_release_state()
+    message, release = release_state()
     assert release is None
     assert "invalid" in message
-    assert client_download_info()["available"] is False
+    assert download_info()["available"] is False
+
+
+# --- manifest lifecycle: sidecar, packaged, remote bootstrap -----------------
+
+
+def use_frozen_sidecar(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    sidecar = tmp_path / "bundle" / "release.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("portmap.downloads.frozen_manifest_sidecar_path", lambda: sidecar)
+    return sidecar
+
+
+def test_frozen_sidecar_wins_over_packaged_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sidecar = use_frozen_sidecar(monkeypatch, tmp_path)
+    archive = fake_portmap_archive()
+    asset = asset_payload(sha256=sha256_hex(archive), size=len(archive))
+    sidecar.write_text(json.dumps({"version": VERSION, "assets": [asset]}), encoding="utf-8")
+    # The packaged manifest disagrees; the sidecar must win.
+    publish_manifest(
+        monkeypatch, tmp_path, {"version": VERSION, "assets": [asset_payload(os="darwin", arch="arm64")]}
+    )
+    message, release = release_state()
+    assert release is not None
+    assert release.assets[0].filename == asset["filename"]
+
+
+def test_corrupt_sidecar_is_refused_without_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sidecar = use_frozen_sidecar(monkeypatch, tmp_path)
+    sidecar.write_text("{ not json", encoding="utf-8")
+    # forbid_network stays armed: a corrupt local manifest must be an honest
+    # failure, never silently replaced by a network fetch.
+    message, release = release_state()
+    assert release is None
+    assert "not valid JSON" in message
+
+
+def test_version_mismatched_sidecar_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sidecar = use_frozen_sidecar(monkeypatch, tmp_path)
+    sidecar.write_text(
+        json.dumps({"version": "9.9.9", "assets": [asset_payload()]}), encoding="utf-8"
+    )
+    message, release = release_state()
+    assert release is None
+    assert "does not match portmap" in message
+
+
+def test_raw_archive_bootstraps_pinned_published_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    unpublish_manifest(monkeypatch, tmp_path)
+    cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
+    archive = fake_portmap_archive()
+    asset = asset_payload(sha256=sha256_hex(archive), size=len(archive))
+    document = (json.dumps({"version": VERSION, "assets": [asset]}, indent=2) + "\n").encode()
+    opens: list[str] = []
+    monkeypatch.setattr("portmap.downloads.trusted_opener", stub_opener_factory(document, opens))
+
+    message, release = release_state()
+    assert release is not None
+    assert message == ""
+    # The bootstrap is pinned to the running version's published manifest.
+    assert opens == [published_manifest_url()]
+    assert (cache / "release.json").read_bytes() == document
+
+    # The cached document serves later requests without further network.
+    unreachable_opener(monkeypatch)
+    message, cached = release_state()
+    assert cached == release
+
+
+def test_remote_manifest_corrupt_or_mismatched_documents_are_not_cached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    unpublish_manifest(monkeypatch, tmp_path)
+    cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
+    for document in (
+        b"garbage",
+        json.dumps({"version": "9.9.9", "assets": [asset_payload()]}).encode(),
+    ):
+        monkeypatch.setattr("portmap.downloads.trusted_opener", stub_opener_factory(document, []))
+        _, release = release_state()
+        assert release is None
+        assert not (cache / "release.json").exists()
 
 
 # --- HTTP routes ------------------------------------------------------------
 
 
-def test_api_client_returns_manifest_schema(
+def test_api_downloads_returns_manifest_schema(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer
 ) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     linux = asset_payload(sha256=sha256_hex(archive), size=len(archive))
     darwin = asset_payload(os="darwin", arch="arm64")
     publish_manifest(monkeypatch, tmp_path, {"version": VERSION, "assets": [linux, darwin]})
 
-    status, headers, body = catalog.request("/api/client")
+    status, headers, body = catalog.request("/api/downloads")
     assert status == 200
     assert headers["content-type"] == "application/json; charset=utf-8"
     assert json.loads(body) == {
-        "name": "portmap-client",
+        "name": "portmap",
         "version": VERSION,
         "available": True,
         "message": None,
@@ -402,7 +511,8 @@ def test_api_client_returns_manifest_schema(
                 "filename": LINUX_ASSET,
                 "sha256": sha256_hex(archive),
                 "size": len(archive),
-                "url": f"/downloads/client/{LINUX_ASSET}",
+                "url": f"/downloads/portmap/{LINUX_ASSET}",
+                "source_url": linux["source_url"],
                 "requirements": "glibc 2.31+ (musl/Alpine unsupported)",
             },
             {
@@ -411,61 +521,66 @@ def test_api_client_returns_manifest_schema(
                 "filename": DARWIN_ASSET,
                 "sha256": darwin["sha256"],
                 "size": darwin["size"],
-                "url": f"/downloads/client/{DARWIN_ASSET}",
+                "url": f"/downloads/portmap/{DARWIN_ASSET}",
+                "source_url": darwin["source_url"],
                 "requirements": None,
             },
         ],
-        "install_script": "/install-client.sh",
+        "install_script": "/install.sh",
     }
 
 
-def test_api_client_honest_when_manifest_missing(
+def test_api_downloads_honest_when_manifest_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer
 ) -> None:
     unpublish_manifest(monkeypatch, tmp_path)
-    status, _, body = catalog.request("/api/client")
+    unreachable_opener(monkeypatch)
+    status, _, body = catalog.request("/api/downloads")
     payload = json.loads(body)
     assert status == 200
     assert payload["available"] is False
     assert payload["platforms"] == []
     assert payload["install_script"] is None
-    assert "not published" in payload["message"]
 
-    status, _, body = catalog.request("/install-client.sh")
-    assert status == 404
-    assert b"not published" in body
-
-    status, _, _ = catalog.request(f"/downloads/client/{LINUX_ASSET}")
+    status, _, body = catalog.request("/install.sh")
     assert status == 404
 
+    status, _, _ = catalog.request(f"/downloads/portmap/{LINUX_ASSET}")
+    assert status == 404
 
-def test_api_client_honest_when_manifest_malformed(
+    # The retired client-only endpoints are gone without aliases.
+    assert catalog.request("/api/client")[0] == 404
+    assert catalog.request("/install-client.sh")[0] == 404
+    assert catalog.request(f"/downloads/client/{LINUX_ASSET}")[0] == 404
+
+
+def test_api_downloads_honest_when_manifest_malformed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer
 ) -> None:
     payload = valid_manifest_payload()
     payload["assets"][0]["sha256"] = "ZZZ"
     publish_manifest(monkeypatch, tmp_path, payload)
-    status, _, body = catalog.request("/api/client")
+    status, _, body = catalog.request("/api/downloads")
     assert status == 200
     assert json.loads(body)["available"] is False
     assert json.loads(body)["platforms"] == []
-    status, _, _ = catalog.request(f"/downloads/client/{LINUX_ASSET}")
+    status, _, _ = catalog.request(f"/downloads/portmap/{LINUX_ASSET}")
     assert status == 404
 
 
 def test_downloads_stream_preseeded_cache_offline(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer
 ) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     publish_release(monkeypatch, tmp_path, archive=archive)
 
-    status, headers, body = catalog.request(f"/downloads/client/{LINUX_ASSET}")
+    status, headers, body = catalog.request(f"/downloads/portmap/{LINUX_ASSET}")
     assert status == 200
     assert headers["content-type"] == "application/gzip"
     assert int(headers["content-length"]) == len(archive)
     assert body == archive
 
-    head_status, head_headers, head_body = catalog.request(f"/downloads/client/{LINUX_ASSET}", method="HEAD")
+    head_status, head_headers, head_body = catalog.request(f"/downloads/portmap/{LINUX_ASSET}", method="HEAD")
     assert head_status == 200
     assert int(head_headers["content-length"]) == len(archive)
     assert head_headers["content-type"] == "application/gzip"
@@ -475,32 +590,32 @@ def test_downloads_stream_preseeded_cache_offline(
 def test_install_script_served_only_for_validated_manifest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer
 ) -> None:
-    publish_release(monkeypatch, tmp_path, archive=fake_client_archive())
-    status, headers, body = catalog.request("/install-client.sh")
+    publish_release(monkeypatch, tmp_path, archive=fake_portmap_archive())
+    status, headers, body = catalog.request("/install.sh")
     assert status == 200
     assert headers["content-type"] == "text/x-shellscript; charset=utf-8"
     assert int(headers["content-length"]) == len(body)
     assert body == INSTALL_SCRIPT_PATH.read_bytes()
-    assert b"portmap-client" in body
+    assert b"/downloads/portmap/" in body
 
 
 def test_downloads_reject_unknown_and_traversal_names(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer
 ) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     publish_release(monkeypatch, tmp_path, archive=archive)
     for path in (
-        "/downloads/client/unknown.tar.gz",
-        f"/downloads/client/{DARWIN_ASSET}",
-        "/downloads/client/../client_release.json",
-        "/downloads/client/%2e%2e%2fclient_release.json",
-        "/downloads/client/",
-        "/downloads/client",
+        "/downloads/portmap/unknown.tar.gz",
+        f"/downloads/portmap/{DARWIN_ASSET}",
+        "/downloads/portmap/../release.json",
+        "/downloads/portmap/%2e%2e%2frelease.json",
+        "/downloads/portmap/",
+        "/downloads/portmap",
     ):
         status, _, _ = catalog.request(path)
         assert status == 404, path
     # Preseeded serving never fetches, so no lock or temp artifacts appear.
-    cache = Path(os.environ["PORTMAP_CLIENT_DOWNLOAD_DIR"])
+    cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
     assert sorted(item.name for item in cache.iterdir()) == [LINUX_ASSET]
 
 
@@ -527,31 +642,31 @@ def stub_opener_factory(body: bytes, opens: list, *, delay: float = 0.0):
 
 
 def test_downloads_refetch_when_cache_corrupt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     asset = asset_payload(sha256=sha256_hex(archive), size=len(archive))
     publish_manifest(monkeypatch, tmp_path, {"version": VERSION, "assets": [asset]})
-    cache = Path(os.environ["PORTMAP_CLIENT_DOWNLOAD_DIR"])
+    cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
     cache.mkdir(parents=True, exist_ok=True)
     (cache / LINUX_ASSET).write_bytes(b"corrupted bytes")
 
     opens: list[str] = []
-    monkeypatch.setattr("portmap.client_downloads.trusted_opener", stub_opener_factory(archive, opens))
+    monkeypatch.setattr("portmap.downloads.trusted_opener", stub_opener_factory(archive, opens))
 
-    resolved = resolve_client_archive(LINUX_ASSET)
+    resolved = resolve_archive(LINUX_ASSET)
     assert resolved.read_bytes() == archive
     assert opens == [asset["source_url"]]
     # The verified download replaced the corrupt cache entry.
     assert archive_matches(cache / LINUX_ASSET, make_asset(**asset))
     # A second resolve is served from the verified cache without refetching.
-    assert resolve_client_archive(LINUX_ASSET).read_bytes() == archive
+    assert resolve_archive(LINUX_ASSET).read_bytes() == archive
     assert len(opens) == 1
 
 
 def test_downloads_lazy_fetch_verifies_size_and_checksum(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    archive = fake_client_archive()
-    cache = Path(os.environ["PORTMAP_CLIENT_DOWNLOAD_DIR"])
+    archive = fake_portmap_archive()
+    cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
     cache.mkdir(parents=True, exist_ok=True)
     opens: list[str] = []
 
@@ -559,18 +674,18 @@ def test_downloads_lazy_fetch_verifies_size_and_checksum(
         payload = {"version": VERSION, "assets": [asset_payload(**overrides)]}
         publish_manifest(monkeypatch, tmp_path, payload)
 
-    monkeypatch.setattr("portmap.client_downloads.trusted_opener", stub_opener_factory(archive, opens))
+    monkeypatch.setattr("portmap.downloads.trusted_opener", stub_opener_factory(archive, opens))
 
     # Shorter than the manifest size: reject and keep the cache clean.
     publish(sha256=sha256_hex(archive), size=len(archive) + 1)
-    with pytest.raises(ClientDownloadUnavailable, match="size mismatch"):
-        resolve_client_archive(LINUX_ASSET)
+    with pytest.raises(DownloadUnavailable, match="size mismatch"):
+        resolve_archive(LINUX_ASSET)
     assert not (cache / LINUX_ASSET).exists()
 
     # Checksum mismatch: reject and keep the cache clean.
     publish(sha256="b" * 64, size=len(archive))
-    with pytest.raises(ClientDownloadUnavailable, match="checksum mismatch"):
-        resolve_client_archive(LINUX_ASSET)
+    with pytest.raises(DownloadUnavailable, match="checksum mismatch"):
+        resolve_archive(LINUX_ASSET)
     assert not (cache / LINUX_ASSET).exists()
 
     # No stray temp files survive the failures.
@@ -578,14 +693,14 @@ def test_downloads_lazy_fetch_verifies_size_and_checksum(
 
     # A healthy pinned fetch lands atomically in the cache.
     publish(sha256=sha256_hex(archive), size=len(archive))
-    assert resolve_client_archive(LINUX_ASSET).read_bytes() == archive
+    assert resolve_archive(LINUX_ASSET).read_bytes() == archive
 
 
 def test_fetch_unreachable_upstream_is_service_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     publish_manifest(monkeypatch, tmp_path, {"version": VERSION, "assets": [asset_payload()]})
-    cache = Path(os.environ["PORTMAP_CLIENT_DOWNLOAD_DIR"])
+    cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
     cache.mkdir(parents=True, exist_ok=True)
 
     def failing_factory():
@@ -595,35 +710,35 @@ def test_fetch_unreachable_upstream_is_service_unavailable(
 
         return StubOpener()
 
-    monkeypatch.setattr("portmap.client_downloads.trusted_opener", failing_factory)
-    with pytest.raises(ClientDownloadUnavailable, match="failed to download"):
-        fetch_client_archive(make_asset(), cache)
+    monkeypatch.setattr("portmap.downloads.trusted_opener", failing_factory)
+    with pytest.raises(DownloadUnavailable, match="failed to download"):
+        fetch_archive(make_asset(), cache)
     assert [item.name for item in cache.iterdir() if item.name.endswith(".part")] == []
 
 
 def test_download_cache_dir_defaults_to_state_dir(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PORTMAP_CLIENT_DOWNLOAD_DIR")
-    assert client_download_dir() == Path(os.environ["PORTMAP_STATE_DIR"]) / "client-downloads"
+    monkeypatch.delenv("PORTMAP_DOWNLOAD_DIR")
+    assert download_cache_dir() == Path(os.environ["PORTMAP_STATE_DIR"]) / "downloads"
 
 
 def test_concurrent_resolves_share_one_fetch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     publish_manifest(
         monkeypatch,
         tmp_path,
         {"version": VERSION, "assets": [asset_payload(sha256=sha256_hex(archive), size=len(archive))]},
     )
-    cache = Path(os.environ["PORTMAP_CLIENT_DOWNLOAD_DIR"])
+    cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
     cache.mkdir(parents=True, exist_ok=True)
     # No preseeded archive: both threads must lazily fetch under the lock.
     opens: list[str] = []
     monkeypatch.setattr(
-        "portmap.client_downloads.trusted_opener",
+        "portmap.downloads.trusted_opener",
         stub_opener_factory(archive, opens, delay=0.05),
     )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        paths = list(pool.map(lambda _: resolve_client_archive(LINUX_ASSET), range(2)))
+        paths = list(pool.map(lambda _: resolve_archive(LINUX_ASSET), range(2)))
     assert len(opens) == 1
     assert all(path.read_bytes() == archive for path in paths)
 
@@ -668,13 +783,12 @@ def run_installer(
     )
 
 
-
 def test_installer_refuses_unrelated_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
 ) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     publish_release(monkeypatch, tmp_path, archive=archive)
-    unrelated = installer_home.data / "portmap-client" / VERSION
+    unrelated = installer_home.data / "portmap" / VERSION
     unrelated.mkdir(parents=True)
     (unrelated / "precious.txt").write_text("keep me")
 
@@ -682,18 +796,18 @@ def test_installer_refuses_unrelated_bundle(
     assert result.returncode != 0
     assert "refusing to overwrite unrelated directory" in result.stderr
     assert (unrelated / "precious.txt").read_text() == "keep me"
-    assert list((installer_home.data / "portmap-client").iterdir()) == [unrelated]
+    assert list((installer_home.data / "portmap").iterdir()) == [unrelated]
     assert list(installer_home.tmp.iterdir()) == []
 
 
 def test_installer_refuses_unrelated_launcher(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
 ) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     publish_release(monkeypatch, tmp_path, archive=archive)
     bin_dir = installer_home.home / ".local" / "bin"
     bin_dir.mkdir(parents=True)
-    launcher = bin_dir / "portmap-client"
+    launcher = bin_dir / "portmap"
     launcher.write_text("#!/bin/sh\nexit 42\n")
     launcher.chmod(0o755)
 
@@ -701,7 +815,7 @@ def test_installer_refuses_unrelated_launcher(
     assert result.returncode != 0
     assert "refusing to replace unrelated" in result.stderr
     assert launcher.read_text().startswith("#!/bin/sh")
-    assert not (installer_home.data / "portmap-client" / VERSION).exists()
+    assert not (installer_home.data / "portmap" / VERSION).exists()
 
     # A foreign symlink is refused too.
     launcher.unlink()
@@ -722,19 +836,19 @@ def test_installer_refuses_unsafe_archive_paths(
     assert result.returncode != 0
     assert "unsafe paths" in result.stderr
     assert not (installer_home.data / "evil.txt").exists()
-    assert not (installer_home.data / "portmap-client" / "evil.txt").exists()
+    assert not (installer_home.data / "portmap" / "evil.txt").exists()
     # Nothing was installed and no staging artifacts survive the failure.
-    assert not (installer_home.data / "portmap-client" / VERSION).exists()
-    stage_root = installer_home.data / "portmap-client"
+    assert not (installer_home.data / "portmap" / VERSION).exists()
+    stage_root = installer_home.data / "portmap"
     assert not stage_root.exists() or list(stage_root.iterdir()) == []
     assert list(installer_home.tmp.iterdir()) == []
 
 
 def archive_with_link_member(member_type: str, linkname: str) -> bytes:
     buffer = io.BytesIO()
-    executable = f"#!/bin/sh\necho fake-client {VERSION}\n".encode()
+    executable = f"#!/bin/sh\necho fake-portmap {VERSION}\n".encode()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        info = tarfile.TarInfo("portmap-client")
+        info = tarfile.TarInfo("portmap")
         info.size = len(executable)
         info.mode = 0o755
         tar.addfile(info, io.BytesIO(executable))
@@ -747,9 +861,9 @@ def archive_with_link_member(member_type: str, linkname: str) -> bytes:
 
 def non_executable_archive() -> bytes:
     buffer = io.BytesIO()
-    executable = f"#!/bin/sh\necho fake-client {VERSION}\n".encode()
+    executable = f"#!/bin/sh\necho fake-portmap {VERSION}\n".encode()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        info = tarfile.TarInfo("portmap-client")
+        info = tarfile.TarInfo("portmap")
         info.size = len(executable)
         info.mode = 0o644
         tar.addfile(info, io.BytesIO(executable))
@@ -759,7 +873,7 @@ def non_executable_archive() -> bytes:
 def test_installer_preserves_install_when_archive_layout_is_wrong(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
 ) -> None:
-    good = fake_client_archive()
+    good = fake_portmap_archive()
     publish_release(monkeypatch, tmp_path, archive=good)
     assert run_installer(catalog.origin, installer_home=installer_home).returncode == 0
     assert_installed(installer_home)
@@ -767,8 +881,8 @@ def test_installer_preserves_install_when_archive_layout_is_wrong(
     # A builder regression wraps everything in an enclosing directory.
     wrapped = build_archive(
         {
-            "portmap-client/portmap-client": f"#!/bin/sh\necho wrong-layout {VERSION}\n".encode(),
-            "portmap-client/_internal/note.txt": b"x\n",
+            "portmap/portmap": f"#!/bin/sh\necho wrong-layout {VERSION}\n".encode(),
+            "portmap/_internal/note.txt": b"x\n",
         }
     )
     publish_release(monkeypatch, tmp_path, archive=wrapped)
@@ -776,11 +890,11 @@ def test_installer_preserves_install_when_archive_layout_is_wrong(
     assert result.returncode != 0
     assert "unexpected layout" in result.stderr
     # The previous install and launcher survive untouched and still run.
-    link = installer_home.home / ".local" / "bin" / "portmap-client"
+    link = installer_home.home / ".local" / "bin" / "portmap"
     ran = subprocess.run([str(link), "--version"], capture_output=True, text=True, timeout=30)
     assert ran.returncode == 0
-    assert ran.stdout.strip() == f"fake-client {VERSION}"
-    assert [item.name for item in (installer_home.data / "portmap-client").iterdir()] == [VERSION]
+    assert ran.stdout.strip() == f"fake-portmap {VERSION}"
+    assert [item.name for item in (installer_home.data / "portmap").iterdir()] == [VERSION]
     assert list(installer_home.tmp.iterdir()) == []
 
 
@@ -791,7 +905,7 @@ def test_installer_rejects_non_executable_root_binary(
     result = run_installer(catalog.origin, installer_home=installer_home)
     assert result.returncode != 0
     assert "does not ship an executable" in result.stderr
-    assert not (installer_home.data / "portmap-client" / VERSION).exists()
+    assert not (installer_home.data / "portmap" / VERSION).exists()
     assert list(installer_home.tmp.iterdir()) == []
 
 
@@ -799,7 +913,7 @@ def test_installer_rejects_non_executable_root_binary(
     "member_type, linkname",
     [
         (tarfile.SYMTYPE, "/etc/passwd"),
-        (tarfile.LNKTYPE, "portmap-client"),
+        (tarfile.LNKTYPE, "portmap"),
     ],
 )
 def test_installer_rejects_link_members(
@@ -814,33 +928,69 @@ def test_installer_rejects_link_members(
     result = run_installer(catalog.origin, installer_home=installer_home)
     assert result.returncode != 0
     assert "non-regular members" in result.stderr
-    assert not (installer_home.data / "portmap-client" / VERSION).exists()
+    assert not (installer_home.data / "portmap" / VERSION).exists()
     assert list(installer_home.tmp.iterdir()) == []
 
 def assert_installed(installer_home: SimpleNamespace) -> Path:
-    bundle = installer_home.data / "portmap-client" / VERSION
-    assert (bundle / ".portmap-client-install").is_file()
-    assert (bundle / "portmap-client").is_file()
-    link = installer_home.home / ".local" / "bin" / "portmap-client"
+    bundle = installer_home.data / "portmap" / VERSION
+    assert (bundle / ".portmap-install").is_file()
+    assert (bundle / "portmap").is_file()
+    link = installer_home.home / ".local" / "bin" / "portmap"
     assert link.is_symlink()
     # The launcher must point at the executable inside the bundle — a symlink
     # to the bundle directory is not runnable (execve(2) of a dir is EACCES).
-    assert os.readlink(link) == str(bundle / "portmap-client")
+    assert os.readlink(link) == str(bundle / "portmap")
     ran = subprocess.run(
         [str(link), "--version"], capture_output=True, text=True, timeout=30
     )
     assert ran.returncode == 0, ran.stderr
-    assert ran.stdout.strip() == f"fake-client {VERSION}"
+    assert ran.stdout.strip() == f"fake-portmap {VERSION}"
+    # The installer writes a strictly valid canonical manifest sidecar.
+    sidecar = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+    assert sidecar["version"] == VERSION
+    (asset,) = sidecar["assets"]
+    assert asset["filename"] == LINUX_ASSET
+    assert asset["os"] == "linux" and asset["arch"] == "amd64"
+    assert re.fullmatch(r"[0-9a-f]{64}", asset["sha256"])
+    assert asset["size"] > 0
+    assert asset["source_url"].startswith(
+        "https://github.com/ylang-ylang/portmap/releases/download/"
+    )
+    parse_release(sidecar)
     # No staging or download temp files survive a successful install.
-    assert [item.name for item in (installer_home.data / "portmap-client").iterdir()] == [VERSION]
+    assert [item.name for item in (installer_home.data / "portmap").iterdir()] == [VERSION]
     assert list(installer_home.tmp.iterdir()) == []
     return bundle
+
+
+def test_installer_writes_canonical_manifest_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
+) -> None:
+    archive = fake_portmap_archive()
+    asset = publish_release(monkeypatch, tmp_path, archive=archive)
+
+    result = run_installer(catalog.origin, installer_home=installer_home)
+    assert result.returncode == 0, result.stderr
+    bundle = installer_home.data / "portmap" / VERSION
+    assert json.loads((bundle / "release.json").read_text(encoding="utf-8")) == {
+        "version": VERSION,
+        "assets": [
+            {
+                "os": asset["os"],
+                "arch": asset["arch"],
+                "filename": asset["filename"],
+                "sha256": asset["sha256"],
+                "size": asset["size"],
+                "source_url": asset["source_url"],
+            }
+        ],
+    }
 
 
 def test_installer_end_to_end_from_catalog(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
 ) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     publish_release(monkeypatch, tmp_path, archive=archive)
 
     result = run_installer(catalog.origin, installer_home=installer_home)
@@ -853,6 +1003,79 @@ def test_installer_end_to_end_from_catalog(
     assert_installed(installer_home)
 
 
+def test_installer_retires_only_owned_legacy_launcher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
+) -> None:
+    """A legacy portmap-client launcher positively owned by the old installer
+    is removed after the unified install; its old bundles stay for the runtime
+    state migration."""
+    archive = fake_portmap_archive()
+    publish_release(monkeypatch, tmp_path, archive=archive)
+
+    legacy_bundle = installer_home.data / "portmap-client" / "0.8.0"
+    legacy_bundle.mkdir(parents=True)
+    (legacy_bundle / "portmap-client").write_text("#!/bin/sh\necho old client\n")
+    (legacy_bundle / ".portmap-client-install").write_text("installed by install-client.sh\n")
+    legacy_link = installer_home.home / ".local" / "bin" / "portmap-client"
+    legacy_link.parent.mkdir(parents=True)
+    legacy_link.symlink_to(legacy_bundle / "portmap-client")
+
+    result = run_installer(catalog.origin, installer_home=installer_home)
+    assert result.returncode == 0, result.stderr
+    assert_installed(installer_home)
+    assert not legacy_link.exists()
+    # Old bundle files are retained for worker migration.
+    assert (legacy_bundle / "portmap-client").read_text() == "#!/bin/sh\necho old client\n"
+    assert (legacy_bundle / ".portmap-client-install").is_file()
+
+    # A legacy launcher pointing somewhere unrelated is left untouched.
+    foreign = installer_home.home / ".local" / "bin" / "other"
+    foreign.write_text("#!/bin/sh\nexit 7\n")
+    legacy_link.symlink_to(foreign)
+    result = run_installer(catalog.origin, installer_home=installer_home)
+    assert result.returncode == 0, result.stderr
+    assert_installed(installer_home)
+    assert os.readlink(legacy_link) == str(foreign)
+    assert foreign.read_text() == "#!/bin/sh\nexit 7\n"
+
+
+def test_installer_leaves_unrelated_legacy_launcher_file_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
+) -> None:
+    archive = fake_portmap_archive()
+    publish_release(monkeypatch, tmp_path, archive=archive)
+    legacy_link = installer_home.home / ".local" / "bin" / "portmap-client"
+    legacy_link.parent.mkdir(parents=True)
+    legacy_link.write_text("#!/bin/sh\nexit 5\n")
+    legacy_link.chmod(0o755)
+
+    result = run_installer(catalog.origin, installer_home=installer_home)
+    assert result.returncode == 0, result.stderr
+    assert_installed(installer_home)
+    assert legacy_link.read_text() == "#!/bin/sh\nexit 5\n"
+
+
+def test_installer_preserves_unmarked_bundle_under_legacy_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
+) -> None:
+    publish_release(monkeypatch, tmp_path, archive=fake_portmap_archive())
+    unmarked = installer_home.data / "portmap-client" / "0.7.0"
+    unmarked.mkdir(parents=True)
+    executable = unmarked / "portmap-client"
+    executable.write_text("#!/bin/sh\nexit 7\n")
+    legacy_link = installer_home.home / ".local" / "bin" / "portmap-client"
+    legacy_link.parent.mkdir(parents=True)
+    legacy_link.symlink_to(executable)
+
+    result = run_installer(catalog.origin, installer_home=installer_home)
+
+    assert result.returncode == 0, result.stderr
+    assert_installed(installer_home)
+    assert legacy_link.is_symlink()
+    assert os.readlink(legacy_link) == str(executable)
+    assert executable.read_text() == "#!/bin/sh\nexit 7\n"
+
+
 @pytest.mark.parametrize("stderr_is_terminal", [True, False], ids=["stderr-tty", "stdout-tty"])
 def test_piped_installer_progress_follows_stderr(
     stderr_is_terminal: bool,
@@ -861,7 +1084,7 @@ def test_piped_installer_progress_follows_stderr(
     catalog: CatalogServer,
     installer_home: SimpleNamespace,
 ) -> None:
-    publish_release(monkeypatch, tmp_path, archive=fake_client_archive())
+    publish_release(monkeypatch, tmp_path, archive=fake_portmap_archive())
     master, slave = os.openpty()
     try:
         result = subprocess.run(
@@ -909,11 +1132,11 @@ def test_piped_installer_progress_follows_stderr(
 def test_installer_reports_missing_readlink_before_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
 ) -> None:
-    publish_release(monkeypatch, tmp_path, archive=fake_client_archive())
+    publish_release(monkeypatch, tmp_path, archive=fake_portmap_archive())
     initial = run_installer(catalog.origin, installer_home=installer_home)
     assert initial.returncode == 0, initial.stderr
     bundle = assert_installed(installer_home)
-    original = (bundle / "portmap-client").read_bytes()
+    original = (bundle / "portmap").read_bytes()
     tool_bin = tmp_path / "tools"
     tool_bin.mkdir()
     for name in (
@@ -928,19 +1151,19 @@ def test_installer_reports_missing_readlink_before_mutation(
     assert result.returncode != 0
     assert "missing required tool: readlink" in result.stderr
     assert_installed(installer_home)
-    assert (bundle / "portmap-client").read_bytes() == original
+    assert (bundle / "portmap").read_bytes() == original
 
 
 def test_installer_rejects_tampered_archive(tmp_path: Path, installer_home: SimpleNamespace) -> None:
     origin_root = tmp_path / "static-origin"
     (origin_root / "api").mkdir(parents=True)
-    (origin_root / "downloads" / "client").mkdir(parents=True)
-    archive = fake_client_archive()
-    (origin_root / "downloads" / "client" / LINUX_ASSET).write_bytes(archive)
-    (origin_root / "api" / "client").write_text(
+    (origin_root / "downloads" / "portmap").mkdir(parents=True)
+    archive = fake_portmap_archive()
+    (origin_root / "downloads" / "portmap" / LINUX_ASSET).write_bytes(archive)
+    (origin_root / "api" / "downloads").write_text(
         json.dumps(
             {
-                "name": "portmap-client",
+                "name": "portmap",
                 "version": VERSION,
                 "available": True,
                 "platforms": [
@@ -950,7 +1173,8 @@ def test_installer_rejects_tampered_archive(tmp_path: Path, installer_home: Simp
                         "filename": LINUX_ASSET,
                         "sha256": "c" * 64,
                         "size": len(archive),
-                        "url": f"/downloads/client/{LINUX_ASSET}",
+                        "url": f"/downloads/portmap/{LINUX_ASSET}",
+                        "source_url": f"https://github.com/ylang-ylang/portmap/releases/download/V0.7/{LINUX_ASSET}",
                     }
                 ],
             }
@@ -969,14 +1193,14 @@ def test_installer_rejects_tampered_archive(tmp_path: Path, installer_home: Simp
         server.server_close()
     assert result.returncode != 0
     assert "checksum mismatch" in result.stderr
-    assert not (installer_home.data / "portmap-client" / VERSION).exists()
+    assert not (installer_home.data / "portmap" / VERSION).exists()
     assert list(installer_home.tmp.iterdir()) == []
 
 
 def test_installer_rejects_unsupported_platform(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
 ) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     publish_release(monkeypatch, tmp_path, archive=archive)
 
     shim = tmp_path / "uname-shim"
@@ -999,7 +1223,7 @@ def test_installer_rejects_unsupported_platform(
 def test_installer_enforces_linux_glibc_baseline(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
 ) -> None:
-    archive = fake_client_archive()
+    archive = fake_portmap_archive()
     publish_release(monkeypatch, tmp_path, archive=archive)
     shim = tmp_path / "getconf-shim"
     shim.mkdir()
@@ -1020,7 +1244,7 @@ def test_installer_enforces_linux_glibc_baseline(
     result = run_with_shim()
     assert result.returncode != 0
     assert "glibc 2.31" in result.stderr
-    assert not (installer_home.data / "portmap-client" / VERSION).exists()
+    assert not (installer_home.data / "portmap" / VERSION).exists()
     assert list(installer_home.tmp.iterdir()) == []
 
     # musl-style systems do not answer GNU_LIBC_VERSION at all.
@@ -1062,5 +1286,5 @@ def test_installer_validates_origin_argument(args: list[str], installer_home: Si
         timeout=60,
     )
     assert result.returncode != 0
-    assert "install-client:" in result.stderr
+    assert "install:" in result.stderr
     assert list(installer_home.tmp.iterdir()) == []

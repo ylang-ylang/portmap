@@ -102,7 +102,7 @@ def _gateway_target(target: str) -> tuple[str, tuple[int, ...], str]:
     is_url = "://" in target
     if not is_url:
         try:
-            return _host(str(ipaddress.ip_address(target))), (8080, 80), "http"
+            return _host(str(ipaddress.ip_address(target))), (80,), "http"
         except ValueError:
             pass
     try:
@@ -129,7 +129,7 @@ def _gateway_target(target: str) -> tuple[str, tuple[int, ...], str]:
         return host, (_port(port, field="target port"),), scheme
     if is_url:
         return host, (443 if scheme == "https" else 80,), scheme
-    return host, (8080, 80), scheme
+    return host, (80,), scheme
 
 
 def _catalog(payload: bytes, expected_domain: str | None) -> tuple[dict, str, int]:
@@ -293,10 +293,12 @@ def _request_catalog(host: str, port: int, scheme: str, address: tuple, deadline
 def probe_gateway(target: str, *, timeout: float = 3, expected_domain: str | None = None) -> GatewayInfo:
     """Probe one requested origin without proxies, redirects, or advertised-IP routing.
 
-    Only bare hosts try 8080 then 80. URLs use their explicit or scheme-default
-    port. ``address`` is the pinned numeric destination; ``http_port`` comes
-    from the validated catalog. ``catalog_url`` retains the requested hostname
-    for TLS/Host-header identity and is descriptive, not a new routing choice.
+    Unqualified targets use the unified default HTTP port 80, so IP, IP:80,
+    and http://IP are equivalent; non-default ports stay reachable only
+    through an explicit host:port or URL port. ``address`` is the pinned
+    numeric destination; ``http_port`` comes from the validated catalog.
+    ``catalog_url`` retains the requested hostname for TLS/Host-header
+    identity and is descriptive, not a new routing choice.
     """
     timeout = _timeout(timeout)
     host, ports, scheme = _gateway_target(target)

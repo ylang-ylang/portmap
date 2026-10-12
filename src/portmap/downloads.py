@@ -1,11 +1,20 @@
-"""Standalone client download publishing for the catalog web server.
+"""Standalone portmap download publishing for the catalog web server.
 
-Serves the versioned client release manifest, streams cached client archives
+Serves the versioned release manifest, streams cached release archives
 and renders the maintained installer shell template. Every archive served
-through this module is pinned by ``client_release.json``: filenames are only
+through this module is pinned by the release manifest: filenames are only
 ever resolved through the manifest allowlist, cache entries and freshly
 downloaded artifacts are checksum-verified before they are exposed, and
 network fetches are restricted to the pinned trusted GitHub release hosts.
+
+Manifest lifecycle (no self-hash loop): a frozen archive cannot embed the
+manifest that pins the archive's own checksum, so manifests resolve in
+order — (1) a ``release.json`` sidecar next to the frozen executable,
+written atomically by the installer from already-validated ``/api/downloads``
+metadata or by the build for bundle smoke tests; (2) the packaged
+ ``release.json`` used by source and Brew installs; (3) for raw-archive
+bundles, the pinned published manifest on the project's GitHub release,
+bootstrapped once over bounded HTTPS and cached in the download cache.
 """
 from __future__ import annotations
 
@@ -14,6 +23,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 import urllib.error
 import urllib.parse
@@ -25,13 +35,16 @@ from typing import Any, Iterator
 
 from . import __version__
 
-CLIENT_NAME = "portmap-client"
-RELEASE_MANIFEST_PATH = Path(__file__).with_name("client_release.json")
-INSTALL_SCRIPT_PATH = Path(__file__).with_name("download_assets") / "install-client.sh"
+PROGRAM_NAME = "portmap"
+RELEASE_MANIFEST_PATH = Path(__file__).with_name("release.json")
+INSTALL_SCRIPT_PATH = Path(__file__).with_name("download_assets") / "install.sh"
 INSTALL_SCRIPT_CONTENT_TYPE = "text/x-shellscript; charset=utf-8"
-CLIENT_DOWNLOADS_PREFIX = "/downloads/client/"
+DOWNLOADS_PREFIX = "/downloads/portmap/"
 ARCHIVE_CONTENT_TYPE = "application/gzip"
-CACHE_DIR_NAME = "client-downloads"
+CACHE_DIR_NAME = "downloads"
+RELEASE_MANIFEST_CACHE_NAME = "release.json"
+MAX_MANIFEST_BYTES = 256 * 1024
+MANIFEST_TIMEOUT_SECONDS = 30
 
 # Manifest source URLs must point at the project's GitHub release downloads;
 # redirects are additionally allowed onto GitHub's asset CDN hosts.
@@ -46,7 +59,7 @@ SUPPORTED_PLATFORM_ARCH = frozenset({"amd64", "arm64"})
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 ARCHIVE_FILENAME_RE = re.compile(
-    r"portmap-client-(?P<version>\d+\.\d+\.\d+)-(?P<os>[a-z0-9]+)-(?P<arch>[a-z0-9]+)\.tar\.gz"
+    r"portmap-(?P<version>\d+\.\d+\.\d+)-(?P<os>[a-z0-9]+)-(?P<arch>[a-z0-9]+)\.tar\.gz"
 )
 
 MIN_ARCHIVE_SIZE = 1
@@ -62,8 +75,8 @@ REQUIREMENTS_BY_OS: dict[str, str | None] = {
 }
 
 
-class ClientDownloadUnavailable(Exception):
-    """A client download request cannot be served; carries an HTTP status."""
+class DownloadUnavailable(Exception):
+    """A portmap download request cannot be served; carries an HTTP status."""
 
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
@@ -72,7 +85,7 @@ class ClientDownloadUnavailable(Exception):
 
 
 @dataclass(frozen=True)
-class ClientAsset:
+class ReleaseAsset:
     os: str
     arch: str
     filename: str
@@ -91,17 +104,18 @@ class ClientAsset:
             "filename": self.filename,
             "sha256": self.sha256,
             "size": self.size,
-            "url": f"{CLIENT_DOWNLOADS_PREFIX}{self.filename}",
+            "url": f"{DOWNLOADS_PREFIX}{self.filename}",
+            "source_url": self.source_url,
             "requirements": REQUIREMENTS_BY_OS.get(self.os),
         }
 
 
 @dataclass(frozen=True)
-class ClientRelease:
+class Release:
     version: str
-    assets: tuple[ClientAsset, ...]
+    assets: tuple[ReleaseAsset, ...]
 
-    def asset_for(self, filename: str) -> ClientAsset | None:
+    def asset_for(self, filename: str) -> ReleaseAsset | None:
         for asset in self.assets:
             if asset.filename == filename:
                 return asset
@@ -109,18 +123,18 @@ class ClientRelease:
 
     def payload(self) -> dict[str, Any]:
         return {
-            "name": CLIENT_NAME,
+            "name": PROGRAM_NAME,
             "version": self.version,
             "available": True,
             "message": None,
             "platforms": [asset.payload() for asset in self.assets],
-            "install_script": "/install-client.sh",
+            "install_script": "/install.sh",
         }
 
 
 def unavailable_payload(message: str) -> dict[str, Any]:
     return {
-        "name": CLIENT_NAME,
+        "name": PROGRAM_NAME,
         "version": None,
         "available": False,
         "message": message,
@@ -157,7 +171,7 @@ def validate_manifest_source_url(url: str, *, filename: str) -> None:
         raise ValueError(f"source URL does not reference {filename}: {url!r}")
 
 
-def _parse_asset(entry: Any, *, version: str, index: int) -> ClientAsset:
+def _parse_asset(entry: Any, *, version: str, index: int) -> ReleaseAsset:
     if not isinstance(entry, dict):
         raise ValueError(f"asset #{index} must be a JSON object")
 
@@ -194,7 +208,7 @@ def _parse_asset(entry: Any, *, version: str, index: int) -> ClientAsset:
         validate_manifest_source_url(source_url, filename=filename)
     except ValueError as exc:
         raise ValueError(f"asset #{index} {exc}") from exc
-    return ClientAsset(
+    return ReleaseAsset(
         os=os_name,
         arch=arch,
         filename=filename,
@@ -204,7 +218,7 @@ def _parse_asset(entry: Any, *, version: str, index: int) -> ClientAsset:
     )
 
 
-def parse_client_release(payload: Any) -> ClientRelease:
+def parse_release(payload: Any) -> Release:
     """Validate a raw manifest document; raise ValueError on anything malformed."""
     if not isinstance(payload, dict):
         raise ValueError("manifest must be a JSON object")
@@ -216,7 +230,7 @@ def parse_client_release(payload: Any) -> ClientRelease:
     assets_payload = payload.get("assets")
     if not isinstance(assets_payload, list) or not assets_payload:
         raise ValueError("manifest assets must be a non-empty list")
-    assets: list[ClientAsset] = []
+    assets: list[ReleaseAsset] = []
     seen_platforms: set[tuple[str, str]] = set()
     seen_filenames: set[str] = set()
     for index, entry in enumerate(assets_payload):
@@ -228,40 +242,109 @@ def parse_client_release(payload: Any) -> ClientRelease:
         seen_platforms.add(asset.platform)
         seen_filenames.add(asset.filename)
         assets.append(asset)
-    return ClientRelease(version=version, assets=tuple(assets))
+    return Release(version=version, assets=tuple(assets))
 
 
-def client_release_state() -> tuple[str, ClientRelease | None]:
-    """Load the shipped manifest. Returns (reason, release); release is None when
-    the server cannot honestly publish client downloads."""
-    if not RELEASE_MANIFEST_PATH.is_file():
-        return (
-            "client downloads are not published for this build (no release manifest)",
-            None,
-        )
+def published_manifest_url() -> str:
+    """The pinned published manifest for the running version (V<major>.<minor> tag)."""
+    tag = "V" + ".".join(__version__.split(".")[:2])
+    return f"https://github.com/ylang-ylang/portmap/releases/download/{tag}/{RELEASE_MANIFEST_CACHE_NAME}"
+
+
+def frozen_manifest_sidecar_path() -> Path | None:
+    """release.json next to the frozen executable (onedir bundle root)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / RELEASE_MANIFEST_CACHE_NAME
+    return None
+
+
+def _read_release_document(path: Path) -> tuple[str, Release | None]:
     try:
-        raw = RELEASE_MANIFEST_PATH.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
     except OSError as exc:
-        return (f"client release manifest is unreadable: {exc}", None)
+        return (f"release manifest is unreadable: {exc}", None)
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        return (f"client release manifest is not valid JSON: {exc}", None)
+        return (f"release manifest is not valid JSON: {exc}", None)
     try:
-        return ("", parse_client_release(payload))
+        return ("", parse_release(payload))
     except ValueError as exc:
-        return (f"client release manifest is invalid: {exc}", None)
+        return (f"release manifest is invalid: {exc}", None)
 
 
-def client_download_info() -> dict[str, Any]:
-    message, release = client_release_state()
+def remote_release_state() -> tuple[str, Release | None]:
+    """Bootstrap the pinned published manifest for bundles without a local one.
+
+    Raw-archive users have no installer-written sidecar and no packaged
+    manifest, so the exact published document for the running version is
+    fetched once over bounded HTTPS from the trusted release host, strictly
+    validated, and cached for offline reuse. Invalid documents are never
+    cached."""
+    url = published_manifest_url()
+    cache_path = download_cache_dir() / RELEASE_MANIFEST_CACHE_NAME
+    if cache_path.is_file():
+        _, release = _read_release_document(cache_path)
+        if release is not None:
+            return ("", release)
+        # A corrupt cache entry is not trusted: refetch and replace it.
+    try:
+        request = urllib.request.Request(url, headers={"user-agent": f"portmap/{__version__}"})
+        with trusted_opener().open(request, timeout=MANIFEST_TIMEOUT_SECONDS) as response:
+            data = response.read(MAX_MANIFEST_BYTES + 1)
+        if len(data) > MAX_MANIFEST_BYTES:
+            return (f"published release manifest exceeds {MAX_MANIFEST_BYTES} bytes: {url}", None)
+        release = parse_release(json.loads(data.decode("utf-8")))
+    except ValueError as exc:
+        return (f"published release manifest is invalid: {exc}", None)
+    except OSError as exc:
+        return (
+            "portmap downloads are not published for this build "
+            f"(no local release manifest; fetching {url} failed: {exc})",
+            None,
+        )
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            dir=cache_path.parent, prefix=f".{RELEASE_MANIFEST_CACHE_NAME}.", suffix=".part"
+        )
+        with os.fdopen(fd, "wb") as temp_file:
+            temp_file.write(data)
+        os.replace(temp_name, cache_path)
+    except OSError:
+        # The cache is an optimization; serving continues from the validated
+        # in-memory document.
+        pass
+    return ("", release)
+
+
+def release_state() -> tuple[str, Release | None]:
+    """Resolve the release manifest. Returns (reason, release); release is
+    None when the server cannot honestly publish portmap downloads. Local
+    manifests (frozen sidecar first, then the packaged one) win; a present
+    but invalid local manifest is an honest failure, never silently replaced
+    by network data. Bundles with no local manifest bootstrap the pinned
+    published manifest remotely."""
+    candidates: list[Path] = []
+    sidecar = frozen_manifest_sidecar_path()
+    if sidecar is not None:
+        candidates.append(sidecar)
+    candidates.append(RELEASE_MANIFEST_PATH)
+    for candidate in candidates:
+        if candidate.is_file():
+            return _read_release_document(candidate)
+    return remote_release_state()
+
+
+def download_info() -> dict[str, Any]:
+    message, release = release_state()
     if release is None:
         return unavailable_payload(message)
     return release.payload()
 
 
-def client_download_dir() -> Path:
-    explicit = os.environ.get("PORTMAP_CLIENT_DOWNLOAD_DIR")
+def download_cache_dir() -> Path:
+    explicit = os.environ.get("PORTMAP_DOWNLOAD_DIR")
     if explicit:
         return Path(explicit).expanduser()
     from .settings import load_portmap_settings
@@ -269,7 +352,7 @@ def client_download_dir() -> Path:
     return load_portmap_settings().state_dir / CACHE_DIR_NAME
 
 
-def archive_matches(path: Path, asset: ClientAsset) -> bool:
+def archive_matches(path: Path, asset: ReleaseAsset) -> bool:
     """Streaming size+sha256 check; never loads the archive into memory."""
     try:
         if path.stat().st_size != asset.size:
@@ -311,7 +394,7 @@ def trusted_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(TrustedAssetRedirectHandler())
 
 
-def fetch_client_archive(asset: ClientAsset, directory: Path) -> Path:
+def fetch_archive(asset: ReleaseAsset, directory: Path) -> Path:
     """Download the pinned asset into the cache, verifying size and sha256.
 
     The archive streams through a bounded buffer into a temp file that is
@@ -332,29 +415,29 @@ def fetch_client_archive(asset: ClientAsset, directory: Path) -> Path:
                     while chunk := response.read(READ_CHUNK_BYTES):
                         size += len(chunk)
                         if size > asset.size:
-                            raise ClientDownloadUnavailable(
+                            raise DownloadUnavailable(
                                 503,
-                                f"client archive exceeded manifest size: {asset.filename}",
+                                f"release archive exceeded manifest size: {asset.filename}",
                             )
                         digest.update(chunk)
                         temp_file.write(chunk)
                     if size != asset.size:
-                        raise ClientDownloadUnavailable(
+                        raise DownloadUnavailable(
                             503,
-                            f"client archive size mismatch for {asset.filename}: "
+                            f"release archive size mismatch for {asset.filename}: "
                             f"expected {asset.size}, got {size}",
                         )
                     if digest.hexdigest() != asset.sha256:
-                        raise ClientDownloadUnavailable(
+                        raise DownloadUnavailable(
                             503,
-                            f"client archive checksum mismatch for {asset.filename}",
+                            f"release archive checksum mismatch for {asset.filename}",
                         )
-            except ClientDownloadUnavailable:
+            except DownloadUnavailable:
                 raise
             except (OSError, ValueError) as exc:
-                raise ClientDownloadUnavailable(
+                raise DownloadUnavailable(
                     503,
-                    f"failed to download client archive {asset.filename}: {exc}",
+                    f"failed to download release archive {asset.filename}: {exc}",
                 ) from exc
         os.replace(temp_name, target)
     except BaseException:
@@ -366,40 +449,40 @@ def fetch_client_archive(asset: ClientAsset, directory: Path) -> Path:
     return target
 
 
-def resolve_client_archive(filename: str, *, cache_dir: Path | None = None) -> Path:
+def resolve_archive(filename: str, *, cache_dir: Path | None = None) -> Path:
     """Return a verified local archive path for a manifest-pinned filename.
 
     Unknown filenames, traversal attempts and unpublished manifests never touch
     the network. Cached (including preseeded) copies are served offline; misses
     lazily fetch the pinned trusted GitHub asset under a per-archive lock.
     """
-    message, release = client_release_state()
+    message, release = release_state()
     if release is None:
-        raise ClientDownloadUnavailable(404, message)
+        raise DownloadUnavailable(404, message)
     asset = release.asset_for(filename)
     if asset is None:
-        raise ClientDownloadUnavailable(404, f"unknown client archive: {filename}")
-    directory = cache_dir or client_download_dir()
+        raise DownloadUnavailable(404, f"unknown portmap archive: {filename}")
+    directory = cache_dir or download_cache_dir()
     target = directory / asset.filename
     if archive_matches(target, asset):
         return target
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise ClientDownloadUnavailable(500, f"cannot prepare client download cache: {exc}") from exc
+        raise DownloadUnavailable(500, f"cannot prepare portmap download cache: {exc}") from exc
     with archive_lock(directory, asset.filename):
         if archive_matches(target, asset):
             return target
-        return fetch_client_archive(asset, directory)
+        return fetch_archive(asset, directory)
 
 
 def install_script_body() -> bytes:
     """The installer is a maintained shell asset; it is only published when the
     manifest validates, so the curl|sh pipe never installs fiction."""
-    message, release = client_release_state()
+    message, release = release_state()
     if release is None:
-        raise ClientDownloadUnavailable(404, message)
+        raise DownloadUnavailable(404, message)
     try:
         return INSTALL_SCRIPT_PATH.read_bytes()
     except OSError as exc:
-        raise ClientDownloadUnavailable(500, f"installer template is unavailable: {exc}") from exc
+        raise DownloadUnavailable(500, f"installer template is unavailable: {exc}") from exc

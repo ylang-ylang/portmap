@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .client_runtime import native_environment
 from .errors import PortmapError
 
 
@@ -154,6 +155,7 @@ def run_privileged(
     try:
         subprocess.run(
             full_command,
+            env=native_environment(),
             check=True,
             input=input_text,
             text=True,
