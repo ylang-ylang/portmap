@@ -105,3 +105,5 @@
   shared private port-80 entry for SSH/local routes with separate LAN ingress.
   Deliver the unified frozen archive, installer, and optional Homebrew web
   commands; retain scoped resolver/process ownership and legacy-state migration.
+- Integrate the `V0.10` release ledger from the synchronized feature branch;
+  keep all build artifacts outside the clean publication history.
