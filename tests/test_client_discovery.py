@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from portmap import client_discovery
+from portmap import client_discovery, server as local_server
 from portmap.client_discovery import discover_ssh_hosts, discover_targets, probe_gateway, resolve_ssh_host
 from portmap.errors import PortmapError
 
@@ -84,6 +84,15 @@ def test_probe_pins_requested_address_and_ignores_proxy_environment(catalog, ser
     assert info.http_port == 8080
     assert info.catalog_url == f"{url}/registry.json"
     assert requests == ["/registry.json"]
+
+
+def test_local_readiness_accepts_catalog_worktree_latency(catalog, serve_catalog):
+    # Worktree discovery can take more than one second on a populated host.
+    # The fixture delays the body for two seconds, within the normal probe budget.
+    url, _ = serve_catalog(catalog, release=threading.Event())
+    port = int(url.rsplit(":", 1)[1])
+
+    assert local_server._ready(port, "work.portmap") is True
 
 
 @pytest.mark.parametrize("target", [
@@ -206,21 +215,36 @@ def test_eof_terminated_catalog_does_not_touch_closed_socket(catalog, serve_cata
     assert probe_gateway(url).domain == "work.portmap"
 
 
-def test_default_ports_leave_time_for_fallback_after_blackhole(catalog, monkeypatch):
+def test_bare_targets_probe_only_the_default_http_port(catalog, monkeypatch):
     attempted = []
 
     def request(host, port, scheme, address, deadline, *, connect_timeout=None):
         attempted.append(port)
-        if port == 8080:
-            time.sleep(connect_timeout if connect_timeout is not None else deadline.remaining())
-            raise TimeoutError("simulated filtered port")
         return json.dumps(catalog).encode()
 
     monkeypatch.setattr(client_discovery, "_request_catalog", request)
     info = probe_gateway("127.0.0.1", timeout=0.2)
     assert info.domain == "work.portmap"
     assert info.catalog_url == "http://127.0.0.1:80/registry.json"
-    assert attempted == [8080, 80]
+    assert attempted == [80]
+
+
+def test_bare_target_never_falls_back_to_explicit_non_default_ports(catalog, serve_catalog, monkeypatch):
+    # A gateway on a non-default port is reachable only through its explicit
+    # host:port or URL form; the bare default never silently falls back to it.
+    non_default, _ = serve_catalog(catalog)
+    port = int(non_default.rsplit(":", 1)[1])
+
+    def request(host, probed, scheme, address, deadline, *, connect_timeout=None):
+        if probed != port:
+            raise ConnectionRefusedError()
+        return json.dumps(catalog).encode()
+
+    monkeypatch.setattr(client_discovery, "_request_catalog", request)
+    with pytest.raises(PortmapError, match="no portmap gateway found"):
+        probe_gateway("127.0.0.1", timeout=0.5)
+    assert probe_gateway(f"127.0.0.1:{port}", timeout=1).domain == "work.portmap"
+    assert probe_gateway(f"http://127.0.0.1:{port}", timeout=1).domain == "work.portmap"
 
 
 def test_inventory_expands_include_files_not_host_patterns_and_never_executes(tmp_path, monkeypatch):

@@ -31,8 +31,6 @@ class PortmapSettings:
     root: Path
     http_bind: str
     http_port: int
-    catalog_bind: str
-    catalog_port: int
     dns_bind: str
     dns_port: int
     dns_domain: str
@@ -84,8 +82,6 @@ class PortmapSettings:
             "PORTMAP_DOCKER_SOCKET": self.runtime_socket if "://" not in self.runtime_socket else DEFAULT_DOCKER_SOCKET,
             "PORTMAP_HTTP_BIND": self.http_bind,
             "PORTMAP_HTTP_PORT": str(self.http_port),
-            "PORTMAP_CATALOG_BIND": self.catalog_bind,
-            "PORTMAP_CATALOG_PORT": str(self.catalog_port),
             "PORTMAP_DNS_BIND": self.effective_dns_bind,
             "PORTMAP_DNS_PORT": str(self.dns_port),
             "PORTMAP_DNS_DOMAIN": self.dns_domain,
@@ -121,7 +117,7 @@ def load_portmap_settings(
     host_ip = string_env(env, "PORTMAP_HOST_IP") or string_env(env, "PORTMAP_DNS_TARGET_IP") or detect_host_ip()
     state_dir = expand_path(
         string_env(env, "PORTMAP_STATE_DIR")
-        or string_value(state, "dir", "~/.local/state/portmap"),
+        or string_value(state, "dir", str(Path(env.get("XDG_STATE_HOME", "~/.local/state")) / "portmap")),
         root=resolved_root,
     )
     agent_runtime_dir = expand_path(
@@ -133,9 +129,7 @@ def load_portmap_settings(
     return PortmapSettings(
         root=resolved_root,
         http_bind=string_env(env, "PORTMAP_HTTP_BIND") or string_value(gateway, "http_bind", "0.0.0.0"),
-        http_port=int_env(env, "PORTMAP_HTTP_PORT", int_value(gateway, "http_port", 8080)),
-        catalog_bind=string_env(env, "PORTMAP_CATALOG_BIND") or string_value(gateway, "catalog_bind", "0.0.0.0"),
-        catalog_port=int_env(env, "PORTMAP_CATALOG_PORT", int_value(gateway, "catalog_port", 80)),
+        http_port=int_env(env, "PORTMAP_HTTP_PORT", int_value(gateway, "http_port", 80)),
         dns_bind=string_env(env, "PORTMAP_DNS_BIND") or string_value(gateway, "dns_bind", "0.0.0.0"),
         dns_port=int_env(env, "PORTMAP_DNS_PORT", int_value(gateway, "dns_port", 53)),
         dns_domain=(

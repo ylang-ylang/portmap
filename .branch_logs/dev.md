@@ -100,3 +100,10 @@
   rate and remaining time on terminal stderr, preserving clean redirected logs
   and visible errors. Add verification/extraction stages; verify piped-input
   and independent output descriptors with 66 regressions and real CLI installs.
+- Merge `feat/unified-portmap`: one command for standalone remote access and
+  local publishing, direct remote DNS without a local HTTP listener, and a
+  shared private port-80 entry for SSH/local routes with separate LAN ingress.
+  Deliver the unified frozen archive, installer, and optional Homebrew web
+  commands; retain scoped resolver/process ownership and legacy-state migration.
+- Integrate the `V0.10` release ledger from the synchronized feature branch;
+  keep all build artifacts outside the clean publication history.

@@ -1,8 +1,8 @@
-"""Runtime helpers for the standalone client: state paths, bundled native
+"""Runtime helpers for the portmap client role: state paths, bundled native
 binaries, child environments, and frozen worker commands.
 
 This module must stay free of server-runtime imports (settings, planner,
-agent, catalog): the frozen portmap-client executable imports it first."""
+agent, catalog): the unified frozen portmap executable imports it first."""
 from __future__ import annotations
 
 import os
@@ -11,29 +11,43 @@ import sys
 from pathlib import Path
 from typing import Mapping, Sequence
 
-# In a source checkout this is src/portmap/client_bin; in the frozen onedir
-# bundle it is <install>/_internal/portmap/client_bin, because __file__ of
+# In a source checkout this is src/portmap/native_bin; in the frozen onedir
+# bundle it is <install>/_internal/portmap/native_bin, because __file__ of
 # bundled modules resolves under the PyInstaller payload root.
-BUNDLED_BIN_DIR = Path(__file__).resolve().parent / "client_bin"
+BUNDLED_BIN_DIR = Path(__file__).resolve().parent / "native_bin"
 
 # Loader search variables a PyInstaller application may add for itself. Native
 # system children (ssh, ps, ip, resolvectl, coredns from PATH) must not inherit
-# entries that point into the client bundle.
+# entries that point into the portmap bundle.
 _LIBRARY_PATH_VARIABLES = ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH")
 
 _WORKER_FLAGS = ("--state-dir", "--port", "--owner")
 
 
 def frozen() -> bool:
-    """True when running from the frozen portmap-client executable."""
+    """True when running from the frozen unified portmap executable."""
     return bool(getattr(sys, "frozen", False))
 
 
 def client_state_dir() -> Path:
-    """Client-owned state directory, independent of server configuration."""
-    configured = os.environ.get("PORTMAP_CLIENT_STATE_DIR")
-    if configured:
-        return Path(configured).expanduser().resolve()
+    """Client-role state directory under the shared portmap state root.
+
+    PORTMAP_CLIENT_STATE_DIR stays a role-specific isolation override; the
+    normal default is ${PORTMAP_STATE_DIR or XDG_STATE_HOME/portmap}/client so
+    one unified command shares a single state root across roles.
+    """
+    isolated = os.environ.get("PORTMAP_CLIENT_STATE_DIR")
+    if isolated:
+        return Path(isolated).expanduser().resolve()
+    root = os.environ.get("PORTMAP_STATE_DIR")
+    if root:
+        return (Path(root).expanduser() / "client").resolve()
+    base = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
+    return (Path(base).expanduser() / "portmap" / "client").resolve()
+
+
+def legacy_client_state_dir() -> Path:
+    """State directory of the removed standalone portmap-client command."""
     base = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
     return (Path(base).expanduser() / "portmap-client").resolve()
 

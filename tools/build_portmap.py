@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Build a client-only self-contained archive, with pinned native dependencies.
+"""Build the unified self-contained portmap archive, with pinned native dependencies.
 
-Use packaging/client.Dockerfile on Linux for a glibc-2.31 build baseline. This
+Use packaging/portmap.Dockerfile on Linux for a glibc-2.31 build baseline. This
 script never publishes artifacts or modifies the source release manifest.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ def download(url: str, path: Path, *, sha256: str | None, limit: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".download-", dir=path.parent)
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "portmap-client-builder", "Accept-Encoding": "identity"})
+        request = urllib.request.Request(url, headers={"User-Agent": "portmap-builder", "Accept-Encoding": "identity"})
         with os.fdopen(fd, "wb") as output, urllib.request.urlopen(request, timeout=60) as response:
             total = 0
             while chunk := response.read(1024 * 1024):
@@ -57,7 +57,7 @@ def download(url: str, path: Path, *, sha256: str | None, limit: int) -> None:
 
 
 def native_dependencies(out: Path, target: str) -> Path:
-    manifest = json.loads((ROOT / "packaging" / "client-natives.json").read_text())
+    manifest = json.loads((ROOT / "packaging" / "natives.json").read_text())
     if target not in manifest:
         raise ValueError(f"no pinned native dependencies for {target}")
     native = out / "native" / target
@@ -110,21 +110,23 @@ def main() -> int:
         print(json.dumps({"native_dir": str(native), "platform": target, "version": version}))
         return 0
     subprocess.run(
-        [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--distpath", str(out / "frozen"), "--workpath", str(out / "work"), str(ROOT / "packaging" / "client.spec")],
-        env={**os.environ, "PORTMAP_CLIENT_NATIVE_DIR": str(native)},
+        [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--distpath", str(out / "frozen"), "--workpath", str(out / "work"), str(ROOT / "packaging" / "portmap.spec")],
+        env={**os.environ, "PORTMAP_NATIVE_DIR": str(native)},
         cwd=ROOT,
         check=True,
     )
-    package = out / "frozen" / "portmap-client"
-    executable = package / "portmap-client"
+    package = out / "frozen" / "portmap"
+    executable = package / "portmap"
     if not executable.is_file():
-        raise ValueError("freezer produced no client executable")
-    filename = f"portmap-client-{version}-{target}.tar.gz"
+        raise ValueError("freezer produced no portmap executable")
+    filename = f"portmap-{version}-{target}.tar.gz"
     archive = out / filename
     # Dereference bundle-internal library symlinks, simplifying safe installer
     # extraction: published archives contain only regular files/directories.
     with tarfile.open(archive, "w:gz", dereference=True) as output:
         for member in sorted(package.iterdir()):
+            if member.name == "release.json":
+                continue
             output.add(member, arcname=member.name)
     os_name, arch = target.split("-", 1)
     tag = args.release_tag or "V" + ".".join(version.split(".")[:2])
@@ -139,9 +141,27 @@ def main() -> int:
         "source_url": f"https://github.com/ylang-ylang/portmap/releases/download/{tag}/{filename}",
     }
     manifest = {"version": version, "assets": [record]}
-    (out / "client_release.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    manifest_document = json.dumps(manifest, indent=2) + "\n"
+    (out / "release.json").write_text(manifest_document, encoding="utf-8")
+    # The archive above was already hashed, so it deliberately contains no
+    # manifest (embedding one would change its own checksum). Write the real
+    # manifest next to the unpacked executable instead: the frozen catalog
+    # resolves this sidecar first, letting the freshly built bundle serve its
+    # own release for smoke tests without any network bootstrap.
+    bundle_manifest = package / "release.json"
+    bundle_manifest.write_text(manifest_document, encoding="utf-8")
     (out / (filename + ".sha256")).write_text(f"{record['sha256']}  {filename}\n", encoding="utf-8")
-    print(json.dumps({"archive": str(archive), "manifest": str(out / "client_release.json"), **record}, indent=2))
+    print(
+        json.dumps(
+            {
+                "archive": str(archive),
+                "manifest": str(out / "release.json"),
+                "bundle_manifest": str(bundle_manifest),
+                **record,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

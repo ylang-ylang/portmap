@@ -1,0 +1,8 @@
+services:
+  catalog:
+    image: python:3.12-slim-bookworm
+    command:
+      - /opt/portmap/portmap
+      - _serve-server-catalog
+    volumes:
+      - "${PORTMAP_BUNDLE_DIR:?A standalone bundle is required}:/opt/portmap:ro"

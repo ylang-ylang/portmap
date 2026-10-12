@@ -52,33 +52,6 @@ function currentPortSuffix() {
   return window.location.port ? `:${window.location.port}` : "";
 }
 
-function splitDnsSetupCommand(catalog) {
-  if (catalog?.client_access) return "portmap-client setup\n";
-  const dnsServer = shellSingleQuote(catalog?.dns_server);
-  const dnsDomain = shellSingleQuote(catalog?.dns_domain);
-  return `DNS_SERVER=${dnsServer}
-DNS_DOMAIN=${dnsDomain}
-DNS_IFACE="$(ip route get "$DNS_SERVER" | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
-
-sudo resolvectl dns "$DNS_IFACE" "$DNS_SERVER"
-sudo resolvectl domain "$DNS_IFACE" "~$DNS_DOMAIN"
-resolvectl query "portmap.$DNS_DOMAIN"
-`;
-}
-
-function splitDnsUnsetCommand(catalog) {
-  if (catalog?.client_access) return "portmap-client teardown\n";
-  const dnsServer = shellSingleQuote(catalog?.dns_server);
-  const dnsDomain = shellSingleQuote(catalog?.dns_domain);
-  return `DNS_SERVER=${dnsServer}
-DNS_DOMAIN=${dnsDomain}
-DNS_IFACE="$(ip route get "$DNS_SERVER" | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
-
-sudo resolvectl revert "$DNS_IFACE"
-resolvectl query "portmap.$DNS_DOMAIN"
-`;
-}
-
 function endpointCount(service) {
   return (service.endpoints || []).length;
 }
@@ -936,34 +909,6 @@ function CatalogTree({ catalog, onAction, onStart }) {
   );
 }
 
-function SplitDnsTools({ catalog }) {
-  const setup = catalog ? splitDnsSetupCommand(catalog) : "Loading...";
-  const unset = catalog ? splitDnsUnsetCommand(catalog) : "Loading...";
-  return (
-    <section className="utility-panel" aria-label="Setup commands">
-      <details className="quick-setup">
-        <summary>Split DNS setup</summary>
-        <div className="quick-setup-body">
-          <div className="quick-command">
-            <div className="quick-setup-actions">
-              <p>Apply split DNS on the client machine that opens the generated debug URLs.</p>
-              <CopyButton targetId="split-dns-command" />
-            </div>
-            <pre><code id="split-dns-command">{setup}</code></pre>
-          </div>
-          <div className="quick-command">
-            <div className="quick-setup-actions">
-              <p>{catalog?.client_access ? "Disconnect client gateways and remove the local DNS setup." : "Remove the temporary split DNS override from the same client machine."}</p>
-              <CopyButton targetId="split-dns-unset" />
-            </div>
-            <pre><code id="split-dns-unset">{unset}</code></pre>
-          </div>
-        </div>
-      </details>
-    </section>
-  );
-}
-
 function detectPlatform() {
   const fingerprint = `${navigator.userAgent} ${navigator.platform || ""}`.toLowerCase();
   const mobile = /android|iphone|ipad/.test(fingerprint);
@@ -981,129 +926,166 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function ClientDownloadPanel({ catalog }) {
-  const [client, setClient] = useState(null);
-  const [clientError, setClientError] = useState("");
-  const [clientLoading, setClientLoading] = useState(true);
+function DownloadPanel({ catalog }) {
+  const [release, setRelease] = useState(null);
+  const [releaseError, setReleaseError] = useState("");
+  const [releaseLoading, setReleaseLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    async function loadClient() {
+    async function loadRelease() {
       try {
-        const res = await fetch("/api/client");
+        const res = await fetch("/api/downloads");
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        if (!cancelled) setClient(data);
+        if (!cancelled) setRelease(data);
       } catch (err) {
-        if (!cancelled) setClientError(`${err}`);
+        if (!cancelled) setReleaseError(`${err}`);
       } finally {
-        if (!cancelled) setClientLoading(false);
+        if (!cancelled) setReleaseLoading(false);
       }
     }
-    loadClient();
+    loadRelease();
     return () => { cancelled = true; };
   }, []);
 
   if (catalog?.client_access) return null;
 
-  const origin = `${window.location.protocol}//${window.location.host}`;
-  const installCmd = `curl -fsSL ${shellSingleQuote(`${origin}/install-client.sh`)} | sh -s -- ${shellSingleQuote(origin)}`;
-  const platforms = client?.platforms || [];
+  const downloadOrigin = new URL(window.location.origin);
+  // A fresh machine cannot resolve .portmap before it has installed the client.
+  const needsBootstrapAddress = downloadOrigin.hostname.endsWith(".portmap");
+  if (needsBootstrapAddress && catalog?.dns_server) {
+    downloadOrigin.hostname = catalog.dns_server;
+  }
+  const origin = needsBootstrapAddress && !catalog?.dns_server ? "" : downloadOrigin.origin;
+  const installCmd = origin
+    ? `curl -fsSL ${shellSingleQuote(`${origin}/install.sh`)} | sh -s -- ${shellSingleQuote(origin)}`
+    : "";
+  const platforms = release?.platforms || [];
   const detected = detectPlatform();
   const suggested = platforms.find((p) => p.os === detected.os && p.arch === detected.arch) || null;
 
   return (
-    <section className="utility-panel" aria-label="Download portmap-client">
-      <details className="quick-setup client-download" open>
+    <section className="utility-panel" aria-label="Download portmap">
+      <details className="quick-setup portmap-download" open>
         <summary>
           <Download className="button-icon" aria-hidden="true" />
-          {" "}Download client / 获取客户端
+          {" "}Download portmap / 获取 portmap
         </summary>
         <div className="quick-setup-body">
-          {clientLoading && <p>Loading…</p>}
-          {!clientLoading && clientError && (
-            <p className="client-download-notice client-download-error">{clientError}</p>
+          {releaseLoading && <p>Loading…</p>}
+          {!releaseLoading && releaseError && (
+            <p className="portmap-download-notice portmap-download-error">{releaseError}</p>
           )}
-          {!clientLoading && !clientError && client && !client.available && (
-            <p className="client-download-notice">
-              {client.message || "Client download not available on this server."}
+          {!releaseLoading && !releaseError && release && !release.available && (
+            <p className="portmap-download-notice">
+              {release.message || "portmap download is not available on this server."}
             </p>
           )}
-          {!clientLoading && !clientError && client?.available && (
+          {!releaseLoading && !releaseError && release?.available && (
             <>
               <div className="quick-command">
                 <div className="quick-setup-actions">
                   <p>
-                    Install <code>portmap-client</code> — detects OS/arch, verifies
-                    the archive, links <code>~/.local/bin/portmap-client</code>. No sudo, no Python.
+                    Install the standalone <code>portmap</code> command — detects OS/arch,
+                    verifies the archive, installs <code>~/.local/share/portmap/&lt;version&gt;</code> and
+                    links <code>~/.local/bin/portmap</code>. No sudo, no Python, no Docker needed.
                   </p>
-                  <CopyButton targetId="client-install-cmd" />
+                  {installCmd && <CopyButton targetId="portmap-install-cmd" />}
                 </div>
-                <pre><code id="client-install-cmd">{installCmd}</code></pre>
+                {installCmd
+                  ? <pre><code id="portmap-install-cmd">{installCmd}</code></pre>
+                  : <p className="portmap-download-notice">Open this page using the server's IP address to install on a machine without .portmap DNS.</p>}
               </div>
               {platforms.length > 0 && (
                 <div className="quick-command">
-                  <div className="client-platforms-label">Or download directly:</div>
-                  <ul className="client-platform-list">
+                  <div className="portmap-platforms-label">Or download the archive directly:</div>
+                  <ul className="portmap-platform-list">
                     {platforms.map((p) => {
                       const isSuggested = p === suggested;
                       const size = formatSize(p.size);
                       return (
                         <li
                           key={p.filename}
-                          className={`client-platform-item${isSuggested ? " client-platform-suggested" : ""}`}
+                          className={`portmap-platform-item${isSuggested ? " portmap-platform-suggested" : ""}`}
                         >
-                          <code className="client-platform-badge">{p.os}/{p.arch}</code>
-                          <a href={p.url} className="client-platform-link">{p.filename}</a>
-                          {size && <span className="client-platform-size">{size}</span>}
-                          {isSuggested && <span className="client-platform-tag">your platform</span>}
-                          {p.requirements && <span className="client-platform-req" title={p.requirements}>{p.requirements}</span>}
+                          <code className="portmap-platform-badge">{p.os}/{p.arch}</code>
+                          <a href={p.url} className="portmap-platform-link">{p.filename}</a>
+                          {size && <span className="portmap-platform-size">{size}</span>}
+                          {isSuggested && <span className="portmap-platform-tag">your platform</span>}
+                          {p.requirements && <span className="portmap-platform-req" title={p.requirements}>{p.requirements}</span>}
                         </li>
                       );
                     })}
                   </ul>
                 </div>
               )}
-              <div className="quick-command">
-                <p>After install, on the client machine:</p>
-                <pre><code>{`portmap-client setup\nportmap-client connect <IP-or-SSH-target>`}</code></pre>
-                <p>Setup may request administrator permission for local split DNS; it does not start a server on this machine.</p>
-              </div>
             </>
           )}
+          <div className="quick-command">
+            <div className="quick-setup-actions">
+              <p>Optional: install and upgrade via Homebrew instead of the standalone bundle.</p>
+              <CopyButton targetId="portmap-brew-install" />
+            </div>
+            <pre><code id="portmap-brew-install">brew install ylang-ylang/tap/portmap</code></pre>
+            <div className="quick-setup-actions">
+              <p>Upgrade an existing brew installation:</p>
+              <CopyButton targetId="portmap-brew-upgrade" />
+            </div>
+            <pre><code id="portmap-brew-upgrade">brew upgrade ylang-ylang/tap/portmap</code></pre>
+          </div>
+          <div className="quick-command">
+            <p>After install, on the computer that needs access:</p>
+            <pre><code>{`portmap setup\nportmap connect <IP-or-SSH-target>\nportmap status --check`}</code></pre>
+            <p>
+              Installing only places the command. <code>portmap setup</code> configures local
+              split DNS; <code>portmap connect</code> reaches a remote gateway. Direct access
+              uses the remote server's address and HTTP port, without a local HTTP listener.
+              SSH access uses the shared private HTTP entry on port 80.
+            </p>
+            <p>
+              To also publish this computer's projects, run <code>portmap up</code>.
+              Local publishing needs Docker or Podman; remote-only access does not.
+              DNS integration and restricted HTTP ingress request sudo when required.
+            </p>
+          </div>
         </div>
       </details>
     </section>
   );
 }
 
-function DnsStatus({ catalog }) {
+function AccessStatus({ catalog }) {
   const [status, setStatus] = useState("checking");
   if (!catalog) {
     return (
-      <span className="dns-status dns-status-checking">
-        <span className="dns-status-label">DNS</span>
-        <span className="dns-status-value">loading</span>
+      <span className="access-status access-status-checking">
+        <span className="access-status-label">Access</span>
+        <span className="access-status-value">loading</span>
       </span>
     );
   }
   const domain = text(catalog.dns_domain).replace(/\.$/, "");
   const host = catalog.client_access ? text(catalog.client_access.domain) : `portmap.${domain}`;
   const url = `${window.location.protocol}//${host}${currentPortSuffix()}/assets/dns-check.svg?ts=${Date.now()}`;
-  const statusLabel = status === "ok" ? "succ" : status === "failed" ? "failed" : "checking";
+  // This is a browser resource probe: a failure means this browser could not
+  // load the URL (access failure), not a definitive DNS diagnosis. The probe
+  // URL stays exposed via the tooltip and the link.
+  const probeTitle = `Browser access check for ${url} — failure means this browser cannot load the resource, not a definitive DNS diagnosis.`;
+  const statusLabel = status === "ok" ? "ok" : status === "failed" ? "no access" : "checking";
   return (
-    <span className={`dns-status dns-status-${status}`} data-dns-probe title={url}>
+    <span className={`access-status access-status-${status}`} data-access-probe title={probeTitle}>
       <img
-        className="dns-status-image"
-        data-dns-probe-image
+        className="access-status-image"
+        data-access-probe-image
         src={url}
         alt=""
         onLoad={() => setStatus("ok")}
         onError={() => setStatus("failed")}
       />
-      <span className="dns-status-label">DNS</span>
-      <span className="dns-status-value" data-dns-probe-status>{statusLabel}</span>
-      <OpenLink href={url}><CodeText value={host} /></OpenLink>
+      <span className="access-status-label">Access</span>
+      <span className="access-status-value" data-access-probe-status>{statusLabel}</span>
+      <OpenLink href={url} title={probeTitle}><CodeText value={host} /></OpenLink>
     </span>
   );
 }
@@ -1203,14 +1185,14 @@ function CatalogApp() {
         <div>
           <div className="title-row">
             <h1>portmap catalog</h1>
-            <DnsStatus catalog={catalog} />
+            <AccessStatus catalog={catalog} />
           </div>
           <CatalogMeta catalog={catalog} />
         </div>
       </header>
       <ActionMessage message={actionMessage} />
       <ActionLog entries={actionLog} />
-      <ClientDownloadPanel catalog={catalog} />
+      <DownloadPanel catalog={catalog} />
       {error ? (
         <section className="catalog-tree" data-catalog-tree>
           <div className="empty load-error">{error}</div>
@@ -1218,7 +1200,6 @@ function CatalogApp() {
       ) : (
         <CatalogTree catalog={catalog} onAction={handleAction} onStart={handleStart} />
       )}
-      <SplitDnsTools catalog={catalog} />
     </main>
   );
 }

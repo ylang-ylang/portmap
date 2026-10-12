@@ -5,4 +5,4 @@ RUN apt-get update \
     && pip install --no-cache-dir pyinstaller==6.14.1
 ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /src
-ENTRYPOINT ["python", "tools/build_client.py"]
+ENTRYPOINT ["python", "tools/build_portmap.py"]

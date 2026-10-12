@@ -7,3 +7,4 @@ test_repo/
 node_modules/
 .portmap-state/
 .portmap-agent-runtime/
+/dist/

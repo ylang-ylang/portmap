@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_client import AgentUnavailable, agent_health
+from .client_runtime import frozen, worker_environment
 from .settings import PortmapSettings
 
 
@@ -182,22 +183,19 @@ def ensure_agent_started(settings: PortmapSettings) -> AgentProcessStatus:
     log_file = settings.agent_log_file
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    env = os.environ.copy()
+    env = worker_environment()
     env.update(settings.gateway_env())
     env["PORTMAP_ROOT"] = str(settings.root)
     env["PORTMAP_AGENT_SOCKET"] = str(settings.agent_socket)
+    command = (
+        [sys.executable, "agent", "serve"]
+        if frozen()
+        else [sys.executable, "-m", "portmap.agent", "serve"]
+    )
+    command += ["--socket", str(settings.agent_socket), "--pid-file", str(settings.agent_pid_file)]
     with log_file.open("ab") as log:
         process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "portmap.agent",
-                "serve",
-                "--socket",
-                str(settings.agent_socket),
-                "--pid-file",
-                str(settings.agent_pid_file),
-            ],
+            command,
             cwd=settings.root,
             env=env,
             stdout=log,
