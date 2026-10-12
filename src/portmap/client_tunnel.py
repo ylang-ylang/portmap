@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import BinaryIO, Mapping, TypedDict
 
-from .client_runtime import native_environment
+from .client_runtime import ensure_persistent_scope, native_environment
 from .errors import PortmapError
 
 
@@ -44,6 +44,7 @@ def start_tunnel(
     key: str,
     config_file: Path | None = None,
     timeout: float = 10,
+    use_sudo: bool = True,
 ) -> TunnelDescriptor:
     """Start a private master; persist the returned dict unchanged as JSON.
 
@@ -108,6 +109,8 @@ def start_tunnel(
             command.extend(("-F", config))
         command.extend(("--", target))
 
+        # The SSH master must outlive the login session that started it.
+        ensure_persistent_scope(use_sudo=use_sudo)
         with os.fdopen(os.open(tunnel["log_file"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log:
             child = subprocess.Popen(
                 command,

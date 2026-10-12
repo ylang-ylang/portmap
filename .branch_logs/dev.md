@@ -107,3 +107,9 @@
   commands; retain scoped resolver/process ownership and legacy-state migration.
 - Integrate the `V0.10` release ledger from the synchronized feature branch;
   keep all build artifacts outside the clean publication history.
+- Merge `feat/reinstall-dns-lifecycle`: move the invoking CLI out of a
+  disposable logind session before spawning persistent workers, preserving
+  ordinary-user ownership and explicit no-sudo refusal/rollback.
+- Publish `V0.11` with 391 passing non-integration tests, frozen-bundle smoke,
+  real creator-SSH-session termination and running same-version reinstall
+  acceptance. The notebook ends in direct mode without a local HTTP listener.

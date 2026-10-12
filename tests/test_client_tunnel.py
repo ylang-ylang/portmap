@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from portmap import client_tunnel
+from portmap import client_runtime, client_tunnel
 from portmap.errors import PortmapError
 
 
@@ -57,6 +57,12 @@ def replace_master(monkeypatch):
             master.runtime.rmdir()
 
 
+@pytest.fixture(autouse=True)
+def scope_adoption(monkeypatch):
+    """Never move the test runner out of its own session."""
+    monkeypatch.setattr(client_tunnel, "ensure_persistent_scope", lambda **kwargs: None)
+
+
 @pytest.fixture
 def owned_tunnel(tmp_path):
     runtime = Path(tempfile.mkdtemp(prefix=f"portmap-ssh-{os.getuid()}-", dir=Path("/tmp").resolve()))
@@ -97,6 +103,22 @@ def test_failed_authentication_reports_bounded_stderr_and_reaps_child(tmp_path, 
     assert len(str(error.value)) < 5000
     assert started[0].child.poll() == 255
     assert not started[0].runtime.exists()
+
+
+def test_start_tunnel_refuses_session_escape_without_sudo_before_spawning(tmp_path, monkeypatch):
+    monkeypatch.setattr(client_runtime.sys, "platform", "linux")
+    monkeypatch.setattr(client_runtime, "_persistent_scope", None)
+    monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: ["/user.slice/user-1000.slice/session-1.scope"])
+    monkeypatch.setattr(client_runtime.os, "geteuid", lambda: 1000)
+
+    def must_not_spawn(*args, **kwargs):
+        raise AssertionError("no SSH master may be spawned")
+
+    monkeypatch.setattr(client_tunnel, "ensure_persistent_scope", client_runtime.ensure_persistent_scope)
+    monkeypatch.setattr(client_tunnel.subprocess, "Popen", must_not_spawn)
+    with pytest.raises(PortmapError):
+        client_tunnel.start_tunnel("configured-alias", state_dir=tmp_path, key="denied", use_sudo=False)
+    assert list((tmp_path / "ssh").glob("*.log")) == []
 
 
 def test_startup_timeout_reaps_only_its_owned_child(tmp_path, replace_master):

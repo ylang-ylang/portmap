@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from portmap import client_dns
+from portmap import client_dns, client_runtime
 from portmap.errors import PortmapError
 
 
@@ -47,3 +47,22 @@ def test_invalid_records_are_rejected(records):
 def test_marker_rejects_whitespace():
     with pytest.raises(PortmapError):
         client_dns.render_corefile({}, "owner token")
+
+
+def test_sync_dns_refuses_session_escape_without_sudo_before_spawning(tmp_path, monkeypatch):
+    monkeypatch.setattr(client_dns, "_marker", lambda timeout=0.3: None)
+    monkeypatch.setattr(client_dns, "find_native_binary", lambda name: "/nonexistent-coredns")
+
+    monkeypatch.setattr(client_runtime.sys, "platform", "linux")
+    monkeypatch.setattr(client_runtime, "_persistent_scope", None)
+    monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: ["/user.slice/user-1000.slice/session-1.scope"])
+    monkeypatch.setattr(client_runtime.os, "geteuid", lambda: 1000)
+
+    def must_not_spawn(*args, **kwargs):
+        raise AssertionError("no CoreDNS worker may be spawned")
+
+    monkeypatch.setattr(client_dns.subprocess, "Popen", must_not_spawn)
+    with pytest.raises(PortmapError):
+        client_dns.sync_dns(tmp_path, {"host.portmap": "127.0.0.1"}, use_sudo=False)
+    assert not (tmp_path / "Corefile").exists()
+    assert not (tmp_path / "dns.json").exists()
