@@ -9,15 +9,35 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
 import urllib.parse
 from http.server import ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .agent_client import AgentUnavailable, agent_compose_up_worktree, agent_worktrees
+from .agent_client import (
+    AgentRequestError,
+    AgentUnavailable,
+    agent_compose_up_worktree,
+    agent_connection_targets,
+    agent_mutate_connection,
+    agent_worktrees,
+)
 from .broker import ENDPOINT_CONFIG, ensure_generated_override
+from .catalog_access import (
+    LOCAL_MACHINE_ID,
+    AccessSnapshot,
+    MachineAccess,
+    host_selected_machine_id,
+    load_access_snapshot,
+    local_descriptor,
+    machine_descriptor,
+    machines_payload,
+)
+from .client_discovery import probe_gateway
 from .client_runtime import native_environment
+from .client_view import project_catalog, request_host
 from .downloads import (
     ARCHIVE_CONTENT_TYPE,
     DOWNLOADS_PREFIX,
@@ -27,6 +47,7 @@ from .downloads import (
     install_script_body,
     resolve_archive,
 )
+from .errors import PortmapError
 from .compose_takeover import find_compose_file, generated_compose_project, plan_docker_compose_command
 from .repo_identity import git, git_branch, resolve_repo_identity, stable_hash
 from .settings import load_portmap_settings
@@ -122,15 +143,12 @@ def collect_catalog() -> dict[str, Any]:
     ]
     generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
     agent = {"available": False, "message": "agent unavailable"}
+    # Worktree data comes exclusively from the host agent; the container has
+    # no host filesystem access for in-process git scanning.
     try:
         agent_payload = agent_worktrees()
-    except AgentUnavailable as exc:
-        worktrees = discover_catalog_worktrees(services)
-        worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
-        agent["message"] = str(exc)
-    except Exception as exc:
-        worktrees = discover_catalog_worktrees(services)
-        worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+    except Exception as exc:  # AgentUnavailable and agent protocol errors.
+        worktrees = []
         agent["message"] = str(exc)
     else:
         raw_worktrees = agent_payload.get("worktrees")
@@ -1084,32 +1102,332 @@ def first_form_value(form: dict[str, list[str]], name: str) -> str:
     return values[0]
 
 
+ACTION_PATHS = ("/actions/compose-up", "/actions/compose-down", "/actions/compose-restart")
+CONNECTION_CONTROL_PATH = "/api/connections"
+CONNECTION_JSON_MAX_BYTES = 16384
+REMOTE_PROBE_TIMEOUT = 5.0
+REMOTE_ACTION_TIMEOUT = 30.0
+REMOTE_ACTION_MAX_BYTES = 262144
+MAX_FORM_BYTES = 8192
+
+
+class MachineRequestError(Exception):
+    """A machine selection that must fail before any data or mutation."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class RemoteActionError(RuntimeError):
+    """A remote machine action could not be forwarded or understood."""
+
+
+class RequestBodyError(Exception):
+    """A malformed or oversized JSON request body."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def _single_check_flag(query: str) -> bool | None:
+    """True/False for an optional exactly-``check=1`` flag; None when invalid."""
+    values = urllib.parse.parse_qs(query, keep_blank_values=True).get("check", [])
+    if not values:
+        return False
+    if len(values) == 1 and values[0] == "1":
+        return True
+    return None
+
+
+def forward_remote_action(machine: MachineAccess, action_path: str, body: bytes) -> tuple[int, dict[str, Any]]:
+    """Forward one allowlisted action form to the machine's saved origin.
+
+    The path is allowlisted and the origin is controller-owned. The fixed
+    localhost Host selects that remote's own portal, never one of its apps.
+    Redirects are not followed, responses are bounded, and transport failures raise
+    RemoteActionError for the caller to sanitize.
+    """
+    parsed = urllib.parse.urlsplit(machine.backend_url)
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=REMOTE_ACTION_TIMEOUT)
+    try:
+        connection.request(
+            "POST",
+            action_path,
+            body=body,
+            headers={
+                "host": "localhost",
+                "content-type": "application/x-www-form-urlencoded",
+                "content-length": str(len(body)),
+                "accept": "application/json",
+                "connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        raw = response.read(REMOTE_ACTION_MAX_BYTES + 1)
+        if len(raw) > REMOTE_ACTION_MAX_BYTES or 300 <= response.status < 400:
+            raise RemoteActionError("remote action response is not usable")
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, http.client.HTTPException, UnicodeError, ValueError) as exc:
+        raise RemoteActionError("remote action failed") from exc
+    finally:
+        connection.close()
+    if not isinstance(payload, dict):
+        raise RemoteActionError("remote action returned an unexpected body")
+    return response.status, payload
+
+
+class CatalogServer(ThreadingHTTPServer):
+    """One catalog process; the server-level scope decides remote access."""
+
+    def __init__(self, address: tuple[str, int], scope: str = "private") -> None:
+        if scope not in {"private", "public"}:
+            raise ValueError(f"unknown catalog scope: {scope}")
+        self.catalog_scope: str = scope
+        super().__init__(address, CatalogHandler)
 
 
 class CatalogHandler(StaticHandler):
+    server: CatalogServer
     server_version = f"portmap-catalog/{__version__}"
 
+    @property
+    def private_scope(self) -> bool:
+        # Server-level scope only; CatalogServer is the sole supported host.
+        return self.server.catalog_scope == "private"
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/actions/compose-up":
+        if parsed.path == CONNECTION_CONTROL_PATH:
+            # Connection control is private-scope only; the public/LAN
+            # listener denies it before any IPC or mutation.
+            if not self.private_scope:
+                self.write_not_found(send_body=True)
+                return
+            self.handle_connections_post()
+            return
+        if parsed.path not in ACTION_PATHS:
+            self.send_response(404)
+            self.send_header("content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"not found\n")
+            return
+        self.handle_action(parsed.path)
+
+    def handle_action(self, action_path: str) -> None:
+        snapshot = self._fail_closed_snapshot(send_body=True)
+        if snapshot is None:
+            return
+        try:
+            machine = self._resolve_machine(snapshot)
+        except MachineRequestError as exc:
+            self.write_json({"error": exc.message}, status=exc.status, send_body=True)
+            return
+        if machine is not None:
+            self.forward_action(machine, action_path)
+            return
+        if action_path == "/actions/compose-up":
             self.handle_compose_up()
-            return
-        if parsed.path == "/actions/compose-down":
+        elif action_path == "/actions/compose-down":
             self.handle_compose_down()
-            return
-        if parsed.path == "/actions/compose-restart":
+        else:
             self.handle_compose_restart()
+
+    def forward_action(self, machine: MachineAccess, action_path: str) -> None:
+        body = self.read_form_body()
+        try:
+            status, payload = forward_remote_action(machine, action_path, body)
+        except RemoteActionError:
+            # Never surface backend origins or transport diagnostics.
+            self.write_json({"error": "remote action failed; check the remote machine"}, status=502, send_body=True)
             return
-        self.send_response(404)
-        self.send_header("content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"not found\n")
+        self.write_json(payload, status=status, send_body=True)
+
+    def _request_host(self) -> str | None:
+        values = self.headers.get_all("Host", [])
+        return request_host(values[0]) if len(values) == 1 else None
+
+    def _fail_closed_snapshot(self, *, send_body: bool) -> AccessSnapshot | None:
+        """Load the controller snapshot or answer a sanitized 503.
+
+        There is no local-only mode: without controller-owned access data
+        the catalog must not serve or mutate any machine's projects.
+        """
+        try:
+            return load_access_snapshot()
+        except PortmapError:
+            self.write_json({"error": "catalog access snapshot is unavailable"}, status=503, send_body=send_body)
+            return None
+
+    def _machine_id(self) -> str | None:
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query,
+            keep_blank_values=True,
+        )
+        values = query.get("machine", [])
+        if not values:
+            return None
+        if len(values) > 1:
+            raise MachineRequestError(400, "duplicate machine parameter")
+        if not values[0]:
+            raise MachineRequestError(400, "empty machine parameter")
+        return values[0]
+
+    def _resolve_machine(self, snapshot: AccessSnapshot) -> MachineAccess | None:
+        """Resolve the target machine; None means the local machine.
+
+        Unknown, duplicate, and empty selections fail here, as does any
+        non-local machine outside the private scope, before registry data
+        is fetched or an action mutates anything.
+        """
+        machine_id = self._machine_id()
+        if machine_id is None:
+            machine_id = host_selected_machine_id(snapshot, self._request_host())
+        if machine_id == LOCAL_MACHINE_ID:
+            return None
+        machine = snapshot.machines.get(machine_id)
+        if machine is None or not self.private_scope:
+            raise MachineRequestError(404, "unknown machine")
+        if not machine.available:
+            raise MachineRequestError(503, f"machine {machine.id} is unavailable; choose another machine")
+        return machine
+
+    def handle_machines(self, *, send_body: bool) -> None:
+        snapshot = self._fail_closed_snapshot(send_body=send_body)
+        if snapshot is None:
+            return
+        selected = host_selected_machine_id(snapshot, self._request_host())
+        if not self.private_scope and selected != LOCAL_MACHINE_ID:
+            selected = LOCAL_MACHINE_ID
+        payload = machines_payload(snapshot, selected=selected, private=self.private_scope)
+        # Server scope alone decides whether the portal may manage host
+        # connections; a public catalog can neither expose nor mutate them.
+        payload["can_manage_connections"] = self.private_scope
+        self.write_json(payload, send_body=send_body)
+
+    def handle_connections_get(self, *, send_body: bool) -> None:
+        if self._fail_closed_snapshot(send_body=send_body) is None:
+            return
+        check = _single_check_flag(urllib.parse.urlparse(self.path).query)
+        if check is None:
+            self.write_json({"error": "check must be exactly 1"}, status=400, send_body=send_body)
+            return
+        try:
+            payload = agent_connection_targets(check=check)
+        except AgentUnavailable:
+            self.write_json(
+                {"error": "host agent unavailable; connection control requires the portmap agent"},
+                status=502,
+                send_body=send_body,
+            )
+            return
+        except AgentRequestError as exc:
+            self.write_json({"error": str(exc)}, status=self._agent_error_status(exc.status), send_body=send_body)
+            return
+        self.write_json(payload, send_body=send_body)
+
+    def handle_connections_post(self) -> None:
+        if self._fail_closed_snapshot(send_body=True) is None:
+            return
+        if not self._same_origin():
+            self.write_json({"error": "connection control requires a same-origin request"}, status=403, send_body=True)
+            return
+        try:
+            payload = self._read_json_body()
+        except RequestBodyError as exc:
+            self.write_json({"error": exc.message}, status=exc.status, send_body=True)
+            return
+        try:
+            status, result = agent_mutate_connection(payload)
+        except AgentUnavailable:
+            self.write_json(
+                {"error": "host agent unavailable; connection control requires the portmap agent"},
+                status=502,
+                send_body=True,
+            )
+            return
+        except AgentRequestError as exc:
+            self.write_json({"error": str(exc)}, status=self._agent_error_status(exc.status), send_body=True)
+            return
+        self.write_json(result, status=status, send_body=True)
+
+    def _same_origin(self) -> bool:
+        """Browsers send Origin on same-origin JSON mutations; all else is foreign."""
+        origins = self.headers.get_all("Origin", [])
+        hosts = self.headers.get_all("Host", [])
+        if len(origins) != 1 or len(hosts) != 1 or request_host(hosts[0]) is None:
+            return False
+        try:
+            parsed = urllib.parse.urlsplit(origins[0])
+            host_parts = urllib.parse.urlsplit(f"//{hosts[0]}")
+            origin_port = parsed.port
+            host_port = host_parts.port
+        except ValueError:
+            return False
+        if parsed.scheme.lower() != "http" or parsed.path or parsed.query or parsed.fragment:
+            return False
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        return parsed.hostname == host_parts.hostname and (
+            origin_port if origin_port is not None else 80
+        ) == (host_port if host_port is not None else 80)
+
+    def _read_json_body(self) -> dict[str, Any]:
+        raw_length = self.headers.get("content-length")
+        if raw_length is None:
+            raise RequestBodyError(400, "connection control requires a JSON request body with a content length")
+        try:
+            length = int(raw_length)
+        except ValueError:
+            raise RequestBodyError(400, "invalid content length") from None
+        if length <= 0:
+            raise RequestBodyError(400, "connection control requires a JSON request body")
+        if length > CONNECTION_JSON_MAX_BYTES:
+            raise RequestBodyError(413, "connection control request body is too large")
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeError, ValueError) as exc:
+            raise RequestBodyError(400, "connection control request body must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RequestBodyError(400, "connection control request body must be a JSON object")
+        return payload
+
+    @staticmethod
+    def _agent_error_status(status: int) -> int:
+        return 502 if status >= 500 else status
 
     def handle_request(self, *, send_body: bool) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in {"/healthz", "/readyz"}:
-            self.write_text("ok\n", content_type="text/plain", send_body=send_body)
+            if self.private_scope:
+                # Controller readiness only: the private scope cannot claim
+                # ready without a valid snapshot and owner; the public scope
+                # keeps ordinary liveness and never exposes private config.
+                try:
+                    snapshot = load_access_snapshot()
+                    owner = snapshot.owner
+                except PortmapError:
+                    owner = None
+                if owner:
+                    self.write_json({"ok": True, "owner": owner}, send_body=send_body)
+                else:
+                    self.write_json({"ok": False}, status=503, send_body=send_body)
+            else:
+                self.write_text("ok\n", content_type="text/plain", send_body=send_body)
+            return
+
+        if parsed.path == "/api/machines":
+            self.handle_machines(send_body=send_body)
+            return
+
+        if parsed.path == CONNECTION_CONTROL_PATH:
+            if not self.private_scope:
+                self.write_not_found(send_body=send_body)
+                return
+            self.handle_connections_get(send_body=send_body)
             return
 
         if parsed.path in {"/", "/index.html"}:
@@ -1124,16 +1442,7 @@ class CatalogHandler(StaticHandler):
             return
 
         if parsed.path == "/registry.json":
-            try:
-                catalog = collect_catalog()
-            except Exception as exc:  # pragma: no cover - exercised through container runtime.
-                self.send_response(500)
-                self.send_header("content-type", "text/plain; charset=utf-8")
-                self.end_headers()
-                if send_body:
-                    self.wfile.write(f"failed to read Docker catalog: {exc}\n".encode("utf-8"))
-                return
-            self.write_json(catalog, send_body=send_body)
+            self.handle_registry(send_body=send_body)
             return
 
         if parsed.path == "/api/downloads":
@@ -1161,31 +1470,80 @@ class CatalogHandler(StaticHandler):
 
         self.write_not_found(send_body=send_body)
 
+    def handle_registry(self, *, send_body: bool) -> None:
+        snapshot = self._fail_closed_snapshot(send_body=send_body)
+        if snapshot is None:
+            return
+        try:
+            machine = self._resolve_machine(snapshot)
+        except MachineRequestError as exc:
+            self.write_json({"error": exc.message}, status=exc.status, send_body=send_body)
+            return
+        if machine is None:
+            try:
+                catalog = collect_catalog()
+            except Exception as exc:  # pragma: no cover - exercised through container runtime.
+                self.send_response(500)
+                self.send_header("content-type", "text/plain; charset=utf-8")
+                self.end_headers()
+                if send_body:
+                    self.wfile.write(f"failed to read Docker catalog: {exc}\n".encode("utf-8"))
+                return
+            catalog["machine"] = local_descriptor(snapshot)
+            self.write_json(catalog, send_body=send_body)
+            return
+        try:
+            info = probe_gateway(machine.backend_url, expected_domain=machine.domain, timeout=REMOTE_PROBE_TIMEOUT, http_host="localhost")
+            projected = project_catalog(
+                info.catalog,
+                machine.profile(),
+                machine.http_port,
+                dns_address=snapshot.dns_address,
+                dns_port=snapshot.dns_port,
+            )
+        except Exception:
+            # Probe and projection errors carry remote transport details.
+            self.write_json({"error": "remote catalog unavailable; check portmap connections"}, status=502, send_body=send_body)
+            return
+        projected["machine"] = machine_descriptor(machine)
+        self.write_json(projected, send_body=send_body)
+
+    def read_form_body(self) -> bytes:
+        try:
+            length = min(int(self.headers.get("content-length", "0") or "0"), MAX_FORM_BYTES)
+        except ValueError:
+            length = 0
+        return self.rfile.read(length)
+
     def read_form(self) -> dict[str, list[str]]:
-        length = min(int(self.headers.get("content-length", "0") or "0"), 8192)
-        payload = self.rfile.read(length).decode("utf-8", errors="replace")
+        payload = self.read_form_body().decode("utf-8", errors="replace")
         return urllib.parse.parse_qs(payload)
 
     def handle_compose_up(self) -> None:
         form = self.read_form()
         worktree = first_form_value(form, "worktree")
+        status = 200
         try:
-            try:
-                result = agent_compose_up_worktree(worktree)
-            except AgentUnavailable:
-                result = compose_up_worktree(worktree)
-            self.write_json(result, send_body=True)
+            result = agent_compose_up_worktree(worktree)
+        except AgentUnavailable as exc:
+            # No in-container Compose execution: host starts belong to the
+            # host agent only.
+            status = 400
+            result = {
+                "worktree": worktree,
+                "ok": False,
+                "message": f"agent unavailable: {exc}",
+                "errors": [],
+            }
         except Exception as exc:  # pragma: no cover - exercised through container runtime.
-            self.write_json(
-                {
-                    "worktree": worktree,
-                    "ok": False,
-                    "message": str(exc),
-                    "errors": [],
-                },
-                status=400,
-                send_body=True,
-            )
+            status = 400
+            result = {
+                "worktree": worktree,
+                "ok": False,
+                "message": str(exc),
+                "errors": [],
+            }
+        self.write_json(result, status=status, send_body=True)
 
     def handle_compose_down(self) -> None:
         form = self.read_form()
@@ -1261,9 +1619,17 @@ class CatalogHandler(StaticHandler):
 def main() -> None:
     host = os.environ.get("PORTMAP_CATALOG_LISTEN_HOST", "0.0.0.0")
     port = int(os.environ.get("PORTMAP_CATALOG_LISTEN_PORT", "8081"))
-    server = ThreadingHTTPServer((host, port), CatalogHandler)
+    public_port = int(os.environ.get("PORTMAP_CATALOG_PUBLIC_LISTEN_PORT", "8082"))
+    server = CatalogServer((host, port), scope="private")
     print(f"portmap catalog listening on {host}:{port}")
-    server.serve_forever()
+    if public_port > 0:
+        public = CatalogServer((host, public_port), scope="public")
+        print(f"portmap catalog listening on {host}:{public_port} (public)")
+        threading.Thread(target=public.serve_forever, daemon=True).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

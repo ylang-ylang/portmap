@@ -3,23 +3,30 @@ import json
 import os
 import subprocess
 import threading
-from http.server import ThreadingHTTPServer
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from portmap.catalog import (
-    CatalogHandler,
+    CatalogServer,
     collect_catalog,
     compose_down_project,
     compose_restart_project,
     compose_up_worktree,
     container_to_service,
+    discover_catalog_worktrees,
+    enrich_services_from_worktrees,
+    merge_catalog_history,
     parse_host_rule,
     select_dns_server,
 )
 from portmap.web_static import read_static_asset
+
+
+GENERATED_AT = "2026-10-12T00:00:00+00:00"
 
 
 @pytest.fixture(autouse=True)
@@ -27,18 +34,45 @@ def missing_agent_socket(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PORTMAP_AGENT_SOCKET", str(tmp_path / "missing-agent.sock"))
 
 
+@pytest.fixture(autouse=True)
+def isolated_access_config(tmp_path: Path, monkeypatch) -> None:
+    # Never observe a developer machine's real controller snapshot; tests
+    # start from a valid controller-owned local-only snapshot and opt into
+    # failure cases by repointing the environment variable.
+    path = tmp_path / "catalog-access.json"
+    staging = tmp_path / "catalog-access.json.tmp"
+    staging.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "owner": "catalog-owner",
+                "dns": {"address": "169.254.254.53", "port": 1053},
+                "local": {"domain": "laptop.portmap", "http_port": 80, "enabled": False},
+                "machines": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    staging.replace(path)
+    monkeypatch.setenv("PORTMAP_ACCESS_CONFIG", str(path))
+
+
 def request_catalog(
     path: str,
     *,
     method: str = "GET",
     body: str | None = None,
+    scope: str = "private",
+    host: str | None = None,
 ) -> tuple[int, http.client.HTTPMessage, bytes]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), CatalogHandler)
+    server = CatalogServer(("127.0.0.1", 0), scope=scope)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
     try:
         headers = {"content-type": "application/x-www-form-urlencoded"} if body is not None else {}
+        if host is not None:
+            headers["Host"] = host
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
         return response.status, response.headers, response.read()
@@ -47,6 +81,131 @@ def request_catalog(
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+@contextmanager
+def serving(server):
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+@pytest.fixture
+def local_catalog(monkeypatch):
+    """A deterministic local machine catalog without Docker or the agent."""
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+    monkeypatch.setattr(
+        "portmap.catalog.agent_worktrees",
+        lambda: {"ok": True, "message": "agent ready", "generated_at": GENERATED_AT, "worktrees": []},
+    )
+
+
+@pytest.fixture
+def access_config(tmp_path, monkeypatch):
+    def configure(machines=None, *, local=None, owner="catalog-owner") -> Path:
+        document = {
+            "version": 1,
+            "owner": owner,
+            "dns": {"address": "169.254.254.53", "port": 1053},
+            "local": local if local is not None else {"domain": "laptop.portmap", "http_port": 80, "enabled": False},
+            "machines": machines if machines is not None else {},
+        }
+        path = tmp_path / "catalog-access.json"
+        staging = tmp_path / "catalog-access.json.tmp"
+        staging.write_text(json.dumps(document), encoding="utf-8")
+        staging.replace(path)
+        return path
+
+    return configure
+
+
+class RemoteGatewayHandler(BaseHTTPRequestHandler):
+    """A real local HTTP fixture standing in for one remote portmap gateway."""
+
+    def do_GET(self) -> None:
+        if self.path != "/registry.json":
+            self.send_error(404)
+            return
+        body = json.dumps(self.server.registry).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("content-length", "0") or "0")
+        body = self.rfile.read(length)
+        self.server.posts.append(
+            {"path": self.path, "host": self.headers.get("Host"), "body": body.decode("utf-8")}
+        )
+        payload = json.dumps({**self.server.result, "path": self.path}).encode("utf-8")
+        self.send_response(self.server.status)
+        if 300 <= self.server.status < 400:
+            self.send_header("Location", "http://attacker.invalid/registry.json")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+class RemoteGateway(ThreadingHTTPServer):
+    """The remote side of one saved machine: registry and action routes."""
+
+    def __init__(self, domain: str, *, via: str = "direct", http_port: int = 8080) -> None:
+        self.domain = domain
+        self.via = via
+        self.http_port = http_port
+        self.posts: list[dict] = []
+        self.status = 200
+        self.result = {"ok": True, "message": "remote executed the action"}
+        self.registry = {
+            "generated_at": GENERATED_AT,
+            "dns_domain": domain,
+            "dns_server": "172.19.0.2",
+            "http_port": http_port,
+            "services": [
+                {
+                    "repo_name": "sample",
+                    "branch": "dev",
+                    "compose_project": "sample_dev",
+                    "endpoints": [{"kind": "http", "name": "web", "url": f"http://app.{domain}:{http_port}/"}],
+                }
+            ],
+            "worktrees": [
+                {
+                    "repo_name": "sample",
+                    "branch": "dev",
+                    "worktree": "/remote/sample@dev",
+                    "worktree_status": "ok",
+                    "compose_project": "sample_dev",
+                }
+            ],
+        }
+        super().__init__(("127.0.0.1", 0), RemoteGatewayHandler)
+
+    def machine(self, **changes) -> dict:
+        entry = {
+            "domain": self.domain,
+            "via": self.via,
+            "target": "192.0.2.10" if self.via == "direct" else "deploy@box",
+            "http_port": 80 if self.via == "direct" else 18080,
+            "backend_url": f"http://127.0.0.1:{self.server_port}",
+            "tcp_address": "192.0.2.10",
+            "tcp_ports": [],
+            "include_tcp": False,
+            "available": True,
+        }
+        entry.update(changes)
+        return entry
 
 
 def write_git_compose_repo(path: Path, *, with_compose: bool = True, with_endpoints: bool = True) -> None:
@@ -102,6 +261,22 @@ def run(args: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> sub
             f"stderr:\n{result.stderr}"
         )
     return result
+
+
+def host_collected_catalog() -> dict:
+    """The host-side worktree pipeline served by the unix-socket agent."""
+    from portmap import catalog as catalog_module
+
+    containers = catalog_module.docker_get("/containers/json?all=0")
+    services = [
+        service
+        for container in containers
+        if (service := container_to_service(container)) is not None
+    ]
+    worktrees = discover_catalog_worktrees(services)
+    worktrees = merge_catalog_history(worktrees, services, generated_at=GENERATED_AT)
+    enrich_services_from_worktrees(services, worktrees)
+    return {"services": services, "worktrees": worktrees}
 
 
 def test_container_to_service_uses_portmap_labels() -> None:
@@ -447,7 +622,7 @@ def test_catalog_http_rejects_missing_public_root_static_assets() -> None:
     assert body == b"not found\n"
 
 
-def test_collect_catalog_includes_running_worktree_and_writes_history(tmp_path: Path, monkeypatch) -> None:
+def test_host_worktrees_includes_running_worktree_and_writes_history(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "sample@dev"
     history = tmp_path / "history.json"
     write_git_compose_repo(repo)
@@ -478,7 +653,7 @@ def test_collect_catalog_includes_running_worktree_and_writes_history(tmp_path: 
 
     monkeypatch.setattr("portmap.catalog.docker_get", fake_docker_get)
 
-    catalog = collect_catalog()
+    catalog = host_collected_catalog()
 
     assert catalog["services"][0]["worktree"] == str(repo)
     assert catalog["services"][0]["worktree_root"] == str(repo / ".git")
@@ -494,7 +669,7 @@ def test_collect_catalog_includes_running_worktree_and_writes_history(tmp_path: 
     assert payload["worktrees"][0]["worktree_root"] == str(repo / ".git")
 
 
-def test_collect_catalog_orders_worktrees_by_branch_tip_descending(tmp_path: Path, monkeypatch) -> None:
+def test_host_worktrees_orders_worktrees_by_branch_tip_descending(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "sample@dev"
     feat = tmp_path / "sample@feat-new"
     write_git_compose_repo(repo)
@@ -525,13 +700,13 @@ def test_collect_catalog_orders_worktrees_by_branch_tip_descending(tmp_path: Pat
     monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(tmp_path / "history.json"))
     monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
 
-    catalog = collect_catalog()
+    catalog = host_collected_catalog()
 
     assert [worktree["branch"] for worktree in catalog["worktrees"]] == ["feat-new", "dev"]
     assert catalog["worktrees"][0]["branch_tip_epoch"] > catalog["worktrees"][1]["branch_tip_epoch"]
 
 
-def test_collect_catalog_discovers_startable_submodules_across_superproject_worktrees(
+def test_host_worktrees_discovers_startable_submodules_across_superproject_worktrees(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -569,7 +744,7 @@ def test_collect_catalog_discovers_startable_submodules_across_superproject_work
     monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(tmp_path / "history.json"))
     monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
 
-    catalog = collect_catalog()
+    catalog = host_collected_catalog()
 
     submodule_worktrees = {
         worktree["worktree"]: worktree
@@ -606,7 +781,7 @@ def test_collect_catalog_discovers_startable_submodules_across_superproject_work
     assert all(worktree["submodule_sha"] for worktree in submodule_worktrees.values())
 
 
-def test_collect_catalog_restores_existing_worktree_from_history(tmp_path: Path, monkeypatch) -> None:
+def test_host_worktrees_restores_existing_worktree_from_history(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "sample@dev"
     history = tmp_path / "history.json"
     write_git_compose_repo(repo)
@@ -632,7 +807,7 @@ def test_collect_catalog_restores_existing_worktree_from_history(tmp_path: Path,
     monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(history))
     monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
 
-    catalog = collect_catalog()
+    catalog = host_collected_catalog()
 
     assert catalog["services"] == []
     assert catalog["worktrees"][0]["worktree"] == str(repo)
@@ -641,7 +816,7 @@ def test_collect_catalog_restores_existing_worktree_from_history(tmp_path: Path,
     assert catalog["worktrees"][0]["source"] == "history"
 
 
-def test_collect_catalog_drops_history_branches_not_checked_out(tmp_path: Path, monkeypatch) -> None:
+def test_host_worktrees_drops_history_branches_not_checked_out(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "sample@dev"
     history = tmp_path / "history.json"
     write_git_compose_repo(repo)
@@ -674,7 +849,7 @@ def test_collect_catalog_drops_history_branches_not_checked_out(tmp_path: Path, 
     monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", str(tmp_path))
     monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
 
-    catalog = collect_catalog()
+    catalog = host_collected_catalog()
 
     by_branch = {worktree["branch"]: worktree for worktree in catalog["worktrees"]}
     assert set(by_branch) == {"dev"}
@@ -685,7 +860,7 @@ def test_collect_catalog_drops_history_branches_not_checked_out(tmp_path: Path, 
     assert [entry["branch"] for entry in payload["worktrees"]] == ["dev"]
 
 
-def test_collect_catalog_drops_non_startable_history(tmp_path: Path, monkeypatch) -> None:
+def test_host_worktrees_drops_non_startable_history(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "sample@dev"
     history = tmp_path / "history.json"
     write_git_compose_repo(repo, with_endpoints=False)
@@ -710,7 +885,7 @@ def test_collect_catalog_drops_non_startable_history(tmp_path: Path, monkeypatch
     monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(history))
     monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
 
-    catalog = collect_catalog()
+    catalog = host_collected_catalog()
 
     assert catalog["services"] == []
     assert catalog["worktrees"] == []
@@ -944,3 +1119,419 @@ def test_compose_restart_project_rejects_unmanaged_project(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="not portmap-managed"):
         compose_restart_project("sample_project")
+
+
+def test_collect_catalog_without_agent_returns_no_worktrees_and_never_scans_host(monkeypatch) -> None:
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [] if path == "/containers/json?all=0" else None)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("in-container worktree scanning must not run")
+
+    monkeypatch.setattr("portmap.catalog.discover_catalog_worktrees", forbidden)
+    monkeypatch.setattr("portmap.catalog.merge_catalog_history", forbidden)
+
+    catalog = collect_catalog()
+
+    assert catalog["worktrees"] == []
+    assert catalog["agent"]["available"] is False
+    assert catalog["agent"]["message"]
+
+
+def test_api_machines_lists_local_and_saved_remotes(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap")) as remote, serving(RemoteGateway("box.portmap", via="ssh")) as box:
+        access_config(
+            {
+                "server.portmap": remote.machine(),
+                "box.portmap": box.machine(available=False),
+            }
+        )
+
+        status, headers, body = request_catalog("/api/machines")
+
+    payload = json.loads(body)
+    assert status == 200
+    assert headers["Content-Type"].startswith("application/json")
+    assert [machine["id"] for machine in payload["machines"]] == ["local", "server.portmap", "box.portmap"]
+    assert payload["selected"] == "local"
+    local = payload["machines"][0]
+    assert local["label"] == "laptop"
+    assert local["domain"] == "laptop.portmap"
+    assert local["target"] == "local"
+    assert local["via"] == "local"
+    assert local["catalog_url"] == "http://laptop.portmap/"
+    assert local["available"] is True
+    assert local["publishing"] is False
+    unavailable = payload["machines"][2]
+    assert unavailable["via"] == "ssh"
+    assert unavailable["target"] == "deploy@box"
+    assert unavailable["catalog_url"] == "http://box.portmap:18080/"
+    assert unavailable["available"] is False
+    # Public descriptors never carry private controller data.
+    for private in (b"backend_url", b"tcp_address", b"tcp_ports", b"catalog-owner", b"127.0.0.1"):
+        assert private not in body
+
+
+def test_api_machines_reflects_local_publication_state(local_catalog, access_config) -> None:
+    access_config(local={"domain": "laptop.portmap", "http_port": 8080, "enabled": True})
+
+    status, _, body = request_catalog("/api/machines")
+
+    local = json.loads(body)["machines"][0]
+    assert status == 200
+    assert local["publishing"] is True
+    assert local["catalog_url"] == "http://laptop.portmap:8080/"
+
+
+def test_api_machines_selects_saved_apex_host(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("box.portmap", via="ssh")) as box:
+        access_config({"box.portmap": box.machine()})
+
+        status, _, body = request_catalog("/api/machines", host="box.portmap:18080")
+
+    assert status == 200
+    assert json.loads(body)["selected"] == "box.portmap"
+
+
+def test_api_machines_public_scope_lists_only_local(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("box.portmap", via="ssh")) as box:
+        access_config({"box.portmap": box.machine()})
+
+        status, _, body = request_catalog("/api/machines", scope="public", host="box.portmap")
+
+    payload = json.loads(body)
+    assert status == 200
+    assert [machine["id"] for machine in payload["machines"]] == ["local"]
+    assert payload["selected"] == "local"
+    assert b"box.portmap" not in body
+
+
+def test_api_machines_missing_snapshot_fails_closed(local_catalog, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_ACCESS_CONFIG", str(tmp_path / "absent.json"))
+
+    status, _, body = request_catalog("/api/machines")
+
+    assert status == 503
+    assert json.loads(body) == {"error": "catalog access snapshot is unavailable"}
+
+
+def test_api_machines_invalid_snapshot_fails_closed(local_catalog, tmp_path, monkeypatch) -> None:
+    path = tmp_path / "catalog-access.json"
+    path.write_text("{not a snapshot", encoding="utf-8")
+    monkeypatch.setenv("PORTMAP_ACCESS_CONFIG", str(path))
+
+    status, _, body = request_catalog("/api/machines")
+
+    assert status == 503
+    assert json.loads(body) == {"error": "catalog access snapshot is unavailable"}
+
+
+def test_registry_local_machine_keeps_current_catalog_shape(local_catalog, access_config) -> None:
+    access_config()
+
+    status, _, body = request_catalog("/registry.json?machine=local")
+
+    payload = json.loads(body)
+    assert status == 200
+    assert payload["machine"] == {
+        "id": "local",
+        "label": "laptop",
+        "domain": "laptop.portmap",
+        "target": "local",
+        "via": "local",
+        "catalog_url": "http://laptop.portmap/",
+        "available": True,
+        "publishing": False,
+    }
+    assert payload["services"] == []
+    assert payload["agent"]["available"] is True
+
+
+def test_registry_defaults_to_local_without_machine_parameter(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap")) as remote:
+        access_config({"server.portmap": remote.machine()})
+
+        status, _, body = request_catalog("/registry.json", host="laptop.portmap")
+
+    payload = json.loads(body)
+    assert status == 200
+    assert payload["machine"]["id"] == "local"
+
+
+def test_registry_fetches_and_projects_direct_machine(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap", http_port=8080)) as remote:
+        access_config({"server.portmap": remote.machine()})
+
+        status, _, body = request_catalog("/registry.json?machine=server.portmap")
+
+    payload = json.loads(body)
+    assert status == 200
+    assert payload["machine"]["id"] == "server.portmap"
+    assert payload["machine"]["via"] == "direct"
+    assert payload["dns_server"] == "169.254.254.53"
+    assert payload["dns_port"] == 1053
+    assert payload["client_access"]["transport"] == "direct"
+    # Direct endpoints keep the remote URL exactly as the remote advertised it.
+    endpoint = payload["services"][0]["endpoints"][0]
+    assert endpoint["url"] == "http://app.server.portmap:8080/"
+    assert endpoint["transport_supported"] is True
+    assert payload["worktrees"] == remote.registry["worktrees"]
+    assert b"127.0.0.1" not in body
+
+
+def test_registry_projects_ssh_machine_onto_shared_listener(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("box.portmap", via="ssh", http_port=8080)) as box:
+        access_config({"box.portmap": box.machine()})
+
+        status, _, body = request_catalog("/registry.json?machine=box.portmap")
+
+    payload = json.loads(body)
+    assert status == 200
+    assert payload["machine"]["id"] == "box.portmap"
+    assert payload["client_access"]["transport"] == "ssh"
+    assert payload["http_port"] == 18080
+    endpoint = payload["services"][0]["endpoints"][0]
+    assert endpoint["url"] == "http://app.box.portmap:18080/"
+    assert endpoint["transport_supported"] is True
+
+
+def test_registry_selects_machine_from_request_host(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap", http_port=8080)) as remote:
+        access_config({"server.portmap": remote.machine()})
+
+        status, _, body = request_catalog("/registry.json", host="server.portmap")
+
+    payload = json.loads(body)
+    assert status == 200
+    assert payload["machine"]["id"] == "server.portmap"
+
+
+def test_registry_unknown_machine_fails_without_local_fallback(local_catalog, access_config) -> None:
+    access_config()
+
+    status, _, body = request_catalog("/registry.json?machine=ghost.portmap")
+
+    payload = json.loads(body)
+    assert status == 404
+    assert payload == {"error": "unknown machine"}
+    assert "services" not in payload
+
+
+def test_registry_duplicate_machine_parameter_fails(local_catalog, access_config) -> None:
+    access_config()
+
+    status, _, body = request_catalog("/registry.json?machine=local&machine=local")
+
+    assert status == 400
+    assert json.loads(body) == {"error": "duplicate machine parameter"}
+
+
+def test_registry_empty_machine_parameter_fails(local_catalog, access_config) -> None:
+    access_config()
+
+    status, _, body = request_catalog("/registry.json?machine=")
+
+    assert status == 400
+    assert json.loads(body) == {"error": "empty machine parameter"}
+
+
+def test_registry_unavailable_machine_fails_without_local_fallback(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("box.portmap", via="ssh")) as box:
+        entry = box.machine(available=False)
+        entry.pop("backend_url")
+        access_config({"box.portmap": entry})
+
+        status, _, body = request_catalog("/registry.json?machine=box.portmap")
+
+    payload = json.loads(body)
+    assert status == 503
+    assert payload == {"error": "machine box.portmap is unavailable; choose another machine"}
+    assert "services" not in payload
+    assert box.posts == []
+
+
+def test_registry_missing_snapshot_fails_before_local_collection(local_catalog, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_ACCESS_CONFIG", str(tmp_path / "absent.json"))
+
+    def forbidden(path: str):
+        raise AssertionError("local catalog must not be collected without access data")
+
+    monkeypatch.setattr("portmap.catalog.docker_get", forbidden)
+
+    status, _, body = request_catalog("/registry.json")
+
+    assert status == 503
+    assert json.loads(body) == {"error": "catalog access snapshot is unavailable"}
+
+
+def test_registry_remote_backend_failure_is_sanitized(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap")) as remote:
+        entry = remote.machine()
+    access_config({"server.portmap": entry | {"backend_url": "http://127.0.0.1:1"}})
+
+    status, _, body = request_catalog("/registry.json?machine=server.portmap")
+
+    payload = json.loads(body)
+    assert status == 502
+    assert payload == {"error": "remote catalog unavailable; check portmap connections"}
+    assert "127.0.0.1" not in body.decode("utf-8")
+    assert "refused" not in body.decode("utf-8")
+
+
+def test_registry_public_scope_denies_remote_machines(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap")) as remote:
+        access_config({"server.portmap": remote.machine()})
+
+        denied = request_catalog("/registry.json?machine=server.portmap", scope="public")
+        local = request_catalog("/registry.json?machine=local", scope="public")
+
+    assert denied[0] == 404
+    assert json.loads(denied[2]) == {"error": "unknown machine"}
+    assert local[0] == 200
+    assert json.loads(local[2])["machine"]["id"] == "local"
+    assert remote.posts == []
+
+
+
+
+
+
+def test_actions_unknown_machine_fails_before_forwarding(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap")) as remote:
+        access_config({"server.portmap": remote.machine()})
+
+        status, _, body = request_catalog("/actions/compose-down?machine=ghost.portmap", method="POST", body="compose_project=x")
+
+    assert status == 404
+    assert json.loads(body) == {"error": "unknown machine"}
+    assert remote.posts == []
+
+
+def test_actions_public_scope_denies_remote_machines(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap")) as remote:
+        access_config({"server.portmap": remote.machine()})
+
+        status, _, body = request_catalog(
+            "/actions/compose-up?machine=server.portmap", scope="public", method="POST", body="worktree=%2Fw"
+        )
+
+    assert status == 404
+    assert json.loads(body) == {"error": "unknown machine"}
+    assert remote.posts == []
+
+
+def test_actions_unavailable_machine_fails_before_forwarding(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("box.portmap", via="ssh")) as box:
+        access_config({"box.portmap": box.machine(available=False)})
+
+        status, _, body = request_catalog(
+            "/actions/compose-up?machine=box.portmap", method="POST", body="worktree=%2Fw"
+        )
+
+    assert status == 503
+    assert json.loads(body) == {"error": "machine box.portmap is unavailable; choose another machine"}
+    assert box.posts == []
+
+
+def test_actions_remote_failure_is_sanitized(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap")) as remote:
+        entry = remote.machine()
+    access_config({"server.portmap": entry | {"backend_url": "http://127.0.0.1:1"}})
+
+    status, _, body = request_catalog("/actions/compose-up?machine=server.portmap", method="POST", body="worktree=%2Fw")
+
+    payload = json.loads(body)
+    assert status == 502
+    assert payload == {"error": "remote action failed; check the remote machine"}
+    assert "127.0.0.1" not in body.decode("utf-8")
+    assert "refused" not in body.decode("utf-8")
+
+
+def test_actions_do_not_follow_remote_redirects(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap")) as remote:
+        remote.status = 302
+        access_config({"server.portmap": remote.machine()})
+
+        status, _, body = request_catalog(
+            "/actions/compose-up?machine=server.portmap", method="POST", body="worktree=%2Fw"
+        )
+
+    assert status == 502
+    assert json.loads(body) == {"error": "remote action failed; check the remote machine"}
+    assert remote.posts[0]["path"] == "/actions/compose-up"
+
+
+def test_actions_missing_snapshot_fails_before_mutation(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_ACCESS_CONFIG", str(tmp_path / "absent.json"))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("no mutation without controller access data")
+
+    monkeypatch.setattr("portmap.catalog.agent_compose_up_worktree", forbidden)
+
+    status, _, body = request_catalog("/actions/compose-up", method="POST", body="worktree=%2Fw")
+
+    assert status == 503
+    assert json.loads(body) == {"error": "catalog access snapshot is unavailable"}
+
+
+def test_catalog_compose_up_without_agent_has_no_in_container_fallback(monkeypatch) -> None:
+    def forbidden(worktree: str):
+        raise AssertionError("in-container Compose execution must not run")
+
+    monkeypatch.setattr("portmap.catalog.compose_up_worktree", forbidden)
+
+    status, _, body = request_catalog("/actions/compose-up", method="POST", body="worktree=%2Frepo%2Fsample%40dev")
+
+    payload = json.loads(body)
+    assert status == 400
+    assert payload["ok"] is False
+    assert payload["worktree"] == "/repo/sample@dev"
+    assert "agent unavailable" in payload["message"]
+
+
+def test_healthz_private_reports_controller_owner(local_catalog, access_config) -> None:
+    access_config()
+
+    status, headers, body = request_catalog("/healthz")
+
+    assert status == 200
+    assert headers["Content-Type"].startswith("application/json")
+    assert json.loads(body) == {"ok": True, "owner": "catalog-owner"}
+
+
+def test_healthz_public_stays_plain(local_catalog, access_config) -> None:
+    access_config()
+
+    status, headers, body = request_catalog("/healthz", scope="public")
+
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/plain")
+    assert body == b"ok\n"
+
+
+def test_healthz_private_fails_closed_without_valid_snapshot(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_ACCESS_CONFIG", str(tmp_path / "absent.json"))
+
+    status, _, body = request_catalog("/healthz")
+
+    assert status == 503
+    assert json.loads(body) == {"ok": False}
+
+    path = tmp_path / "catalog-access.json"
+    path.write_text("{broken", encoding="utf-8")
+    monkeypatch.setenv("PORTMAP_ACCESS_CONFIG", str(path))
+
+    status, _, body = request_catalog("/readyz")
+
+    assert status == 503
+    assert json.loads(body) == {"ok": False}
+
+
+def test_healthz_public_stays_plain_without_snapshot(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_ACCESS_CONFIG", str(tmp_path / "absent.json"))
+
+    status, headers, body = request_catalog("/healthz", scope="public")
+
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/plain")
+    assert body == b"ok\n"

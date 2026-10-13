@@ -343,13 +343,16 @@ def download_info() -> dict[str, Any]:
     return release.payload()
 
 
-def download_cache_dir() -> Path:
+def download_cache_dir(state_dir: Path | None = None) -> Path:
+    """Resolve the shared cache; an environment override wins over settings."""
     explicit = os.environ.get("PORTMAP_DOWNLOAD_DIR")
     if explicit:
         return Path(explicit).expanduser()
-    from .settings import load_portmap_settings
+    if state_dir is None:
+        from .settings import load_portmap_settings
 
-    return load_portmap_settings().state_dir / CACHE_DIR_NAME
+        state_dir = load_portmap_settings().state_dir
+    return state_dir / CACHE_DIR_NAME
 
 
 def archive_matches(path: Path, asset: ReleaseAsset) -> bool:

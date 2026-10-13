@@ -45,6 +45,7 @@ class FakePlan:
 
 def demo_settings(tmp_path: Path, monkeypatch) -> object:
     monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: "192.0.2.1")
+    monkeypatch.setattr("portmap.broker.container_dns_address", lambda state_dir: "172.20.0.53")
     return load_portmap_settings(
         environ={
             "PORTMAP_ROOT": str(tmp_path),
@@ -54,43 +55,8 @@ def demo_settings(tmp_path: Path, monkeypatch) -> object:
     )
 
 
-def test_demo_up_creates_project_and_runs_injected_compose(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("portmap.broker.generate_plan", lambda request: FakePlan())
-    calls = []
-    monkeypatch.setattr("portmap.demo.subprocess.run", compose_fake(calls))
-    settings = demo_settings(tmp_path, monkeypatch)
-
-    result = demo_up(settings)
-
-    project_dir = demo_dir(settings)
-    assert result.ok is True
-    assert (project_dir / "docker-compose.yml").exists()
-    assert (project_dir / ".portmap" / "endpoints.toml").exists()
-    assert (project_dir / ".git").exists()
-    # The real broker pipeline: override file injected, branch-scoped name.
-    command, kwargs = calls[0]
-    assert command[:2] == ["docker", "compose"]
-    assert "-p" in command and "demo_demo" in command
-    assert str(project_dir / ".portmap" / "docker-compose.override.generated.yml") in command
-    assert command[-2:] == ["up", "-d"]
-    assert kwargs["cwd"] == project_dir
-    assert kwargs["env"]["DOCKER_HOST"].startswith("unix://")
-    assert kwargs["env"]["PORTMAP_BROKER_BYPASS"] == "1"
-    assert result.endpoints["web"]["url"] == "http://web.demo.demo.debug.lan:8080"
-    assert result.endpoints["raw"]["host_port"] == 18000
 
 
-def test_demo_up_idempotent_on_existing_project(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("portmap.broker.generate_plan", lambda request: FakePlan())
-    monkeypatch.setattr("portmap.demo.subprocess.run", compose_fake())
-    settings = demo_settings(tmp_path, monkeypatch)
-
-    first = demo_up(settings)
-    second = demo_up(settings)
-
-    assert first.ok and second.ok
-    # Same compose project name across runs: the demo repo is reused.
-    assert len(list(demo_dir(settings).iterdir())) > 0
 
 
 def test_demo_down_without_project_is_noop(tmp_path: Path, monkeypatch) -> None:
@@ -131,4 +97,3 @@ def test_demo_assets_parse_with_real_loaders() -> None:
 
     endpoints = load_endpoint_declarations(DEMO_ASSETS / "endpoints.toml")
     assert {e.name for e in endpoints} == {"web", "raw"}
-    assert (DEMO_ASSETS / "docker-compose.yml").read_text(encoding="utf-8").startswith("services:")

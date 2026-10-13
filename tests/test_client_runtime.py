@@ -45,21 +45,6 @@ def test_legacy_state_dir_is_the_standalone_default(monkeypatch, tmp_path):
     assert client_runtime.legacy_client_state_dir() == (tmp_path / "home" / ".local" / "state" / "portmap-client").resolve()
 
 
-def test_bundled_binary_wins_over_path_and_requires_executable_bit(monkeypatch, tmp_path):
-    monkeypatch.setattr(client_runtime, "BUNDLED_BIN_DIR", tmp_path / "native_bin")
-    (tmp_path / "native_bin").mkdir()
-    bundled = tmp_path / "native_bin" / "coredns"
-    bundled.write_text("#!/bin/sh\n:", encoding="utf-8")
-    bundled.chmod(0o755)
-    on_path = tmp_path / "on-path"
-    on_path.write_text("#!/bin/sh\n:", encoding="utf-8")
-    on_path.chmod(0o755)
-    monkeypatch.setattr(client_runtime.shutil, "which", lambda _name: str(on_path))
-    assert client_runtime.find_native_binary("coredns") == bundled
-
-    bundled.chmod(0o644)
-    assert client_runtime.find_native_binary("coredns") == on_path
-    assert client_runtime.bundled_binary("../escape") is None
 
 
 def test_native_environment_is_untouched_in_source_mode(monkeypatch):
@@ -92,30 +77,6 @@ def test_worker_environment_resets_bootloader_only_when_frozen(monkeypatch, tmp_
     assert client_runtime.worker_environment()["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        ["/usr/bin/portmap-client", "_serve-catalog", "--state-dir", "/s", "--port", "1", "--owner", "o"],
-        ["/usr/bin/python3", "-m", "portmap.client_view", "--state-dir", "/s", "--port", "1", "--owner", "o"],
-    ],
-)
-def test_serve_catalog_arguments_parses_both_recorded_forms(command):
-    assert client_runtime.serve_catalog_arguments(command) == {"state_dir": "/s", "port": "1", "owner": "o"}
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "/usr/bin/portmap-client _serve-catalog --state-dir /s",
-        ["/usr/bin/portmap-client", "_serve-catalog", "--state-dir", "/s", "--port", "1"],
-        ["/usr/bin/portmap-client", "_serve-catalog", "--state-dir", "/s", "--port", "abc", "--owner", "o"],
-        ["/usr/bin/portmap-client", "-m", "portmap.server_view", "--state-dir", "/s", "--port", "1", "--owner", "o"],
-        ["/bin/sh", "-c", "portmap.client_view --state-dir /s --port 1 --owner o"],
-        ["relative/portmap-client", "_serve-catalog", "--state-dir", "/s", "--port", "1", "--owner", "o"],
-    ],
-)
-def test_serve_catalog_arguments_rejects_foreign_commands(command):
-    assert client_runtime.serve_catalog_arguments(command) is None
 
 
 SESSION = "/user.slice/user-1000.slice/user@1000.service/session-9.scope"

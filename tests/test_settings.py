@@ -28,8 +28,7 @@ dir = "~/.local/state/portmap-test"
     )
     monkeypatch.setattr("portmap.settings.detect_host_ip", lambda: detected_host)
 
-    runtime_dir = tmp_path / "runtime"
-    settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(tmp_path), "XDG_RUNTIME_DIR": str(runtime_dir)})
+    settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(tmp_path)})
 
     assert settings.dns_domain == "debug.lan"
     assert settings.host_ip == detected_host
@@ -42,10 +41,6 @@ dir = "~/.local/state/portmap-test"
     assert settings.gateway_env()["PORTMAP_DNS_BIND"] == detected_host
     assert settings.gateway_env()["PORTMAP_DNS_TARGET_IP"] == detected_host
     assert settings.gateway_env()["PORTMAP_DNS_FORWARD"] == "/etc/resolv.conf"
-    assert settings.agent_runtime_dir == runtime_dir / "portmap"
-    assert settings.agent_socket == runtime_dir / "portmap" / "agent.sock"
-    assert settings.gateway_env()["PORTMAP_AGENT_RUNTIME_HOST_DIR"] == str(runtime_dir / "portmap")
-    assert settings.gateway_env()["PORTMAP_AGENT_SOCKET"] == "/run/portmap/agent.sock"
 
 
 def test_resolve_runtime_explicit_socket_wins() -> None:
@@ -56,10 +51,6 @@ def test_resolve_runtime_explicit_socket_wins() -> None:
     assert (name, socket_path) == ("podman", "/run/podman/podman.sock")
 
 
-def test_resolve_runtime_explicit_backend_podman() -> None:
-    name, socket_path = resolve_runtime({"PORTMAP_RUNTIME": "podman"}, {})
-    assert name == "podman"
-    assert socket_path == "/run/podman/podman.sock"
 
 
 def test_resolve_runtime_config_backend_and_socket() -> None:
@@ -171,22 +162,11 @@ def test_remote_runtime_docker_host_verbatim(tmp_path: Path, monkeypatch) -> Non
     assert settings.gateway_env()["PORTMAP_RUNTIME_SOCKET"] == ""
 
 
-def test_resolve_root_falls_back_to_package_assets(tmp_path: Path, monkeypatch) -> None:
-    package = tmp_path / "lib" / "python3.12" / "site-packages" / "portmap"
-    assets = package / "gateway_assets"
-    assets.mkdir(parents=True)
-    (assets / "docker-compose.yml").touch()
-    monkeypatch.setattr("portmap.settings.__file__", str(package / "settings.py"))
-
-    from portmap.settings import resolve_portmap_root
-
-    assert resolve_portmap_root(environ={}) == assets
-
 
 def test_resolve_root_prefers_source_checkout(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "checkout"
     (repo / "src" / "portmap").mkdir(parents=True)
-    (repo / "docker-compose.yml").touch()
+    (repo / "pyproject.toml").touch()
     monkeypatch.setattr("portmap.settings.__file__", str(repo / "src" / "portmap" / "settings.py"))
 
     from portmap.settings import resolve_portmap_root

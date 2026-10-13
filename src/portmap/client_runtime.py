@@ -1,6 +1,4 @@
-"""Runtime helpers for the portmap client role: state paths, bundled native
-binaries, child environments, frozen worker commands, and the login-session
-scope escape that keeps background workers alive.
+"""State paths, child environments and host-worker login-session lifetime.
 
 This module must stay free of server-runtime imports (settings, planner,
 agent, catalog): the unified frozen portmap executable imports it first."""
@@ -14,21 +12,16 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping
 
 from .errors import PortmapError
 
-# In a source checkout this is src/portmap/native_bin; in the frozen onedir
-# bundle it is <install>/_internal/portmap/native_bin, because __file__ of
-# bundled modules resolves under the PyInstaller payload root.
-BUNDLED_BIN_DIR = Path(__file__).resolve().parent / "native_bin"
 
 # Loader search variables a PyInstaller application may add for itself. Native
-# system children (ssh, ps, ip, resolvectl, coredns from PATH) must not inherit
+# system children (ssh, ip, resolvectl, container CLIs) must not inherit
 # entries that point into the portmap bundle.
 _LIBRARY_PATH_VARIABLES = ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH")
 
-_WORKER_FLAGS = ("--state-dir", "--port", "--owner")
 
 
 def frozen() -> bool:
@@ -36,20 +29,21 @@ def frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
-def client_state_dir() -> Path:
+def client_state_dir(environ: Mapping[str, str] | None = None, *, shared_state_dir: Path | None = None) -> Path:
     """Client-role state directory under the shared portmap state root.
 
     PORTMAP_CLIENT_STATE_DIR stays a role-specific isolation override; the
     normal default is ${PORTMAP_STATE_DIR or XDG_STATE_HOME/portmap}/client so
     one unified command shares a single state root across roles.
     """
-    isolated = os.environ.get("PORTMAP_CLIENT_STATE_DIR")
+    env = os.environ if environ is None else environ
+    isolated = env.get("PORTMAP_CLIENT_STATE_DIR")
     if isolated:
         return Path(isolated).expanduser().resolve()
-    root = os.environ.get("PORTMAP_STATE_DIR")
+    root = shared_state_dir if shared_state_dir is not None else env.get("PORTMAP_STATE_DIR")
     if root:
         return (Path(root).expanduser() / "client").resolve()
-    base = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
+    base = env.get("XDG_STATE_HOME") or "~/.local/state"
     return (Path(base).expanduser() / "portmap" / "client").resolve()
 
 
@@ -57,24 +51,6 @@ def legacy_client_state_dir() -> Path:
     """State directory of the removed standalone portmap-client command."""
     base = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
     return (Path(base).expanduser() / "portmap-client").resolve()
-
-
-def bundled_binary(name: str) -> Path | None:
-    """Return the bundled native binary shipped inside the client package."""
-    if not name or Path(name).name != name:
-        return None
-    candidate = BUNDLED_BIN_DIR / name
-    try:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    except OSError:
-        return None
-    return None
-
-
-def find_native_binary(name: str) -> Path | None:
-    """Resolve a native dependency: bundled binary first, then PATH."""
-    return bundled_binary(name) or (Path(found) if (found := shutil.which(name)) else None)
 
 
 def _bundle_library_prefixes() -> tuple[Path, ...]:
@@ -231,37 +207,25 @@ def ensure_persistent_scope(*, use_sudo: bool = True) -> str | None:
     )
 
 
-def serve_catalog_command(*, state_dir: str, port: int | str, owner: str) -> list[str]:
-    """Argv that (re)launches the catalog-view worker.
 
-    Frozen: the same executable re-invokes its hidden worker subcommand so the
-    child shares the bundle runtime. Source: the package stays importable via
-    the PYTHONPATH the launcher sets."""
-    arguments = ["--state-dir", str(state_dir), "--port", str(port), "--owner", str(owner)]
-    if frozen():
-        return [sys.executable, "_serve-catalog", *arguments]
-    return [sys.executable, "-m", "portmap.client_view", *arguments]
-
-
-def serve_catalog_arguments(command: Sequence[str]) -> dict[str, str] | None:
-    """Parse a recorded catalog-worker command without assuming the current
-    process runs in the same mode (frozen or source) as its recorder."""
-    if isinstance(command, (str, bytes)) or not isinstance(command, Sequence):
-        return None
-    arguments = list(command)
-    if len(arguments) < 2 or not Path(arguments[0]).is_absolute():
-        return None
-    if arguments[1] == "-m":
-        if len(arguments) < 3 or arguments[2] != "portmap.client_view":
-            return None
-        arguments = [arguments[0], *arguments[3:]]
-    elif arguments[1] == "_serve-catalog":
-        arguments = [arguments[0], *arguments[2:]]
-    else:
-        return None
-    if len(arguments) != 7 or arguments[1::2] != list(_WORKER_FLAGS):
-        return None
-    values = arguments[2::2]
-    if not all(values) or not values[1].isdecimal() or not 1 <= int(values[1]) <= 65535:
-        return None
-    return {"state_dir": values[0], "port": values[1], "owner": values[2]}
+def process_identity(pid: int) -> tuple[int, str, list[str] | str] | None:
+    """Read UID, start identity and argv before controlling an owned worker."""
+    try:
+        if sys.platform.startswith("linux"):
+            process = Path(f"/proc/{pid}")
+            fields = (process / "stat").read_text().rsplit(")", 1)[1].split()
+            if fields[0] == "Z":
+                return None
+            argv = (process / "cmdline").read_bytes().rstrip(b"\x00").split(b"\x00")
+            return process.stat().st_uid, fields[19], [os.fsdecode(arg) for arg in argv]
+        result = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "uid=,lstart=,command="],
+            capture_output=True, text=True, timeout=1, check=False,
+            env={**native_environment(), "LC_ALL": "C"},
+        )
+        fields = result.stdout.strip().split(None, 6)
+        if result.returncode == 0 and len(fields) == 7:
+            return int(fields[0]), " ".join(fields[1:6]), fields[6]
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+        pass
+    return None

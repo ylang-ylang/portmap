@@ -7,9 +7,12 @@
 # Requirements: POSIX sh, curl, tar, awk, grep, readlink and a sha256 tool
 # (sha256sum or shasum). No sudo, Python, jq, Brew, or autostart. Installs a
 # versioned bundle under ${XDG_DATA_HOME:-$HOME/.local/share}/portmap and
-# manages an atomic ~/.local/bin/portmap symlink. Installing does NOT
-# configure DNS or take over port 80. Setup configures split DNS; SSH
-# connections and local publishing use the shared private HTTP ingress.
+# manages an atomic ~/.local/bin/portmap symlink. Installing only places the
+# command: a Docker or Podman runtime with a compatible Docker Compose CLI
+# must be present before `portmap setup`. Installing does NOT configure DNS
+# or take over port 80. Setup prepares split DNS and a persistent
+# 127.0.0.1:80 entry without starting business projects, LAN publishing or
+# boot services.
 
 set -eu
 
@@ -175,11 +178,7 @@ case $source_url in
     *) die "manifest did not pin a trusted source URL for $filename" ;;
 esac
 
-# --- refuse to clobber unrelated state before touching anything ------------
-target=$INSTALL_ROOT/$version
-if [ -e "$target" ] || [ -L "$target" ]; then
-    [ -f "$target/$MARKER" ] || die "refusing to overwrite unrelated directory: $target"
-fi
+# --- refuse to clobber an unrelated launcher -------------------------------
 if [ -e "$BIN_LINK" ] || [ -L "$BIN_LINK" ]; then
     if [ -L "$BIN_LINK" ]; then
         current=$(readlink "$BIN_LINK" 2>/dev/null || printf '%s' "")
@@ -221,9 +220,9 @@ if tar -tvzf "$ARCHIVE_TMP" 2>/dev/null | awk '$1 ~ /^[lhcpbs]/ { bad = 1 } END 
     die "archive $filename contains non-regular members (links, devices or fifos)"
 fi
 
-# --- stage, then swap in atomically ----------------------------------------
+# --- stage an immutable bundle, then activate its launcher atomically -------
 mkdir -p "$INSTALL_ROOT"
-STAGE_DIR=$(mktemp -d "$INSTALL_ROOT/.stage.XXXXXX")
+STAGE_DIR=$(mktemp -d "$INSTALL_ROOT/$version.XXXXXX")
 note "Extracting portmap..."
 if ! tar -xzf "$ARCHIVE_TMP" -C "$STAGE_DIR"; then
     rm -rf "$STAGE_DIR"; STAGE_DIR=
@@ -255,10 +254,9 @@ if ! {
 fi
 printf 'installed by install.sh\n' > "$STAGE_DIR/$MARKER"
 rm -f "$ARCHIVE_TMP"; ARCHIVE_TMP=
-if [ -e "$target" ] || [ -L "$target" ]; then
-    rm -rf "$target"
-fi
-mv "$STAGE_DIR" "$target"
+# Running workers and pending migrations can still reference any older bundle,
+# including one with the same version. Never replace or delete those paths.
+target=$STAGE_DIR
 STAGE_DIR=
 
 # --- managed symlink -------------------------------------------------------
@@ -320,9 +318,12 @@ case ":$PATH:" in
 esac
 note "Next steps:"
 note "  $PROGRAM --version"
-note "  $PROGRAM setup            # configure local split DNS (asks for sudo)"
+note "  $PROGRAM setup            # split DNS + persistent 127.0.0.1:80 (asks for sudo)"
 note "  $PROGRAM connect <target> # direct to a remote IP, or through SSH"
 note "  $PROGRAM up               # optional: publish local Docker/Podman projects"
+note "Installing placed the command only; Docker or Podman with a compatible"
+note "Docker Compose CLI is required before setup."
 note "Installing did not configure DNS or claim port 80."
-note "Direct access needs no local HTTP listener; SSH/local publishing share the private HTTP entry."
+note "Setup prepares split DNS and keeps 127.0.0.1:80 ready even with no connections, starting no business projects, LAN publishing or boot services. Direct traffic still goes straight to the remote server."
+note "Run \`$PROGRAM up\` separately to enable local publishing; \`$PROGRAM teardown\` releases the infrastructure portmap owns."
 note "Run \`$PROGRAM status\` any time to see local publishing and access state."

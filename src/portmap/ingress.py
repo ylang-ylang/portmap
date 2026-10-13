@@ -6,7 +6,7 @@ user's uid, the portmap state directory, and the role name (``private`` or
 ports bind without giving the portmap process capabilities or a root client)
 and a ``systemd-socket-proxyd`` ``.service`` that runs unprivileged, with no
 capabilities, in the host network namespace, forwarding every accepted
-connection to ``127.0.0.1:<target_port>``.
+connection to the container-published loopback port ``127.0.0.1:<target_port>``.
 
 Unit files are root-owned with fixed content carrying a portmap ownership
 marker; they are never enabled at boot and are only removed after the marker
@@ -65,17 +65,19 @@ def _role(value: object) -> str:
 
 def _bind_address(role: str, value: object) -> str:
     if not isinstance(value, str):
-        raise PortmapError(f"{role} ingress bind address must be a literal IPv4 address string")
+        raise PortmapError(f"{role} ingress bind address must be a literal IP address string")
     try:
-        address = ipaddress.IPv4Address(value)
+        address = ipaddress.ip_address(value)
     except ValueError as exc:
-        raise PortmapError(f"{role} ingress bind address must be a literal IPv4 address, got {value!r}") from exc
+        raise PortmapError(f"{role} ingress bind address must be a literal IP address, got {value!r}") from exc
+    if isinstance(address, ipaddress.IPv6Address) and address.scope_id is not None:
+        raise PortmapError("ingress bind address must not contain a zone identifier")
     if role == "private":
         if str(address) != PRIVATE_BIND_ADDRESS:
             raise PortmapError(f"private ingress must bind exactly {PRIVATE_BIND_ADDRESS}, got {str(address)}")
     else:
         if address.is_unspecified:
-            raise PortmapError("public ingress requires an explicit host IP address, not the 0.0.0.0 wildcard")
+            raise PortmapError("public ingress requires an explicit host IP address, not a wildcard")
         if address.is_loopback:
             raise PortmapError(
                 "public ingress requires a non-loopback host IP address so LAN publication cannot expose private routes"
@@ -108,14 +110,16 @@ def _marker(state_dir: Path, role: str) -> str:
 
 
 def _socket_unit_content(marker: str, role: str, bind: str, port: int) -> str:
+    endpoint = f"[{bind}]:{port}" if ":" in bind else f"{bind}:{port}"
     return (
         f"{marker}\n"
         "# Managed by portmap ingress; remove with portmap instead of editing.\n"
         "[Unit]\n"
-        f"Description=portmap {role} ingress {bind}:{port} (uid {os.getuid()})\n"
+        f"Description=portmap {role} ingress {endpoint} (uid {os.getuid()})\n"
         "\n"
         "[Socket]\n"
-        f"ListenStream={bind}:{port}\n"
+        f"ListenStream={endpoint}\n"
+        + ("BindIPv6Only=ipv6-only\n" if ":" in bind else "")
     )
 
 
@@ -127,8 +131,6 @@ def _service_unit_content(
     port: int,
     target_port: int,
     proxyd: Path,
-    *,
-    ip_policy: bool,
 ) -> str:
     lines = [
         marker,
@@ -141,7 +143,11 @@ def _service_unit_content(
         "",
         "[Service]",
         # The listening socket is owned by the .socket unit; this service only
-        # receives it via socket activation and may stay unprivileged.
+        # receives it via socket activation and may stay unprivileged. Backends
+        # are container-published loopback ports: rootless Podman may DNAT that
+        # traffic to the container bridge address, so the unit deliberately
+        # carries no address-restricted cgroup BPF policy (a loopback-only
+        # allowlist would silently drop DNATed connections).
         f"ExecStart={proxyd} {TARGET_ADDRESS}:{target_port}",
         "DynamicUser=yes",
         "NoNewPrivileges=yes",
@@ -157,7 +163,7 @@ def _service_unit_content(
         "ProtectControlGroups=yes",
         "ProtectClock=yes",
         "ProtectHostname=yes",
-        "RestrictAddressFamilies=AF_INET AF_UNIX",
+        "RestrictAddressFamilies=AF_INET AF_UNIX" + (" AF_INET6" if ":" in bind else ""),
         "RestrictNamespaces=yes",
         "RestrictRealtime=yes",
         "RestrictSUIDSGID=yes",
@@ -166,12 +172,6 @@ def _service_unit_content(
         "SystemCallArchitectures=native",
         "UMask=0077",
     ]
-    if ip_policy and role == "private":
-        # Native private backends stay on loopback. A public container backend
-        # may be DNATed to its bridge IP (Podman); a loopback-only BPF policy
-        # would silently drop that traffic despite a healthy listening socket.
-        # Retried without this policy where the kernel cannot attach cgroup BPF.
-        lines += ["IPAddressAllow=127.0.0.0/8", "IPAddressDeny=any"]
     return "\n".join(lines) + "\n"
 
 
@@ -243,9 +243,9 @@ def _refuse_foreign(installed: dict[str, tuple[str, str | None, str | None]]) ->
 def _parse_params(socket_content: str | None, service_content: str | None) -> dict[str, Any]:
     params: dict[str, Any] = {}
     if socket_content:
-        match = re.search(r"^ListenStream=(\d+\.\d+\.\d+\.\d+):(\d+)$", socket_content, re.MULTILINE)
+        match = re.search(r"^ListenStream=(\[[0-9A-Fa-f:.]+\]|\d+\.\d+\.\d+\.\d+):(\d+)$", socket_content, re.MULTILINE)
         if match:
-            params["bind_address"] = match.group(1)
+            params["bind_address"] = match.group(1).strip("[]")
             params["port"] = int(match.group(2))
     if service_content:
         match = re.search(rf"^ExecStart=\S+ {re.escape(TARGET_ADDRESS)}:(\d+)$", service_content, re.MULTILINE)
@@ -478,45 +478,15 @@ def _activate(bind: str, port: int, service_unit: str) -> tuple[bool, str | None
         time.sleep(_POLL_INTERVAL)
 
 
-def _activate_or_fallback(
-    bind: str,
-    port: int,
-    service_unit: str,
-    service_path: Path,
-    service_contents: dict[str, str],
-    staging_dir: Path,
-    *,
-    use_sudo: bool,
-) -> bool:
-    """Activate the service, falling back to units without IP policy once.
-
-    Returns True when this call rewrote the service unit on disk.
-    """
+def _activate_or_raise(bind: str, port: int, service_unit: str) -> None:
+    """Trigger socket activation with real connections until the service is active."""
     ok, detail = _activate(bind, port, service_unit)
-    if ok:
-        return False
-    try:
-        current = service_path.read_text(encoding="utf-8")
-    except OSError:
-        current = None
-    if current == service_contents["restricted"] and current != service_contents["unrestricted"]:
-        # Kernels or containers without cgroup BPF cannot attach the IP policy;
-        # retry once without it, keeping every other hardening directive.
-        staging = _stage(service_contents["unrestricted"], staging_dir)
-        try:
-            _install_unit(staging, service_path, service_contents["unrestricted"], use_sudo=use_sudo)
-        finally:
-            staging.unlink(missing_ok=True)
-        _daemon_reload(use_sudo)
-        _privileged([_systemctl_path(), "reset-failed", service_unit], use_sudo=use_sudo)
-        ok, detail = _activate(bind, port, service_unit)
-        if ok:
-            return True
-    raise PortmapError(
-        f"ingress service {service_unit} did not activate"
-        + (f" ({detail})" if detail else "")
-        + f"; inspect with: systemctl status {service_unit} && journalctl -u {service_unit} --no-pager"
-    )
+    if not ok:
+        raise PortmapError(
+            f"ingress service {service_unit} did not activate"
+            + (f" ({detail})" if detail else "")
+            + f"; inspect with: systemctl status {service_unit} && journalctl -u {service_unit} --no-pager"
+        )
 
 
 # --- rollback helpers ---------------------------------------------------------------
@@ -641,17 +611,8 @@ def ensure_ingress(
     socket_path = UNIT_DIR / socket_unit
     service_path = UNIT_DIR / service_unit
     socket_content = _socket_unit_content(marker, role, bind, port)
-    service_contents = {
-        "restricted": _service_unit_content(
-            marker, role, socket_unit, bind, port, target_port, proxyd, ip_policy=True
-        ),
-        "unrestricted": _service_unit_content(
-            marker, role, socket_unit, bind, port, target_port, proxyd, ip_policy=False
-        ),
-    }
-    installed = _inspect_pair(
-        socket_path, service_path, marker, (socket_content, tuple(service_contents.values()))
-    )
+    service_content = _service_unit_content(marker, role, socket_unit, bind, port, target_port, proxyd)
+    installed = _inspect_pair(socket_path, service_path, marker, (socket_content, (service_content,)))
     _refuse_foreign(installed)
     previous = {
         key: (content if state in ("ours", "changed") else None)
@@ -665,12 +626,13 @@ def ensure_ingress(
     mutated = False
     try:
         if not changed and _unit_active(socket_unit):
-            # The fallback can rewrite the unit and then raise; arm rollback
-            # before entering it rather than only after a successful return.
-            mutated = True
-            mutated = _activate_or_fallback(
-                bind, port, service_unit, service_path, service_contents, staging_dir, use_sudo=use_sudo
-            )
+            # Activation probing can raise after a successful install; arm
+            # rollback for that failure without marking clean re-checks changed.
+            try:
+                _activate_or_raise(bind, port, service_unit)
+            except BaseException:
+                mutated = True
+                raise
         else:
             if had_units:
                 mutated = True
@@ -682,22 +644,20 @@ def ensure_ingress(
                 )
             staging_socket = _stage(socket_content, staging_dir)
             try:
-                staging_service = _stage(service_contents["restricted"], staging_dir)
+                staging_service = _stage(service_content, staging_dir)
             except BaseException:
                 staging_socket.unlink(missing_ok=True)
                 raise
             try:
                 mutated = True
                 _install_unit(staging_socket, socket_path, socket_content, use_sudo=use_sudo)
-                _install_unit(staging_service, service_path, service_contents["restricted"], use_sudo=use_sudo)
+                _install_unit(staging_service, service_path, service_content, use_sudo=use_sudo)
             finally:
                 staging_socket.unlink(missing_ok=True)
                 staging_service.unlink(missing_ok=True)
             _daemon_reload(use_sudo)
             _start_socket(socket_unit, bind, port, use_sudo=use_sudo)
-            _activate_or_fallback(
-                bind, port, service_unit, service_path, service_contents, staging_dir, use_sudo=use_sudo
-            )
+            _activate_or_raise(bind, port, service_unit)
         _save_state(
             state_dir,
             role,
@@ -714,7 +674,7 @@ def ensure_ingress(
                 "state": str(state_dir.resolve()),
             },
         )
-    except Exception as exc:
+    except BaseException as exc:
         if not mutated:
             raise
         if had_units:

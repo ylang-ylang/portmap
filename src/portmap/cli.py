@@ -25,6 +25,7 @@ from .broker_shim import (
 from .compose_takeover import plan_docker_compose_command
 from .client_runtime import native_environment
 from .errors import PortmapError
+from .infrastructure import container_dns_address
 from .host_dns import DEFAULT_RESOLVED_CONF_DIR, set_resolved_dropin, unset_resolved_dropin
 from .model import GenerateRequest
 from .planner import generate_plan
@@ -224,8 +225,6 @@ def build_parser() -> argparse.ArgumentParser:
     endpoints.set_defaults(func=cmd_endpoints)
 
     register_commands(subparsers)
-    catalog_worker = subparsers.add_parser("_serve-server-catalog", help=argparse.SUPPRESS)
-    catalog_worker.set_defaults(func=cmd_serve_server_catalog)
     subparsers._choices_actions = [
         action for action in subparsers._choices_actions if not action.dest.startswith("_")
     ]
@@ -273,6 +272,7 @@ def cmd_docker_compose(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     env = native_environment()
+    env.pop("DOCKER_CONTEXT", None)
     env["PORTMAP_BROKER_BYPASS"] = "1"
     env["DOCKER_HOST"] = load_portmap_settings(environ=os.environ).docker_host
     return subprocess.run(plan.command, check=False, env=env).returncode
@@ -333,13 +333,6 @@ def cmd_gateway(args: argparse.Namespace) -> int:
     if compose_args[0] == "down":
         return cmd_down(args)
     return run_gateway_compose(load_portmap_settings(), compose_args)
-
-
-def cmd_serve_server_catalog(args: argparse.Namespace) -> int:
-    from .catalog import main as catalog_main
-
-    catalog_main()
-    return 0
 
 
 def cmd_agent_serve(args: argparse.Namespace) -> int:
@@ -445,7 +438,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         host_ip=args.host_ip,
         domain_suffix=args.domain_suffix,
         gateway_network=args.gateway_network,
-        container_dns_server=load_portmap_settings(environ=os.environ).effective_dns_bind,
+        container_dns_server=container_dns_address(load_portmap_settings().client_state_dir),
         allocation_state_file=args.allocation_state_file,
         compose_project=args.compose_project,
     )
@@ -481,12 +474,12 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    from .client import connections
-    from .client_runtime import client_state_dir
+    from .connection_config import managed_connections
     from .server import server_status
 
-    result = connections(client_state_dir(), check=args.check)
-    result["server"] = server_status(load_portmap_settings(), check=args.check)
+    settings = load_portmap_settings()
+    result = managed_connections(settings.client_state_dir, check=args.check)
+    result["server"] = server_status(settings, check=args.check)
     print_json(result)
     return 0
 

@@ -17,3 +17,13 @@
   On the real notebook, close the actual creating SSH session, confirm the
   same DNS/SSH/view/Traefik PIDs still serve portless HTTP, reinstall the
   running 0.11.0 bundle, then restore direct access with no local HTTP gateway.
+
+- Release `V0.12` (`portmap 0.12.0`): unify infrastructure in Docker/rootless
+  Podman containers while keeping CLI/agent/SSH ordinary-user owned. Setup
+  retains the private port-80 entry; local and LAN publication remain explicit.
+- Deliver the accepted Linux amd64 immutable bundle and matching source
+  manifest. Include readiness-gated native/Compose migration with rollback and
+  resumable retirement, targeted multi-machine catalog controls and LAN isolation.
+- Verify 590 source tests and the real two-VM runtime/installer matrix, then
+  restore original NSS/dependency state and remove scoped test resources without
+  changing original business, global DNS, unrelated services or VM power/RAM.
