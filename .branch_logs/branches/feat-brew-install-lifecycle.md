@@ -14,17 +14,23 @@
   refused elevation does not retire a working installation.
 - Probe Web access through the selected machine DTO's canonical catalog URL,
   rather than inventing a publishing-only hostname for a private access client.
-- Add Catalog and Settings page tabs. Keep ConnectionManager and Download portmap
-  together in Settings; catalog loading/errors/service empty states and machine
-  actions remain exclusively in Catalog. Keep both panels mounted so navigation
-  preserves machine selection and unsaved connection forms; follow existing
-  keyboard tab navigation and public/private connection-control permissions.
+- Append Settings to the existing machine tab row, without an extra Catalog tab.
+  Keep ConnectionManager and Download portmap together in Settings, including
+  after visiting a remote machine; catalog loading/errors/service empty states
+  and machine actions remain in machine views. Keep both panels mounted to
+  preserve selection and unsaved forms, retaining keyboard navigation and
+  public/private connection-control permissions.
 - Document automatic Brew setup against the user's existing Docker/Podman API,
   preferring Docker when available, without installing or starting another engine.
 - Isolate runtime-selection tests from the controller's rootless Podman socket
   with a temporary XDG runtime directory; exercise Docker preference with both
   real test sockets listening.
-- Build the 0.13.0 Linux amd64 frozen archive including the new Settings UI;
-  the actual CLI reports `portmap 0.13.0` as an ordinary UID in a read-only,
-  network-disabled container. Archive SHA-256:
-  `82e7dc22afa8e5bea24fcc20f5e7a1e13a2284582223476d48c655b29f73553a`.
+- Verify 595 non-integration tests, with one integration case deselected.
+  The initial two failures exposed ambient rootless-socket leakage in old tests;
+  fixing their environment isolation made both pass without production changes.
+- Build the 0.13.0 Linux amd64 archive with the final single-row Settings UI.
+  Archive SHA-256:
+  `518ad70f07174c23de16114a81a200efe943019fd101a9293656dae84303563c`.
+- Real notebook `brew install ylang-ylang/tap/portmap` upgrades 0.12.0_2 to
+  0.13.0 and completes setup successfully in the same operation: setup 12.739s,
+  package build 27s, followed by normal cleanup of the old keg.

@@ -218,8 +218,10 @@ projects, or do both. The standalone installer only places the command;
 Homebrew also initializes the access role. Neither publishes projects or
 enables boot services automatically.
 
-Open a trusted server's catalog and use **Download portmap**, or run its
-installer:
+Open a trusted server's catalog and select **Settings → Download portmap**,
+or run its installer below. **Settings** is the last tab after the machines;
+in the private portal it also contains **Connections**. Service empty states
+stay inside machine tabs.
 
 ```bash
 SERVER=http://192.0.2.10

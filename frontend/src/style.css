@@ -20,12 +20,6 @@ main {
   margin-bottom: 18px;
 }
 
-.page-tabs {
-  display: flex;
-  gap: 4px;
-  margin-top: 10px;
-}
-
 .page-panel[hidden] {
   display: none;
 }

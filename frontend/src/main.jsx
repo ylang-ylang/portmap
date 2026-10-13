@@ -945,11 +945,11 @@ function CatalogTree({ catalog, onAction, onStart }) {
   );
 }
 
-function MachineTabs({ machines, selectedId, onSelect }) {
+function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelectSettings }) {
   const tabRefs = useRef([]);
 
   function handleTabKeyDown(e, index) {
-    const count = machines.length;
+    const count = machines.length + 1;
     let next = -1;
     if (e.key === "ArrowRight") next = (index + 1) % count;
     else if (e.key === "ArrowLeft") next = (index - 1 + count) % count;
@@ -958,21 +958,24 @@ function MachineTabs({ machines, selectedId, onSelect }) {
     if (next === -1) return;
     e.preventDefault();
     tabRefs.current[next]?.focus();
-    onSelect(machines[next].id);
+    if (next === machines.length) onSelectSettings();
+    else onSelect(machines[next].id);
   }
 
   return (
-    <nav className="machine-nav" aria-label="Connected machines">
-      <div className="machine-nav-scroll" role="tablist">
+    <nav className="machine-nav" aria-label="Portmap navigation">
+      <div className="machine-nav-scroll" role="tablist" aria-label="Machines and settings">
         {machines.map((machine, index) => {
-          const isSelected = machine.id === selectedId;
+          const isSelected = !settingsSelected && machine.id === selectedId;
           const isLocal = machine.via === "local";
           return (
             <button
               key={machine.id}
+              id={`machine-tab-${machine.id}`}
               ref={(el) => { tabRefs.current[index] = el; }}
               role="tab"
               aria-selected={isSelected}
+              aria-controls="page-panel-catalog"
               tabIndex={isSelected ? 0 : -1}
               type="button"
               className={[
@@ -998,6 +1001,20 @@ function MachineTabs({ machines, selectedId, onSelect }) {
             </button>
           );
         })}
+        <button
+          ref={(el) => { tabRefs.current[machines.length] = el; }}
+          id="page-tab-settings"
+          role="tab"
+          aria-selected={settingsSelected}
+          aria-controls="page-panel-settings"
+          tabIndex={settingsSelected || machines.length === 0 ? 0 : -1}
+          type="button"
+          className={`machine-tab${settingsSelected ? " machine-tab-active" : ""}`}
+          onClick={onSelectSettings}
+          onKeyDown={(e) => handleTabKeyDown(e, machines.length)}
+        >
+          Settings
+        </button>
       </div>
     </nav>
   );
@@ -1043,8 +1060,6 @@ function DownloadPanel({ catalog }) {
     loadRelease();
     return () => { cancelled = true; };
   }, []);
-
-  if (catalog?.client_access) return null;
 
   const downloadOrigin = new URL(window.location.origin);
   // A fresh machine cannot resolve .portmap before it has installed the client.
@@ -1600,14 +1615,8 @@ function ConnectionManager({ canManageConnections, onMachinesRefresh }) {
   );
 }
 
-const PAGE_TABS = [
-  { id: "catalog", label: "Catalog" },
-  { id: "settings", label: "Settings" },
-];
-
 function CatalogApp() {
   const [activePage, setActivePage] = useState("catalog");
-  const pageTabRefs = useRef([]);
   // null = not yet fetched (loading or failed); [] or [...] = loaded
   const [machines, setMachines] = useState(null);
   const [machinesError, setMachinesError] = useState("");
@@ -1732,20 +1741,8 @@ function CatalogApp() {
     }
   }
 
-  function handlePageTabKeyDown(e, index) {
-    const count = PAGE_TABS.length;
-    let next = -1;
-    if (e.key === "ArrowRight") next = (index + 1) % count;
-    else if (e.key === "ArrowLeft") next = (index - 1 + count) % count;
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = count - 1;
-    if (next === -1) return;
-    e.preventDefault();
-    pageTabRefs.current[next]?.focus();
-    setActivePage(PAGE_TABS[next].id);
-  }
-
   function handleSelectMachine(id) {
+    setActivePage("catalog");
     if (id === selectedMachineId) return;
     setSelectedMachineId(id);
   }
@@ -1896,43 +1893,25 @@ function CatalogApp() {
             </>
           )}
         </div>
-        <nav className="page-tabs" role="tablist" aria-label="Portmap pages">
-          {PAGE_TABS.map((page, index) => (
-            <button
-              key={page.id}
-              ref={(el) => { pageTabRefs.current[index] = el; }}
-              id={`page-tab-${page.id}`}
-              type="button"
-              role="tab"
-              aria-selected={activePage === page.id}
-              aria-controls={`page-panel-${page.id}`}
-              tabIndex={activePage === page.id ? 0 : -1}
-              className={`machine-tab${activePage === page.id ? " machine-tab-active" : ""}`}
-              onClick={() => setActivePage(page.id)}
-              onKeyDown={(e) => handlePageTabKeyDown(e, index)}
-            >
-              {page.label}
-            </button>
-          ))}
-        </nav>
+        <CatalogTabs
+          machines={machines || []}
+          selectedId={selectedMachineId}
+          settingsSelected={activePage === "settings"}
+          onSelect={handleSelectMachine}
+          onSelectSettings={() => setActivePage("settings")}
+        />
       </header>
       <section
         id="page-panel-catalog"
         className="page-panel"
         role="tabpanel"
-        aria-labelledby="page-tab-catalog"
+        aria-labelledby={selectedMachine ? `machine-tab-${selectedMachine.id}` : undefined}
+        aria-label={selectedMachine ? undefined : "Service catalog"}
         hidden={activePage !== "catalog"}
         tabIndex={0}
       >
         <div className="catalog-controls">
           <CatalogMeta catalog={catalog} machineId={selectedMachineId} />
-          {machines !== null && machines.length > 1 && (
-            <MachineTabs
-              machines={machines}
-              selectedId={selectedMachineId}
-              onSelect={handleSelectMachine}
-            />
-          )}
           {machinesError && machines !== null && (
             <p className="meta machine-nav-error">{machinesError}</p>
           )}
@@ -1953,7 +1932,7 @@ function CatalogApp() {
           canManageConnections={canManageConnections}
           onMachinesRefresh={() => loadMachines({ keepSelection: true })}
         />
-        <DownloadPanel catalog={catalog} />
+        <DownloadPanel catalog={catalog?.client_access ? null : catalog} />
       </section>
     </main>
   );
