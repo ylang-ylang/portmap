@@ -31,5 +31,13 @@
 - Release `V0.13` (`portmap 0.13.0`): support one-operation Brew setup/recovery
   against the user's existing local runtime, including same-path source mount
   replacement and ordinary-user worker survival beyond the installer service.
-- Add a Settings tab for Downloads and Connections, separate service catalog
-  empty states from configuration, and probe the canonical machine catalog URL.
+- Keep Settings last and right-aligned in the machine tab row, with Downloads
+  and Connections inside it. Keep service empty states in machine views,
+  remove the technical metadata row, and probe canonical machine catalog URLs.
+- Verify 595 source cases, actual ordinary-user frozen CLI, and real notebook
+  Brew install/reinstall with post-cleanup HTTP/assets and preserved state.
+  Record the later notebook network outage as a limit on final native UI and
+  download verification, not a successful check.
+- Validate the compiled UI with recorded API data in Chromium, including the
+  local-only `本机` badge and keyboard/remote navigation. Keep the final notebook
+  badge/manifest synchronization pending its network recovery.

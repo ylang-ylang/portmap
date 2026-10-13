@@ -5,8 +5,8 @@
       "os": "linux",
       "arch": "amd64",
       "filename": "portmap-0.13.0-linux-amd64.tar.gz",
-      "sha256": "518ad70f07174c23de16114a81a200efe943019fd101a9293656dae84303563c",
-      "size": 8021212,
+      "sha256": "fd7ebee77c36594cae326045be294c81bdb13f3a2b86a7bd0185fefda8e36d22",
+      "size": 8020291,
       "source_url": "https://github.com/ylang-ylang/portmap/releases/download/V0.13/portmap-0.13.0-linux-amd64.tar.gz"
     }
   ]

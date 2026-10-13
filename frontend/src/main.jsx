@@ -580,21 +580,6 @@ function CopyButton({ targetId }) {
   );
 }
 
-function CatalogMeta({ catalog, machineId }) {
-  // Always include machine= so the link is unambiguous even when accessed via SSH-apex hostname.
-  const registryUrl = machineId
-    ? `/registry.json?machine=${encodeURIComponent(machineId)}`
-    : "/registry.json";
-  if (!catalog) return <p className="meta">Loading catalog…</p>;
-  return (
-    <p className="meta" data-catalog-meta>
-      Generated at {text(catalog.generated_at)}. HTTP proxy port: {text(catalog.http_port)}. DNS domain:{" "}
-      {text(catalog.dns_domain)}. DNS server: {text(catalog.dns_server)}{catalog.dns_port && catalog.dns_port !== 53 ? `:${catalog.dns_port}` : ""}. JSON:{" "}
-      <OpenLink href={registryUrl}>{registryUrl}</OpenLink>.
-    </p>
-  );
-}
-
 function ActionMessage({ message }) {
   if (!message) return null;
   return (
@@ -987,6 +972,9 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
               onKeyDown={(e) => handleTabKeyDown(e, index)}
             >
               <span className="machine-tab-name">{machine.label || machine.domain || machine.id}</span>
+              {isLocal && (
+                <span className="machine-via-badge">本机</span>
+              )}
               {!isLocal && machine.via && (
                 <span className={`machine-via-badge machine-via-${machine.via}`}>
                   {machine.via}
@@ -1009,7 +997,7 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
           aria-controls="page-panel-settings"
           tabIndex={settingsSelected || machines.length === 0 ? 0 : -1}
           type="button"
-          className={`machine-tab${settingsSelected ? " machine-tab-active" : ""}`}
+          className={`machine-tab machine-tab-settings${settingsSelected ? " machine-tab-active" : ""}`}
           onClick={onSelectSettings}
           onKeyDown={(e) => handleTabKeyDown(e, machines.length)}
         >
@@ -1910,12 +1898,9 @@ function CatalogApp() {
         hidden={activePage !== "catalog"}
         tabIndex={0}
       >
-        <div className="catalog-controls">
-          <CatalogMeta catalog={catalog} machineId={selectedMachineId} />
-          {machinesError && machines !== null && (
-            <p className="meta machine-nav-error">{machinesError}</p>
-          )}
-        </div>
+        {machinesError && machines !== null && (
+          <p className="meta machine-nav-error">{machinesError}</p>
+        )}
         <ActionMessage message={actionMessage} />
         <ActionLog entries={actionLog} />
         {catalogContent}

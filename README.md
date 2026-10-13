@@ -221,7 +221,7 @@ enables boot services automatically.
 Open a trusted server's catalog and select **Settings → Download portmap**,
 or run its installer below. **Settings** is the last tab after the machines;
 in the private portal it also contains **Connections**. Service empty states
-stay inside machine tabs.
+stay inside machine tabs. The portal's own machine carries a small **本机** badge.
 
 ```bash
 SERVER=http://192.0.2.10
