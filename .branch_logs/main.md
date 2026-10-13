@@ -27,3 +27,9 @@
 - Verify 590 source tests and the real two-VM runtime/installer matrix, then
   restore original NSS/dependency state and remove scoped test resources without
   changing original business, global DNS, unrelated services or VM power/RAM.
+
+- Release `V0.13` (`portmap 0.13.0`): support one-operation Brew setup/recovery
+  against the user's existing local runtime, including same-path source mount
+  replacement and ordinary-user worker survival beyond the installer service.
+- Add a Settings tab for Downloads and Connections, separate service catalog
+  empty states from configuration, and probe the canonical machine catalog URL.

@@ -110,10 +110,9 @@ def worker_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     return environment
 
 
-# logind keeps each login session's processes in a session-<id>.scope cgroup;
-# when the session ends (an SSH disconnect under KillUserProcesses=yes) every
-# process in that scope is SIGTERMed, including portmap's background workers.
-_LOGIN_SESSION_SCOPE = re.compile(r"(?:^|/)session-[0-9A-Za-z]+\.scope(?:/|$)")
+# Both logind login scopes and the per-user manager can disappear on logout.
+# A transient Brew installer service also ends immediately after setup.
+_DISPOSABLE_USER_SCOPE = re.compile(r"(?:^|/)(?:session-[0-9A-Za-z]+\.scope|user@[0-9]+\.service)(?:/|$)")
 _SCOPE_ADOPT_WAIT = 5.0
 _SCOPE_ADOPT_POLL = 0.05
 # Name (adopted scope), "" (no escape was needed), or None (not yet decided).
@@ -129,10 +128,10 @@ def _cgroup_paths() -> list[str]:
     return [line.rpartition(":")[2] for line in content.splitlines()]
 
 
-def _login_session_scope() -> str | None:
-    """The disposable logind session scope holding this process, if any."""
+def _disposable_user_scope() -> str | None:
+    """The login or user-manager cgroup holding this process, if any."""
     for path in _cgroup_paths():
-        if _LOGIN_SESSION_SCOPE.search(path):
+        if _DISPOSABLE_USER_SCOPE.search(path):
             return path
     return None
 
@@ -141,30 +140,29 @@ def ensure_persistent_scope(*, use_sudo: bool = True) -> str | None:
     """Keep this process's background workers past the login session that
     started them.
 
-    On Linux, when this process runs inside a disposable logind
-    session-<id>.scope, it first adopts its own PID into a transient
-    system-manager scope through one exact StartTransientUnit call (mode fail,
-    CollectMode inactive-or-failed, no unit files and no boot enablement).
+    On Linux, a process inside a logind session scope or a user-manager
+    service adopts its own PID into a transient system-manager scope through
+    one exact StartTransientUnit call (mode fail, CollectMode
+    inactive-or-failed, no unit files and no boot enablement).
     Only the calling PID moves: every worker keeps running as this same
     unprivileged user with unchanged groups, environment, recorded Popen PID
-    and argv. Outside such a login session, and on non-Linux systems, nothing
-    is done because no session escape is needed. One process requests at most
-    one scope; later calls are no-ops.
+    and argv. Outside these user cgroups, and on non-Linux systems, nothing
+    is done. One process requests at most one scope; later calls are no-ops.
 
     Root calls busctl directly. An ordinary caller that declined elevation
     fails here, before any killable worker exists, rather than silently
-    spawning one that logind would terminate with the session."""
+    spawning a worker that the login or user manager would terminate."""
     global _persistent_scope
     if _persistent_scope is not None or not sys.platform.startswith("linux"):
         return _persistent_scope
-    session = _login_session_scope()
-    if session is None:
+    disposable = _disposable_user_scope()
+    if disposable is None:
         _persistent_scope = ""
         return None
     root = hasattr(os, "geteuid") and os.geteuid() == 0
     if not root and not use_sudo:
         raise PortmapError(
-            "keeping portmap background workers past this login session needs administrator "
+            "keeping portmap background workers outside this disposable user cgroup needs administrator "
             "privileges: drop --no-sudo (portmap runs one exact sudo command) or run as root"
         )
     name = f"portmap-{os.getuid()}-{os.getpid()}-{secrets.token_hex(4)}.scope"
@@ -187,12 +185,12 @@ def ensure_persistent_scope(*, use_sudo: bool = True) -> str | None:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PortmapError(
-            f"could not move this process out of login session {session}: {exc}. "
+            f"could not move this process out of disposable user cgroup {disposable}: {exc}. "
             "No background portmap worker was started"
         ) from exc
     if result.returncode != 0:
         raise PortmapError(
-            f"could not move this process out of login session {session}: "
+            f"could not move this process out of disposable user cgroup {disposable}: "
             f"{(result.stderr or result.stdout).strip()[:1000]}. No background portmap worker was started"
         )
     deadline = time.monotonic() + _SCOPE_ADOPT_WAIT

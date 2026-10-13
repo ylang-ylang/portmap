@@ -120,3 +120,9 @@
   installed upgrades, host/container access, logout survival and isolated
   teardown on PVE VM101/102. Restore NSS/dependency state and remove only owned
   fixtures; preserve original workloads, DNS and running 4096 MiB VM settings.
+- Integrate `feat/brew-install-lifecycle`: reconcile replaced source bind mounts
+  on Brew reinstall, preserve ordinary-user workers outside user-manager cleanup,
+  and preflight scope permissions before retiring an existing host agent.
+- Separate Catalog from Settings: put Downloads and Connections in Settings,
+  keep service empty states in Catalog, and use the canonical machine URL for
+  Web access checks. Prepare the matching 0.13.0 package and frozen manifest.

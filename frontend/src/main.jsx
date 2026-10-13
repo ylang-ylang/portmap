@@ -1119,7 +1119,7 @@ function DownloadPanel({ catalog }) {
           )}
           <div className="quick-command">
             <div className="quick-setup-actions">
-              <p>Optional: install and upgrade via Homebrew instead of the standalone bundle.</p>
+              <p>Homebrew installs the command and initializes access in one step. An existing Docker or Podman API must be available.</p>
               <CopyButton targetId="portmap-brew-install" />
             </div>
             <pre><code id="portmap-brew-install">brew install ylang-ylang/tap/portmap</code></pre>
@@ -1130,13 +1130,14 @@ function DownloadPanel({ catalog }) {
             <pre><code id="portmap-brew-upgrade">brew upgrade ylang-ylang/tap/portmap</code></pre>
           </div>
           <div className="quick-command">
-            <p>After install, on the computer that needs access:</p>
-            <pre><code>{`portmap setup\nportmap connect <IP-or-SSH-target>\nportmap status --check`}</code></pre>
+            <p>The standalone installer needs <code>portmap setup</code> once; Homebrew runs it automatically. Then add a remote machine if needed:</p>
+            <pre><code>{`portmap connect <IP-or-SSH-target>\nportmap status --check`}</code></pre>
             <p>
-              Installing only places the command. <code>portmap setup</code> starts a small
-              container stack — Docker or Podman must already be running. DNS and the local
-              ingress gateway run in containers; no native CoreDNS or Traefik is installed
-              on the host. Setup keeps <code>127.0.0.1:80</code> reserved and configures
+              Setup uses your existing container runtime, preferring Docker when both
+              Docker and Podman are available. It reports an unavailable API instead of
+              installing or starting an engine. DNS and the local ingress gateway run
+              in containers; no native CoreDNS or Traefik is installed on the host.
+              Setup keeps <code>127.0.0.1:80</code> reserved and configures
               split DNS, even with no active connections. Direct access goes straight to the
               remote IP; SSH and local projects share the private ingress. Setup does not
               start your business projects or expose an entry to the LAN.
@@ -1166,8 +1167,13 @@ function AccessStatus({ catalog }) {
     );
   }
   const domain = text(catalog.dns_domain).replace(/\.$/, "");
-  const host = catalog.client_access ? text(catalog.client_access.domain) : `portmap.${domain}`;
-  const url = `${window.location.protocol}//${host}${currentPortSuffix()}/assets/dns-check.svg?ts=${Date.now()}`;
+  const fallbackHost = catalog.client_access ? text(catalog.client_access.domain) : `portmap.${domain}`;
+  const catalogUrl = text(catalog.machine?.catalog_url)
+    || `${window.location.protocol}//${fallbackHost}${currentPortSuffix()}/`;
+  const probeUrl = new URL("/assets/dns-check.svg", catalogUrl);
+  probeUrl.searchParams.set("ts", String(Date.now()));
+  const host = probeUrl.host;
+  const url = probeUrl.href;
   // This is a browser resource probe: a failure means this browser could not
   // load the URL (access failure), not a definitive DNS diagnosis. The probe
   // URL stays exposed via the tooltip and the link.
@@ -1594,7 +1600,14 @@ function ConnectionManager({ canManageConnections, onMachinesRefresh }) {
   );
 }
 
+const PAGE_TABS = [
+  { id: "catalog", label: "Catalog" },
+  { id: "settings", label: "Settings" },
+];
+
 function CatalogApp() {
+  const [activePage, setActivePage] = useState("catalog");
+  const pageTabRefs = useRef([]);
   // null = not yet fetched (loading or failed); [] or [...] = loaded
   const [machines, setMachines] = useState(null);
   const [machinesError, setMachinesError] = useState("");
@@ -1717,6 +1730,19 @@ function CatalogApp() {
       await loadMachines({ keepSelection: true });
       await reloadCatalog();
     }
+  }
+
+  function handlePageTabKeyDown(e, index) {
+    const count = PAGE_TABS.length;
+    let next = -1;
+    if (e.key === "ArrowRight") next = (index + 1) % count;
+    else if (e.key === "ArrowLeft") next = (index - 1 + count) % count;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = count - 1;
+    if (next === -1) return;
+    e.preventDefault();
+    pageTabRefs.current[next]?.focus();
+    setActivePage(PAGE_TABS[next].id);
   }
 
   function handleSelectMachine(id) {
@@ -1853,20 +1879,52 @@ function CatalogApp() {
   return (
     <main>
       <header className="app-header">
-        <div>
-          <div className="title-row">
-            <h1>portmap catalog</h1>
-            <AccessStatus catalog={catalog} />
+        <div className="title-row">
+          <h1>portmap catalog</h1>
+          {activePage === "catalog" && (
+            <>
+              <AccessStatus catalog={catalog} />
+              <button
+                className="action-button"
+                type="button"
+                title="Refresh machines and catalog"
+                onClick={handleRefresh}
+              >
+                <RefreshCw className="button-icon" aria-hidden="true" />
+                Refresh
+              </button>
+            </>
+          )}
+        </div>
+        <nav className="page-tabs" role="tablist" aria-label="Portmap pages">
+          {PAGE_TABS.map((page, index) => (
             <button
-              className="action-button"
+              key={page.id}
+              ref={(el) => { pageTabRefs.current[index] = el; }}
+              id={`page-tab-${page.id}`}
               type="button"
-              title="Refresh machines and catalog"
-              onClick={handleRefresh}
+              role="tab"
+              aria-selected={activePage === page.id}
+              aria-controls={`page-panel-${page.id}`}
+              tabIndex={activePage === page.id ? 0 : -1}
+              className={`machine-tab${activePage === page.id ? " machine-tab-active" : ""}`}
+              onClick={() => setActivePage(page.id)}
+              onKeyDown={(e) => handlePageTabKeyDown(e, index)}
             >
-              <RefreshCw className="button-icon" aria-hidden="true" />
-              Refresh
+              {page.label}
             </button>
-          </div>
+          ))}
+        </nav>
+      </header>
+      <section
+        id="page-panel-catalog"
+        className="page-panel"
+        role="tabpanel"
+        aria-labelledby="page-tab-catalog"
+        hidden={activePage !== "catalog"}
+        tabIndex={0}
+      >
+        <div className="catalog-controls">
           <CatalogMeta catalog={catalog} machineId={selectedMachineId} />
           {machines !== null && machines.length > 1 && (
             <MachineTabs
@@ -1879,15 +1937,24 @@ function CatalogApp() {
             <p className="meta machine-nav-error">{machinesError}</p>
           )}
         </div>
-      </header>
-      <ActionMessage message={actionMessage} />
-      <ActionLog entries={actionLog} />
-      <ConnectionManager
-        canManageConnections={canManageConnections}
-        onMachinesRefresh={() => loadMachines({ keepSelection: true })}
-      />
-      <DownloadPanel catalog={catalog} />
-      {catalogContent}
+        <ActionMessage message={actionMessage} />
+        <ActionLog entries={actionLog} />
+        {catalogContent}
+      </section>
+      <section
+        id="page-panel-settings"
+        className="page-panel settings-panel"
+        role="tabpanel"
+        aria-labelledby="page-tab-settings"
+        hidden={activePage !== "settings"}
+        tabIndex={0}
+      >
+        <ConnectionManager
+          canManageConnections={canManageConnections}
+          onMachinesRefresh={() => loadMachines({ keepSelection: true })}
+        />
+        <DownloadPanel catalog={catalog} />
+      </section>
     </main>
   );
 }
