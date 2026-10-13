@@ -264,7 +264,7 @@ def _compose_files(root: Path, labels: Mapping[str, Any]) -> None:
     if not any(file == base for file in files):
         raise PortmapError(f"legacy Compose labels do not reference the recorded configuration root {root}")
     for file in files:
-        if file != base and base not in file.parents:
+        if not file.is_absolute() or not file.resolve().is_relative_to(root):
             raise PortmapError(f"legacy Compose configuration file is outside the recorded root: {file}")
 
 

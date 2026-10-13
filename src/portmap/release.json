@@ -5,8 +5,8 @@
       "os": "linux",
       "arch": "amd64",
       "filename": "portmap-0.12.0-linux-amd64.tar.gz",
-      "sha256": "21af8df950938084698379ddfc6e39c4d940fbd67cf687cd8bdf58185b21c0cc",
-      "size": 80225601,
+      "sha256": "39ce756cf6c0b21753edb4dabe06081263e0b51bd0adc66622c98b78f1c827c0",
+      "size": 8020183,
       "source_url": "https://github.com/ylang-ylang/portmap/releases/download/V0.12/portmap-0.12.0-linux-amd64.tar.gz"
     }
   ]

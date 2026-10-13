@@ -247,6 +247,41 @@ def test_capture_records_exact_compose_ownership(legacy_stack):
     assert legacy_stack.runtime.requests == []
 
 
+def test_frozen_compose_migration_stops_only_owned_containers(legacy_stack):
+    files = ",".join(str(legacy_stack.root / name) for name in ("docker-compose.yml", "docker-compose.frozen.yml"))
+    for container in legacy_stack.runtime.containers.values():
+        container["Labels"][CONFIG_FILES_LABEL] = files
+        container["Config"]["Labels"][CONFIG_FILES_LABEL] = files
+    foreign = legacy_stack.runtime.add("catalog", name="foreign-catalog", labels={
+        WORKING_DIR_LABEL: str(legacy_stack.root.parent / "foreign"),
+    })
+    capture = legacy_server.capture_legacy_server(legacy_stack.settings, legacy_stack.record, legacy_stack.runtime)
+    legacy_server.stop_legacy_stack(capture, legacy_stack.runtime)
+    assert foreign["State"]["Running"] is True
+    assert all(not legacy_stack.runtime.containers[entry["id"]]["State"]["Running"] for entry in capture["containers"].values())
+
+
+@pytest.mark.parametrize("kind", ["outside", "prefix-sibling", "traversal", "symlink"])
+def test_capture_refuses_compose_override_outside_owned_root(legacy_stack, kind):
+    root = legacy_stack.root
+    if kind == "outside":
+        override = root.parent / "foreign.yml"
+    elif kind == "prefix-sibling":
+        override = root.with_name(root.name + "-foreign") / "override.yml"
+    elif kind == "traversal":
+        override = root / ".." / "foreign.yml"
+    else:
+        override = root / "override.yml"
+        override.symlink_to(root.parent / "foreign.yml")
+    files = str(root / "docker-compose.yml") + "," + str(override)
+    container = legacy_stack.runtime.by_name("portmap-catalog")
+    container["Labels"][CONFIG_FILES_LABEL] = files
+    container["Config"]["Labels"][CONFIG_FILES_LABEL] = files
+    with pytest.raises(PortmapError):
+        legacy_server.capture_legacy_server(legacy_stack.settings, legacy_stack.record, legacy_stack.runtime)
+    assert legacy_stack.runtime.requests == []
+
+
 @pytest.mark.parametrize("tamper", [
     {CONFIG_FILES_LABEL: "/etc/compose.yml"},
     {"portmap.gateway": "false"},

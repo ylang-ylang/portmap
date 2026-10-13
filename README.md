@@ -521,9 +521,12 @@ The installer retires only a positively identified legacy launcher, keeping
 old bundles available while their running workers are migrated. There is no
 `portmap-client` command alias. If a machine had a direct connection to its
 own hostname, disconnect that profile before enabling its local publishing
-role. Run `portmap up` to move the existing gateway to its private backend and
-controlled public ingress; existing project containers are not recreated by
-this operation.
+role. If legacy publishing is already active, `setup` also migrates that server
+after proving the shared private chain. Failure before the server commit
+restores the old stack. The commit is saved before old containers are removed;
+rerun `setup` to resume an interrupted retirement. Existing project containers
+are not recreated. Use `portmap up` separately when local publishing is not
+already enabled.
 
 ### Building and Hosting the Unified Package
 

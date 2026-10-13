@@ -114,8 +114,8 @@
   catalog produced distinct paths; both frozen executables still ran afterward
   and the served manifest matched the fa15 candidate checksum.
 - VM102 also completed two real immutable installs with both previous
-  executables remaining usable. The final relay-startup source suite passed
-  585 tests, with one integration test deselected, on VM101 as the ordinary user.
+  executables remaining usable. The final source suite passed 590 tests, with
+  one integration test deselected, on VM101 as the ordinary user.
 - VM102's private browser surface showed local publishing and two live SSH
   origins; host and container requests reached each expected business container.
   VM101's LAN surface exposed only its local projects, with imported registries
@@ -132,9 +132,20 @@
   Seeding desired relay endpoints before startup and checking saved readiness
   before live updates removed that initial reload dependency. The successful
   native handover proof exercised this fix from the frozen a1b69d4e candidate.
-- Server cutover rollback and interrupted legacy retirement/resume acceptance
-  are still required before final installed-upgrade acceptance and publication.
+- The real frozen legacy stack exposed a Compose ownership check against the
+  base configuration filename instead of its root directory. Capture now
+  accepts sibling frozen overrides while rejecting resolved paths outside the
+  recorded root; five regressions cover lifecycle ownership and path escapes.
+- Real server-stop interruption and rollback passed all 19 scenario and 10
+  final preservation checks with the 39ce756c candidate. The exact old service
+  IDs were restored, the v1 record and durable failed-stop receipt remained,
+  and the shared container chain, SSH master and business services stayed usable.
+- Interrupted retirement after the durable commit passed all 35 scenario and
+  10 final preservation checks. One explicit setup resume cleared the receipt
+  and removed exactly the three captured old service IDs; the new chain stayed
+  ready and the existing SSH master and business containers were preserved.
+  Final installed-upgrade acceptance remains required before publication.
 - Both VMs temporarily use the explicitly authorized NSS resolver integration.
   DNS server settings are unchanged; restoring original NSS/dependency state
-  is required after acceptance. Container release and full legacy migration
-  remain unclaimed.
+  is required after acceptance. Legacy migration scenarios are now verified;
+  final installed upgrades, scoped restoration, and publication remain open.
