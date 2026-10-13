@@ -144,8 +144,31 @@
   10 final preservation checks. One explicit setup resume cleared the receipt
   and removed exactly the three captured old service IDs; the new chain stayed
   ready and the existing SSH master and business containers were preserved.
-  Final installed-upgrade acceptance remains required before publication.
-- Both VMs temporarily use the explicitly authorized NSS resolver integration.
-  DNS server settings are unchanged; restoring original NSS/dependency state
-  is required after acceptance. Legacy migration scenarios are now verified;
-  final installed upgrades, scoped restoration, and publication remain open.
+- Final source suite: 590 passed, one integration test deselected; real Docker
+  and rootless Podman scenarios were exercised separately on PVE VM101/102.
+- Both VMs installed the accepted 39ce756c archive from the actual catalog
+  download API into new immutable prefixes. Earlier prefixes and their assets
+  remained intact and executable. Installed CLI/agent activation, setup/up,
+  custom-configuration-preserving init, host/container DNS and HTTP, real
+  registry contents and two SSH origins passed. These are three logical
+  origins on two physical VMs, not a three-machine claim.
+- Installed down preserved private access and remote routing while removing
+  local publication. Teardown removed exactly the owned infrastructure,
+  ingress and DNS integration while preserving business containers and a
+  content-checked volume. Default port 80 was then exercised with setup plus
+  explicit up, followed by IPv6 LAN publication; remote catalogs and connection
+  controls remained private and DNS ports were not exposed on the LAN.
+- Scoped cleanup completed on both VMs after acceptance. Captured demo/core
+  containers, QA networks and volume witnesses, private ingress/DNS resources,
+  SSH/PAM fixtures, private Podman stores and exact QA/runtime directories were
+  removed only after ownership checks and external receipt archival. Shared or
+  ambiguously owned Docker image caches were retained rather than pruned.
+- Original NSS bytes and the added libnss-resolve dependency's config-files
+  state were restored. Original business semantics, network presence/absence,
+  physical/global DNS, unrelated services, user paths and linger state all
+  matched their preservation guards. VM101 and VM102 remained running with
+  4096 MiB each; neither the notebook nor production was used for this matrix.
+- V0.12 uses the accepted 8,020,183-byte Linux amd64 archive, SHA-256
+  `39ce756cf6c0b21753edb4dabe06081263e0b51bd0adc66622c98b78f1c827c0`.
+  README, architecture notes and source release metadata describe the unified
+  runtime and installer prerequisites; no post-acceptance product code changed.
