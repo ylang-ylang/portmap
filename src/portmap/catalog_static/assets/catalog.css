@@ -20,6 +20,14 @@ main {
   margin-bottom: 18px;
 }
 
+.page-panel[hidden] {
+  display: none;
+}
+
+.settings-panel > .utility-panel:first-child {
+  margin-top: 0;
+}
+
 h1 {
   margin: 0 0 4px;
   font-size: 24px;
@@ -924,6 +932,10 @@ pre {
   cursor: pointer;
   white-space: nowrap;
   line-height: 1.2;
+}
+
+.machine-tab-settings {
+  margin-left: auto;
 }
 
 .machine-tab:focus {

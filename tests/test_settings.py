@@ -81,12 +81,16 @@ def _listen_unix(path: Path):
 def test_resolve_runtime_auto_probes_live_docker_socket(tmp_path: Path, monkeypatch) -> None:
     docker_socket = tmp_path / "docker.sock"
     server = _listen_unix(docker_socket)
+    podman_socket = tmp_path / "podman.sock"
+    podman_server = _listen_unix(podman_socket)
     monkeypatch.setattr("portmap.settings.DEFAULT_DOCKER_SOCKET", str(docker_socket))
+    monkeypatch.setattr("portmap.settings.DEFAULT_PODMAN_SOCKET", str(podman_socket))
     try:
-        name, socket_path = resolve_runtime({}, {})
+        name, socket_path = resolve_runtime({"XDG_RUNTIME_DIR": str(tmp_path)}, {})
         assert (name, socket_path) == ("docker", str(docker_socket))
     finally:
         server.close()
+        podman_server.close()
 
 
 def test_resolve_runtime_auto_ignores_stale_docker_socket(tmp_path: Path, monkeypatch) -> None:
@@ -97,7 +101,7 @@ def test_resolve_runtime_auto_ignores_stale_docker_socket(tmp_path: Path, monkey
     monkeypatch.setattr("portmap.settings.DEFAULT_DOCKER_SOCKET", str(stale_docker))
     monkeypatch.setattr("portmap.settings.DEFAULT_PODMAN_SOCKET", str(podman_socket))
     try:
-        name, socket_path = resolve_runtime({}, {})
+        name, socket_path = resolve_runtime({"XDG_RUNTIME_DIR": str(tmp_path)}, {})
         assert (name, socket_path) == ("podman", str(podman_socket))
     finally:
         server.close()
@@ -106,7 +110,7 @@ def test_resolve_runtime_auto_ignores_stale_docker_socket(tmp_path: Path, monkey
 def test_resolve_runtime_auto_defaults_to_docker(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("portmap.settings.DEFAULT_DOCKER_SOCKET", str(tmp_path / "missing.sock"))
     monkeypatch.setattr("portmap.settings.DEFAULT_PODMAN_SOCKET", str(tmp_path / "missing-podman.sock"))
-    name, socket_path = resolve_runtime({}, {})
+    name, socket_path = resolve_runtime({"XDG_RUNTIME_DIR": str(tmp_path)}, {})
     assert name == "docker"
 
 

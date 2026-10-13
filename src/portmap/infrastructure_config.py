@@ -103,7 +103,12 @@ def compose_config(state: dict[str, Any], runtime: ContainerRuntime) -> dict[str
     else:
         catalog_command = ["python", "-m", "portmap.catalog"]
         catalog_environment["PYTHONPATH"] = "/workspace/pythonpath"
-        catalog_volumes.append({"type": "bind", "source": str(pythonpath_dir()), "target": "/workspace/pythonpath", "read_only": True})
+        source = pythonpath_dir()
+        identity = source.stat()
+        # A reinstall may replace this directory without changing its path.
+        # Compose must remount the new object before the old keg is removed.
+        catalog_environment["PORTMAP_SOURCE_GENERATION"] = f"{identity.st_dev}:{identity.st_ino}"
+        catalog_volumes.append({"type": "bind", "source": str(source), "target": "/workspace/pythonpath", "read_only": True})
     services["catalog"].update({"command": catalog_command, "user": runtime.file_user, "environment": catalog_environment, "volumes": catalog_volumes, "tmpfs": ["/tmp"]})
     if not runtime.rootless:
         services["catalog"]["group_add"] = [str(Path(runtime.socket_path).stat().st_gid)]

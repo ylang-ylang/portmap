@@ -339,6 +339,9 @@ def _start_agent(settings: PortmapSettings, *, use_sudo: bool, access_state_dir:
             if current.pid is None or health.get("pid") != current.pid or _owned_agent_identity(settings, current.pid) is None:
                 raise PortmapError("agent health does not match the owned process identity")
             return current
+    # Establish the new worker's lifetime before retiring a working version.
+    ensure_persistent_scope(use_sudo=use_sudo)
+    if current.running:
         stopped = _stop_agent(settings)
         if stopped.running:
             raise PortmapError(stopped.message)
@@ -359,8 +362,6 @@ def _start_agent(settings: PortmapSettings, *, use_sudo: bool, access_state_dir:
         else [sys.executable, "-m", "portmap.agent", "serve"]
     )
     command += ["--socket", str(settings.agent_socket), "--pid-file", str(settings.agent_pid_file)]
-    # The agent serves later CLI calls; it must outlive this login session.
-    ensure_persistent_scope(use_sudo=use_sudo)
     with log_file.open("ab") as log:
         process = subprocess.Popen(
             command,
