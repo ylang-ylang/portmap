@@ -172,3 +172,5 @@
   `39ce756cf6c0b21753edb4dabe06081263e0b51bd0adc66622c98b78f1c827c0`.
   README, architecture notes and source release metadata describe the unified
   runtime and installer prerequisites; no post-acceptance product code changed.
+- Prepare the required dev/main release ledgers on this feature branch before
+  protected integration; no direct development commits on dev or main.
