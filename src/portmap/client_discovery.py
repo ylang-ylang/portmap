@@ -232,7 +232,7 @@ def _bounded_probe(operation: Callable[[], GatewayInfo], deadline: _ProbeDeadlin
     raise PortmapError("gateway probe failed; check the target address and local network configuration") from value
 
 
-def _request_catalog(host: str, port: int, scheme: str, address: tuple, deadline: _ProbeDeadline, *, connect_timeout: float | None = None) -> bytes:
+def _request_catalog(host: str, port: int, scheme: str, address: tuple, deadline: _ProbeDeadline, *, connect_timeout: float | None = None, http_host: str | None = None) -> bytes:
     family, sockaddr = address
     sock = socket.socket(family, socket.SOCK_STREAM)
     deadline.track(sock)
@@ -241,7 +241,7 @@ def _request_catalog(host: str, port: int, scheme: str, address: tuple, deadline
     response = None
     try:
         sock.settimeout(min(deadline.remaining(), connect_timeout) if connect_timeout is not None else deadline.remaining())
-        sock.connect((sockaddr[0], port, *sockaddr[2:]))
+        sock.connect(sockaddr if family == socket.AF_UNIX else (sockaddr[0], port, *sockaddr[2:]))
         if scheme == "https":
             context = ssl.create_default_context()
             sock = context.wrap_socket(sock, server_hostname=host, do_handshake_on_connect=False)
@@ -250,7 +250,8 @@ def _request_catalog(host: str, port: int, scheme: str, address: tuple, deadline
             sock.settimeout(deadline.remaining())
             sock.do_handshake()
         sock.settimeout(deadline.remaining())
-        authority = f"[{host}]" if ":" in host else host
+        name = http_host or host
+        authority = f"[{name}]" if ":" in name else name
         connection.request("GET", "/registry.json", headers={"Host": f"{authority}:{port}", "Accept": "application/json", "Accept-Encoding": "identity", "Connection": "close"})
         sock.settimeout(deadline.remaining())
         response = connection.getresponse()
@@ -290,7 +291,7 @@ def _request_catalog(host: str, port: int, scheme: str, address: tuple, deadline
         sock.close()
 
 
-def probe_gateway(target: str, *, timeout: float = 3, expected_domain: str | None = None) -> GatewayInfo:
+def probe_gateway(target: str, *, timeout: float = 3, expected_domain: str | None = None, http_host: str | None = None) -> GatewayInfo:
     """Probe one requested origin without proxies, redirects, or advertised-IP routing.
 
     Unqualified targets use the unified default HTTP port 80, so IP, IP:80,
@@ -303,6 +304,7 @@ def probe_gateway(target: str, *, timeout: float = 3, expected_domain: str | Non
     timeout = _timeout(timeout)
     host, ports, scheme = _gateway_target(target)
     expected = _domain(expected_domain, field="expected_domain") if expected_domain is not None else None
+    header_host = _host(http_host) if http_host is not None else None
     deadline = _ProbeDeadline(timeout)
 
     def probe() -> GatewayInfo:
@@ -329,7 +331,7 @@ def probe_gateway(target: str, *, timeout: float = 3, expected_domain: str | Non
                 try:
                     connect_budget = deadline.remaining() / attempts_left
                     attempts_left -= 1
-                    payload = _request_catalog(host, port, scheme, address, deadline, connect_timeout=connect_budget)
+                    payload = _request_catalog(host, port, scheme, address, deadline, connect_timeout=connect_budget, http_host=header_host)
                     catalog, domain, http_port = _catalog(payload, expected)
                 except ssl.SSLCertVerificationError as exc:
                     errors.append(f"port {port}: TLS certificate verification failed; use a hostname matching a trusted certificate")
@@ -341,6 +343,24 @@ def probe_gateway(target: str, *, timeout: float = 3, expected_domain: str | Non
                     authority = f"[{host}]" if ":" in host else host
                     return GatewayInfo(domain, http_port, address[1][0], scheme, catalog, f"{scheme}://{authority}:{port}/registry.json")
         raise PortmapError("no portmap gateway found: " + "; ".join(dict.fromkeys(errors)))
+
+    return _bounded_probe(probe, deadline)
+
+
+def probe_gateway_socket(socket_path: str | Path, *, timeout: float = 5, expected_domain: str | None = None) -> GatewayInfo:
+    """Probe the real remote catalog over an owned OpenSSH stream-local forward."""
+    path = Path(socket_path)
+    if not path.is_absolute():
+        raise PortmapError("SSH HTTP socket path must be absolute")
+    expected = _domain(expected_domain, field="expected_domain") if expected_domain is not None else None
+    deadline = _ProbeDeadline(_timeout(timeout))
+
+    def probe() -> GatewayInfo:
+        # localhost deliberately selects the remote machine's own portal,
+        # rather than a remote machine selected by its private navigation UI.
+        payload = _request_catalog("localhost", 80, "http", (socket.AF_UNIX, str(path)), deadline)
+        catalog, domain, port = _catalog(payload, expected)
+        return GatewayInfo(domain, port, "127.0.0.1", "http", catalog, f"http://{domain}:{port}/registry.json")
 
     return _bounded_probe(probe, deadline)
 

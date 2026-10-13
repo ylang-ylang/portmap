@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from portmap import client_discovery, server as local_server
+from portmap import client_discovery
 from portmap.client_discovery import discover_ssh_hosts, discover_targets, probe_gateway, resolve_ssh_host
 from portmap.errors import PortmapError
 
@@ -86,13 +86,6 @@ def test_probe_pins_requested_address_and_ignores_proxy_environment(catalog, ser
     assert requests == ["/registry.json"]
 
 
-def test_local_readiness_accepts_catalog_worktree_latency(catalog, serve_catalog):
-    # Worktree discovery can take more than one second on a populated host.
-    # The fixture delays the body for two seconds, within the normal probe budget.
-    url, _ = serve_catalog(catalog, release=threading.Event())
-    port = int(url.rsplit(":", 1)[1])
-
-    assert local_server._ready(port, "work.portmap") is True
 
 
 @pytest.mark.parametrize("target", [
@@ -218,7 +211,7 @@ def test_eof_terminated_catalog_does_not_touch_closed_socket(catalog, serve_cata
 def test_bare_targets_probe_only_the_default_http_port(catalog, monkeypatch):
     attempted = []
 
-    def request(host, port, scheme, address, deadline, *, connect_timeout=None):
+    def request(host, port, scheme, address, deadline, *, connect_timeout=None, http_host=None):
         attempted.append(port)
         return json.dumps(catalog).encode()
 
@@ -235,7 +228,7 @@ def test_bare_target_never_falls_back_to_explicit_non_default_ports(catalog, ser
     non_default, _ = serve_catalog(catalog)
     port = int(non_default.rsplit(":", 1)[1])
 
-    def request(host, probed, scheme, address, deadline, *, connect_timeout=None):
+    def request(host, probed, scheme, address, deadline, *, connect_timeout=None, http_host=None):
         if probed != port:
             raise ConnectionRefusedError()
         return json.dumps(catalog).encode()

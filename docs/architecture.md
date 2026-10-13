@@ -5,17 +5,14 @@ docker-compose projects. It does not proxy traffic itself. It translates
 project/branch rules into Docker Compose overlays, Traefik HTTP labels, Docker
 direct port mappings, and a local CLI-queryable endpoint registry.
 
-The default runtime shape is a host-side agent plus a shared gateway hosted by
-the `portmap` tooling, not by each managed project. The host agent handles
-host-only concerns such as Git worktree scanning and host-side compose starts.
-It should stay small and integration-friendly: another local service can host
-it, call it, or vendor it as a submodule without inheriting the full gateway UI.
-The gateway runs Traefik for HTTP routing, CoreDNS for wildcard debug-domain
-resolution, and the catalog UI. Managed project services with HTTP endpoints
-join the shared Docker bridge network `portmap_gateway` through a generated
-compose override. Raw TCP/UDP/range endpoints use direct Docker port mappings
-and do not need the gateway network unless the same service also has an HTTP
-endpoint.
+The runtime is one shared container stack plus a small ordinary-user host
+agent. CoreDNS, Traefik, the catalog, and an SSH Unix-socket relay run in
+containers, including on remote-only clients. The host retains the CLI,
+worktree/Compose agent, OpenSSH workers, and narrowly scoped DNS/ingress
+integration. There is no native DNS or HTTP fallback.
+Every managed service consuming Portmap DNS joins the gateway bridge through
+the generated Compose override. HTTP routes use Traefik; raw TCP/UDP/ranges
+still use direct runtime port mappings, not the HTTP gateway.
 
 ## Container Runtime Abstraction
 
@@ -23,46 +20,48 @@ endpoint.
 selected by `[runtime] backend` in `portmap.toml` (`auto` by default) or
 `PORTMAP_RUNTIME` / `PORTMAP_RUNTIME_SOCKET`.
 
-The abstraction is a single seam: the runtime's API socket. All compose
-inspection and container lifecycle operations go through the docker
-compose CLI pointed at the resolved socket via `DOCKER_HOST`, and the
-gateway mounts that socket into Traefik and the catalog at the fixed
-in-container path `/var/run/docker.sock`. The docker compose CLI remains
-the client on Podman hosts because it preserves generated-override
-semantics (`!reset`, label merge, external networks) that
+The common seam is the runtime API socket. The controller uses it for
+resource inspection and ownership-checked operations; Docker Compose applies
+the generated stack with `DOCKER_HOST` pointing at the same endpoint.
+Traefik and the catalog mount that socket at `/var/run/docker.sock`.
+Docker Compose remains the client on Podman hosts because it preserves
+generated-override semantics (`!reset`, label merge, external networks) that
 `podman-compose` does not.
 
-Auto-detection probes **live** sockets: an explicit `DOCKER_HOST`, then
-`/var/run/docker.sock`, then `/run/podman/podman.sock`, then
-`$XDG_RUNTIME_DIR/podman/podman.sock`. A socket path only counts when it
-accepts a connection, so stale files from a stopped daemon are ignored.
+Auto-detection respects an explicit `DOCKER_HOST`, then probes a live Docker
+socket, then rootless Podman (`$XDG_RUNTIME_DIR/podman/podman.sock`, defaulting
+to `/run/user/<uid>/podman/podman.sock`), then the rootful Podman socket.
+Explicit backend/socket configuration takes precedence. Infrastructure requires
+a local Unix socket; remote machine access goes through direct or SSH profiles.
 
-The takeover shim resolves the runtime identically and doubles as
-Podman's compose provider: Podman's provider search path includes
-`$HOME/.docker/cli-plugins/docker-compose`, so the same user-level file
-shadows both `docker compose` and `podman compose` invocations.
+The takeover shim sends managed projects through the unified CLI and doubles
+as Podman's Compose provider: its provider search includes
+`$HOME/.docker/cli-plugins/docker-compose`.
 
-What does NOT change across runtimes: the planner, port allocation,
-endpoint model, Traefik/CoreDNS data plane, generated labels, and the
-catalog's label-derived registry. Rootless Podman is reachable through
-the same socket discovery but requires host sysctl tuning for the
-gateway's privileged ports; it was not part of the verification spike
-([podman-spike.md](podman-spike.md)).
+The planner, endpoint model, labels, DNS/route generation, ownership and
+rollback rules are shared. Compatibility APIs are not treated as equivalent
+networking or privilege behavior: the controller reads Podman's native
+rootless flag and maps container file ownership accordingly. Rootless
+containers use unprivileged host bindings; restricted systemd sockets own
+HTTP 80. No low-port sysctl, binary capabilities, linger or logind policy change
+is part of setup. [podman-spike.md](podman-spike.md) is historical evidence,
+not acceptance evidence for the current rootless implementation.
 
 ## Unified Local and Remote Access
 
 The public executable is `portmap`. Local publishing and remote access are
-optional roles of the same command, not separate server/client installations.
-The frozen one-directory bundle includes Python, native CoreDNS/Traefik,
-server/client modules, the host agent, gateway/demo/scaffold assets, and the
-frontend. Client-only commands do not require a container runtime.
+optional roles of the same command, not separate installations. The frozen
+one-directory bundle includes Python, the CLI/agent, access and publishing
+modules, infrastructure/demo/scaffold assets, and frontend. It does not contain
+host CoreDNS or Traefik executables. Setup always requires a working runtime
+and Docker Compose; merely installing the command starts nothing.
 
-The frozen executable re-executes itself for catalog-view and host-agent
-workers. Native/OS subprocesses receive an environment without bundle-specific
-dynamic-library search paths. The shared state root is
+The frozen executable re-executes itself for the host agent and inside the
+catalog container. Native/OS subprocesses receive an environment without
+bundle-specific dynamic-library paths. The shared state root is
 `$XDG_STATE_HOME/portmap` (default `~/.local/state/portmap`); `client/` contains
-access ownership, profiles and resolver state, while `server/` records local
-publishing ownership and the effective runtime settings.
+profiles, desired connection configuration, resolver and infrastructure
+ownership, while `server/` records the optional local publishing role.
 
 Exactly two remote transports are supported: direct IP reachability,
 including existing LAN/Tailscale routing, and ordinary OpenSSH forwarding.
@@ -81,27 +80,29 @@ An empty profile set, direct-only access and the last disconnect retain this
 entry. Only explicit teardown releases it, after local publishing has stopped.
 Setup neither starts application projects nor enables LAN ingress or boot units.
 
-SSH and local profiles resolve to loopback and share one public local HTTP
-port, default 80. Each SSH remote has its own private high-port forward.
-Native Traefik routes by HTTP Host; HTTP does not use TLS SNI.
+SSH and local host profiles resolve to loopback and share private HTTP port 80.
+Each SSH remote has a private host Unix-socket forward mounted read-only into
+the container relay. Container clients resolve those zones to Traefik's bridge
+address instead of unusable host loopback. Routing uses HTTP Host, not TLS SNI.
 
 ```mermaid
 flowchart LR
-  Browser[Workstation browser] --> Direct[Direct remote IP and HTTP port]
-  Browser --> Private[127.0.0.1:80 socket]
-  Private --> Native[Native Traefik: private high port]
-  Native --> SSH1[Private SSH forward 1]
-  Native --> SSH2[Private SSH forward 2]
-  Native --> Backend[Local container gateway: loopback high port]
-  LAN[LAN client] --> Public[LAN IP:80 socket]
-  Public --> Backend
-  SSH1 --> Remote1[Remote gateway 1]
-  SSH2 --> Remote2[Remote gateway 2]
-  Backend --> Projects[Local project containers and catalog]
+  Browser[Host browser] --> Direct[Verified direct remote IP]
+  Browser --> Private[127.0.0.1:80 system socket]
+  Private --> Access[Traefik access entrypoint]
+  Access --> Relay[Container Unix-socket relay]
+  Relay --> SSH[Ordinary-user host SSH forwards]
+  SSH --> Remotes[Remote HTTP gateways]
+  Access --> PrivateCatalog[Private catalog and machine controls]
+  Access --> Web[Same Traefik: local web entrypoint]
+  LAN[LAN client] --> Public[Exact LAN IP:80 system socket]
+  Public --> Web
+  Web --> Projects[Managed local projects]
+  Web --> Catalog[Catalog: private self-hop or public local-only scope]
 ```
 
-The public LAN ingress never targets the native private-access gateway.
-Enabling local publishing cannot expose SSH routes to other LAN clients.
+The LAN ingress never targets the private access entrypoint. The public
+catalog does not serve imported machines, connection controls, or SSH names.
 Systemd binds only the exact requested addresses; DynamicUser
 `systemd-socket-proxyd` services with empty capabilities forward to fixed
 loopback targets. Unit changes use explicit sudo operations, not root
@@ -109,32 +110,48 @@ execution of user-writable portmap code. No sudoers, global low-port sysctl,
 binary capabilities, or boot enablement are added. Conflicting listeners cause
 an error, never a silent high-port fallback or a foreign-process shutdown.
 
-The private native-backend forwarder uses a loopback-only cgroup IP policy
-where the kernel supports it. The public container-backend forwarder does not:
-Podman can DNAT the fixed loopback destination to a container bridge address,
-which that policy would silently drop. Its exact listening address, fixed
-target, DynamicUser and empty capability sets still apply.
+Both HTTP backends are container-published loopback ports. Rootless Podman can
+DNAT them to bridge addresses, so the forwarders do not impose a loopback-only
+cgroup IP filter that would silently drop legitimate traffic. Exact socket
+addresses, fixed targets, DynamicUser and empty capability sets still apply.
 
-CoreDNS serves only registered hostname zones. Linux setup creates an owned
-dummy interface for `~portmap`, using `169.254.254.53:1053`; this also avoids
-systemd-resolved 249's per-link loopback-server limitation. Physical/global
-resolver configuration is unchanged. Dormant SSH profiles have no active DNS
-mapping until restoration succeeds.
+CoreDNS separates host, container and legacy-public views. Linux setup creates
+an owned dummy interface and a systemd-resolved `~portmap` route using
+`169.254.254.53:1053`. Project containers use the fixed CoreDNS bridge address
+at port 53; their SSH/local answers point at Traefik's bridge address.
+An existing legacy-public DNS view is preserved independently and never
+inherits private SSH routes. Physical/global DNS settings are unchanged.
+Applications must already reach systemd-resolved through NSS or its stub;
+Portmap neither edits `/etc/nsswitch.conf` nor `/etc/resolv.conf`.
+Dormant SSH profiles have no active DNS mapping until restoration succeeds.
 
-For SSH, the apex catalog projects client-visible URLs, while `/actions/*`
-passes through to the remote catalog. Application subdomains preserve Host
-and their own `/registry.json` is not intercepted. Local-domain catalogs and
-actions pass directly to the local backend, including the private bare-IP
-fallback; they are not replaced with a read-only remote view.
+The private catalog selects local or remote machines explicitly. Remote
+registries are fetched through the selected transport and projected into
+client-visible links; `/actions/*` targets that same machine. Unknown or
+unavailable selections fail rather than falling back to local. Application
+subdomains preserve Host and do not have `/registry.json` intercepted.
+Connection mutations require a same-origin JSON request, including a matching
+HTTP port; the public catalog cannot invoke them.
 
 Connection state is private, serialized and atomically published. Failed
 connect publication restores previous routes and removes the newly owned
 tunnel. Disconnect leaves remote containers untouched. Stopping local
 publishing preserves remote access; teardown refuses while local publishing
-is active. Default-state setup can import the old `portmap-client` layout,
-stopping only verified legacy workers and retaining saved targets/configuration.
-Each stale SSH profile gets one explicit restoration attempt; failures are
-reported without inventing a replacement identity.
+is active. Default-state setup can import the old `portmap-client` layout.
+Both imported and in-place native profiles preserve a verified live SSH master:
+the Unix HTTP forward and published route are proved before the exact old HTTP
+forward is cancelled. Saved authentication, custom remote ports and raw TCP
+forwards remain intact. Dead masters receive one explicit restoration attempt;
+failures are reported without inventing a replacement identity.
+
+Relay startup renders the desired private Unix-socket endpoints before HAProxy
+loads its first worker; startup does not depend on an early reload signal.
+Recreated infrastructure must load its saved revision before a live update.
+DNS and public HTTP publication remain gated on the desired revision.
+A native worker holding the requested private HTTP port is released only after
+the replacement route is proved. Its captured command and paired ownership
+records are restored on a pre-commit interruption; unrelated listeners remain
+outside the transaction.
 
 Distribution uses `/api/downloads`, `/install.sh`, and
 `/downloads/portmap/<filename>`. The Web offers standalone download/installation
@@ -217,33 +234,34 @@ Caddy when Traefik is the default.
 portmap up
 ```
 
-Local publishing needs a local Docker/Podman socket and Docker Compose CLI.
-The host agent scans Git worktrees and handles host-side Compose operations.
-Container-network Traefik, CoreDNS and the catalog retain direct access to the
-runtime's project network, including rootless Podman networking.
+Local publishing uses the already prepared container stack and host agent.
+The agent scans Git worktrees and performs host-side Compose operations;
+Traefik, CoreDNS and the catalog retain gateway-network access on both Docker
+and rootless Podman.
 
-The container gateway publishes only a loopback high HTTP port. Its catalog
-listens on container port 8081 with no separate host publication. Traefik's
-``HostRegexp(`.+`)`` fallback has explicit priority 1, below service Host
-routes, so bare IPs and unmatched Hosts reach the local catalog. The
-`portmap.gateway=true` label keeps infrastructure out of the project list and
-project lifecycle controls.
+The gateway publishes three distinct loopback high ports: private access,
+local web, and management/readiness. The catalog's private/public listeners
+have no independent host publication. On the web entrypoint, application Host
+routes outrank catalog fallbacks. A private self-hop from Traefik's own
+container loopback selects the private catalog; public ingress cannot supply
+that TCP source address. Other web traffic selects the local-only public
+catalog. The `portmap.gateway=true` label excludes infrastructure from project
+lists and lifecycle controls.
 
-The public HTTP port is separately advertised in endpoint metadata. The
-native private-access gateway receives a local profile pointing at this
-backend; the public LAN socket independently targets the same backend.
-`http_bind = "0.0.0.0"` selects the detected LAN IPv4 address, not a wildcard
-listener. Loopback-only configuration creates no public ingress.
-There is no separate catalog-port configuration or single-port overlay.
+The public HTTP port is advertised separately from these backend ports.
+Only an explicit non-loopback IPv4/IPv6 `http_bind` creates LAN ingress;
+wildcards and loopback-only configuration create none. The LAN socket targets
+the web backend, never the private access backend.
 
 `server/instance.json` records uid, effective settings, backend port and
-access-state directory under a lock. Stop uses those saved settings, not
-newly changed environment values. Up validates configuration, sets up the
-access resolver, starts the agent/backend, publishes the local profile and
-public ingress, and commits ownership. Failed first startup cleans new owned
-resources; existing publishing state remains recoverable.
-Down removes only that local role, public ingress, backend and agent.
-SSH/direct profiles and the prepared private HTTP ingress survive.
+access-state directory under a lock. Stop uses saved settings, not a changed
+shell environment. Up prepares/reuses infrastructure, publishes the local
+role and optional LAN ingress, then commits ownership. A failed first startup
+cleans only newly owned resources; existing publishing state stays recoverable.
+Down removes the local role and public ingress, not the shared stack or agent.
+SSH/direct profiles and private HTTP/DNS survive. Teardown releases access
+infrastructure only after local publishing has stopped, and retains networks
+still consumed by business containers.
 
 Background portmap workers inherit the invoking CLI user's credentials;
 scope creation does not elevate them or enable boot services. On Linux, when that process sits in
@@ -256,23 +274,28 @@ not restart or rescue workers that an earlier version left running. They must
 stop and start again before the new lifetime rule applies; an idempotent
 setup, up, connect, or agent start may reuse a running worker.
 
-Source/Brew catalog containers import the packaged Python modules. Frozen
-mode adds `docker-compose.frozen.yml`, mounting the complete bundle read-only
-and running `portmap _serve-server-catalog` inside a glibc-compatible catalog
-image. Frozen agent workers re-execute the unified executable rather than
-assuming an external Python interpreter.
+Source/Brew catalog containers mount packaged Python modules read-only.
+Frozen mode uses the same generated Compose model, mounting the complete
+bundle read-only and executing `portmap _serve-catalog` in a compatible image.
+Host agent workers re-execute that executable rather than assuming an external
+Python installation. There is no alternate frozen Compose stack.
 
-DNS and raw TCP/UDP/range endpoints remain separate from HTTP. Unified access
-does not need remote port 53. Rootless runtimes can use an unprivileged
-server DNS port without lowering the host's low-port threshold. Existing
-project containers keep their endpoint labels until their generated override
-is refreshed; the gateway cutover does not recreate those projects.
+DNS and raw TCP/UDP/ranges remain separate from HTTP; unified access needs no
+remote port 53. Existing business containers, their endpoint labels and DNS
+addresses survive migration. Generated overrides change only when the project
+is explicitly regenerated; infrastructure cutover does not recreate projects.
 
-The gateway compose creates the named Docker network:
+The controller creates or validates the shared bridge network (default):
 
 ```text
 portmap_gateway
 ```
+
+Newly owned bridges enable IPv4 and IPv6 through the runtime's native IPAM.
+Existing bridges retain their configuration and consumers. An IPv6 direct
+profile requires an IPv6-enabled bridge before routes or DNS are published;
+the controller does not rebuild an existing IPv4-only network behind running
+projects. Direct traffic remains native IP traffic, not a relay workaround.
 
 Generated project overrides declare that network as external and attach managed
 services to it:
@@ -297,10 +320,11 @@ This keeps Traefik out of individual project compose files while still allowing
 Traefik to reach Docker bridge services without per-service host port mappings.
 
 Workstations use `portmap setup` and `portmap connect`, not physical-interface
-DNS rewrites or per-endpoint hosts entries. The separately exposed server DNS
-listener is for explicit DNS/container consumers, not the unified client
-transport. The advanced `portmap dns set/unset` drop-in utility is independent
-of the access resolver and is not invoked by setup.
+DNS rewrites or per-endpoint hosts entries. Containers use the shared bridge
+DNS address. A migrated server's existing external DNS binding is preserved
+only for its prior consumers, not for the unified client transport.
+The advanced `portmap dns set/unset` drop-in utility is independent of the
+access resolver and is not invoked by setup.
 
 ## Endpoint Classes
 
@@ -349,18 +373,20 @@ container_port = 19333
 upstream_host = "127.0.0.1:19333"
 ```
 
-Example generated labels:
+Internal router, service, and middleware names include the repository ID,
+branch, and worktree identity so equally named projects do not collide in
+Traefik. Public hostnames keep their human-readable names. Example labels:
 
 ```yaml
 services:
   frontend:
     labels:
       - traefik.enable=true
-      - traefik.http.routers.comap-feat-a-frontend.rule=Host(`frontend.feat-a.comap.debug.lan`)
-      - traefik.http.routers.comap-feat-a-frontend.entrypoints=web
-      - traefik.http.services.comap-feat-a-frontend.loadbalancer.server.port=5173
-      - traefik.http.routers.comap-feat-a-frontend.middlewares=comap-feat-a-frontend-host
-      - traefik.http.middlewares.comap-feat-a-frontend-host.headers.customrequestheaders.Host=127.0.0.1:5173
+      - traefik.http.routers.c8120ac634d1-feat-a-e19f736c-frontend.rule=Host(`frontend.feat-a.comap.debug.lan`)
+      - traefik.http.routers.c8120ac634d1-feat-a-e19f736c-frontend.entrypoints=web
+      - traefik.http.services.c8120ac634d1-feat-a-e19f736c-frontend.loadbalancer.server.port=5173
+      - traefik.http.routers.c8120ac634d1-feat-a-e19f736c-frontend.middlewares=c8120ac634d1-feat-a-e19f736c-frontend-host
+      - traefik.http.middlewares.c8120ac634d1-feat-a-e19f736c-frontend-host.headers.customrequestheaders.Host=127.0.0.1:5173
       - traefik.docker.network=portmap_gateway
 ```
 

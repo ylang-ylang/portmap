@@ -101,6 +101,8 @@ def start_tunnel(
             "ForwardX11=no",
             "GatewayPorts=no",
             "ExitOnForwardFailure=yes",
+            "StreamLocalBindUnlink=no",
+            "StreamLocalBindMask=0177",
             "ConnectionAttempts=1",
             f"ConnectTimeout={max(1, min(math.ceil(timeout), 2147483647))}",
         ):
@@ -175,6 +177,116 @@ def cancel_forward(
 ) -> None:
     """Cancel a listener using exactly the endpoint tuple used to create it."""
     _forward(tunnel, "cancel", local_address, local_port, remote_address, remote_port, timeout)
+
+
+def http_socket_dir(state_dir: Path) -> Path:
+    """One short, private directory mount, shared only with the owned relay."""
+    state = str(state_dir.expanduser().resolve())
+    identity = {"version": 1, "uid": os.getuid(), "state_dir": state}
+    name = f"portmap-http-{os.getuid()}-{hashlib.sha256(state.encode()).hexdigest()[:16]}"
+    directory = Path("/tmp").resolve() / name
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        created = False
+    else:
+        created = True
+    metadata = directory.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise PortmapError("HTTP socket directory is not private or owned by this user")
+    record = directory / "owner.json"
+    if created:
+        with os.fdopen(os.open(record, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
+            json.dump(identity, handle)
+    if _http_record(record) != identity:
+        raise PortmapError("HTTP socket directory ownership does not match this state directory")
+    return directory
+
+
+def _http_record(path: Path) -> dict:
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
+            metadata = os.fstat(handle.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise PortmapError("HTTP forward ownership record is not private")
+            record = json.loads(handle.read(4097))
+        if not isinstance(record, dict):
+            raise ValueError("expected an object")
+        return record
+    except (OSError, ValueError) as exc:
+        raise PortmapError(f"cannot verify HTTP forward ownership: {exc}") from exc
+
+
+def _http_identity(tunnel: Mapping[str, object], remote_port: int) -> dict:
+    return {"version": 1, "owner_token": tunnel["owner_token"], "controlpath": tunnel["controlpath"], "remote_port": _port(remote_port)}
+
+
+def add_http_forward(
+    tunnel: Mapping[str, object], *, state_dir: Path, domain: str, remote_port: int, timeout: float = 5,
+) -> str:
+    """Forward an owned Unix socket to the remote gateway, never a LAN address."""
+    if _owned_runtime(tunnel) is None:
+        raise PortmapError("SSH tunnel is no longer present")
+    directory = http_socket_dir(state_dir)
+    name = hashlib.sha256(f"{domain}:{tunnel['owner_token']}".encode()).hexdigest()[:24]
+    path, record_path = directory / f"{name}.sock", directory / f"{name}.json"
+    identity = _http_identity(tunnel, remote_port)
+    try:
+        fd = os.open(record_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        if _http_record(record_path) != identity:
+            raise PortmapError("refusing to replace another SSH HTTP forward")
+    else:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(identity, handle)
+    try:
+        if path.exists() or path.is_symlink():
+            metadata = path.lstat()
+            if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise PortmapError("HTTP forward path is not an owned Unix socket")
+        specification = f"{path}:127.0.0.1:{_port(remote_port)}"
+        status, detail = _control(tunnel, "forward", timeout=_timeout(timeout), specification=specification)
+        if status:
+            raise PortmapError(_failure(tunnel, "SSH Unix-socket forward failed", detail))
+        metadata = path.lstat()
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise PortmapError("SSH did not create a private owned HTTP socket")
+    except BaseException as exc:
+        try:
+            cancel_http_forward(tunnel, socket_path=str(path), remote_port=remote_port, timeout=timeout)
+        except PortmapError as cleanup:
+            raise PortmapError(f"{exc}; HTTP forward cleanup needs attention: {cleanup}") from exc
+        raise
+    return str(path)
+
+
+def cancel_http_forward(
+    tunnel: Mapping[str, object], *, socket_path: str, remote_port: int, timeout: float = 5,
+) -> None:
+    """Remove only a forward authenticated against its master and directory."""
+    path = Path(socket_path)
+    if path.parent.parent != Path("/tmp").resolve() or not re.fullmatch(r"[0-9a-f]{24}\.sock", path.name):
+        raise PortmapError("HTTP forward path is outside the owned socket namespace")
+    directory_record = _http_record(path.parent / "owner.json")
+    if http_socket_dir(Path(directory_record.get("state_dir", ""))) != path.parent:
+        raise PortmapError("HTTP forward directory identity does not match")
+    record_path = path.with_suffix(".json")
+    if not record_path.exists() and not path.exists():
+        return
+    if _http_record(record_path) != _http_identity(tunnel, remote_port):
+        raise PortmapError("HTTP forward belongs to another SSH master")
+    if path.exists() or path.is_symlink():
+        metadata = path.lstat()
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise PortmapError("refusing to remove an unrelated HTTP forward path")
+        if tunnel_alive(tunnel, timeout=min(_timeout(timeout), 2)):
+            status, detail = _control(tunnel, "cancel", timeout=_timeout(timeout), specification=f"{path}:127.0.0.1:{_port(remote_port)}")
+            if status or detail:
+                raise PortmapError(_failure(tunnel, "SSH HTTP forward cancellation failed", detail))
+        elif not _socket_closed(str(path), time.monotonic() + _timeout(timeout)):
+            raise PortmapError("HTTP socket is still accepting connections without its recorded SSH master")
+        path.unlink(missing_ok=True)
+    record_path.unlink()
 
 
 def tunnel_alive(tunnel: Mapping[str, object], *, timeout: float = 2) -> bool:

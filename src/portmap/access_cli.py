@@ -7,13 +7,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .client import SSHSelectionRequired, connect, connections, disconnect, discover, setup_client, teardown_client
-from .client_runtime import client_state_dir
+from .client import SSHSelectionRequired, discover, setup_client, teardown_client
+from .connection_config import managed_connect, managed_connections, managed_disconnect
+from .settings import load_portmap_settings
 from .errors import PortmapError
 
 
 def register_commands(subparsers: argparse._SubParsersAction) -> None:
-    setup = subparsers.add_parser("setup", help="configure isolated split DNS and the shared loopback HTTP entry")
+    setup = subparsers.add_parser("setup", help="start Docker/Podman infrastructure, isolated split DNS and the shared loopback HTTP entry")
     setup.add_argument("--no-sudo", action="store_true")
     setup.add_argument("--http-port", type=int, help="explicit shared loopback HTTP port; defaults to 80, including direct-only access")
     setup.set_defaults(func=cmd_setup)
@@ -49,31 +50,30 @@ def register_commands(subparsers: argparse._SubParsersAction) -> None:
     disconnect.set_defaults(func=cmd_disconnect)
 
     worker = subparsers.add_parser("_serve-catalog", help=argparse.SUPPRESS)
-    worker.add_argument("--state-dir", type=Path, required=True)
-    worker.add_argument("--port", type=int, required=True)
-    worker.add_argument("--owner", required=True)
     worker.set_defaults(func=cmd_serve_catalog)
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
-    print_json(setup_client(client_state_dir(), use_sudo=not args.no_sudo, http_port=args.http_port))
+    settings = load_portmap_settings()
+    print_json(setup_client(settings.client_state_dir, settings=settings, use_sudo=not args.no_sudo, http_port=args.http_port))
     return 0
 
 
 def cmd_teardown(args: argparse.Namespace) -> int:
-    print_json(teardown_client(client_state_dir(), use_sudo=not args.no_sudo))
+    print_json(teardown_client(load_portmap_settings().client_state_dir, use_sudo=not args.no_sudo))
     return 0
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
-    print_json(discover(client_state_dir(), args.target, ssh_config=args.ssh_config, timeout=args.timeout))
+    print_json(discover(load_portmap_settings().client_state_dir, args.target, ssh_config=args.ssh_config, timeout=args.timeout))
     return 0
 
 
 def cmd_connect(args: argparse.Namespace) -> int:
+    state_dir = load_portmap_settings().client_state_dir
     target = args.target or args.ssh_target
     if not target:
-        candidates = discover(client_state_dir(), ssh_config=args.ssh_config)["ssh_hosts"]
+        candidates = discover(state_dir, ssh_config=args.ssh_config)["ssh_hosts"]
         if not sys.stdin.isatty():
             raise PortmapError("provide an IP/URL or --via ssh TARGET; portmap discover lists local SSH aliases")
         if candidates:
@@ -99,7 +99,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
         "use_sudo": not args.no_sudo,
     }
     try:
-        result = connect(client_state_dir(), target, **options)
+        result = managed_connect(state_dir, target, **options)
     except SSHSelectionRequired:
         if not sys.stdin.isatty():
             raise
@@ -110,27 +110,26 @@ def cmd_connect(args: argparse.Namespace) -> int:
         if not manual_target:
             raise PortmapError("connection cancelled")
         options.update(via="ssh", ssh_target=manual_target)
-        result = connect(client_state_dir(), target, **options)
+        result = managed_connect(state_dir, target, **options)
     print_json(result)
     return 0
 
 
 def cmd_connections(args: argparse.Namespace) -> int:
-    print_json(connections(client_state_dir(), check=args.check))
+    print_json(managed_connections(load_portmap_settings().client_state_dir, check=args.check))
     return 0
 
 
 def cmd_disconnect(args: argparse.Namespace) -> int:
-    print_json(disconnect(client_state_dir(), args.host, use_sudo=not args.no_sudo))
+    print_json(managed_disconnect(load_portmap_settings().client_state_dir, args.host, use_sudo=not args.no_sudo))
     return 0
 
 
 def cmd_serve_catalog(args: argparse.Namespace) -> int:
-    """Hidden worker: the frozen executable re-spawns itself here to serve the
-    local catalog view; source mode never invokes this entry point."""
-    from .client_view import main as view_main
+    """Container entry point for the frozen catalog process."""
+    from .catalog import main as catalog_main
 
-    view_main(["--state-dir", str(args.state_dir), "--port", str(args.port), "--owner", args.owner])
+    catalog_main()
     return 0
 
 

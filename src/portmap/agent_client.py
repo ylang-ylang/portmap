@@ -9,10 +9,21 @@ from typing import Any
 
 
 DEFAULT_CONTAINER_AGENT_SOCKET = "/run/portmap/agent.sock"
+CONNECTION_LIST_TIMEOUT = 15.0
+CONNECTION_CHECK_TIMEOUT = 120.0
+CONNECTION_MUTATE_TIMEOUT = 120.0
 
 
 class AgentUnavailable(RuntimeError):
     pass
+
+
+class AgentRequestError(RuntimeError):
+    """The agent answered a control request with a non-2xx JSON error."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -80,3 +91,76 @@ def agent_worktrees(*, socket_path: Path | None = None) -> dict[str, Any]:
 
 def agent_compose_up_worktree(worktree: str, *, socket_path: Path | None = None) -> dict[str, Any]:
     return request_json("POST", "/compose-up", socket_path=socket_path, payload={"worktree": worktree}, timeout=30.0)
+
+
+def request_json_status(
+    method: str,
+    path: str,
+    *,
+    socket_path: Path | None = None,
+    payload: dict[str, Any] | None = None,
+    timeout: float = 2.0,
+) -> tuple[int, dict[str, Any]]:
+    """``request_json`` for status-aware control endpoints.
+
+    Transport failures raise ``AgentUnavailable`` exactly like
+    ``request_json``; a non-2xx answer returns ``(status, body)`` so callers
+    can forward the agent's error status instead of collapsing it.
+    """
+    resolved_socket = socket_path or configured_agent_socket()
+    if not resolved_socket.exists() or resolved_socket.is_dir():
+        raise AgentUnavailable(f"agent socket unavailable: {resolved_socket}")
+
+    body = b""
+    headers = {"content-type": "application/json"}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+
+    try:
+        connection = UnixHTTPConnection(str(resolved_socket), timeout=timeout)
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        response_body = response.read()
+        connection.close()
+    except OSError as exc:
+        raise AgentUnavailable(f"agent unavailable: {exc}") from exc
+
+    parsed: dict[str, Any] = {}
+    if response_body:
+        try:
+            decoded = json.loads(response_body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            decoded = None
+        if isinstance(decoded, dict):
+            parsed = decoded
+        elif response.status < 400:
+            raise RuntimeError("agent returned invalid JSON" if decoded is None else "agent returned non-object JSON")
+    return response.status, parsed
+
+
+def agent_connection_targets(*, check: bool = False, socket_path: Path | None = None) -> dict[str, Any]:
+    """The host agent's durable connection list; ``check`` runs HTTP checks."""
+    path = "/access/connections?check=1" if check else "/access/connections"
+    status, body = request_json_status(
+        "GET",
+        path,
+        socket_path=socket_path,
+        timeout=CONNECTION_CHECK_TIMEOUT if check else CONNECTION_LIST_TIMEOUT,
+    )
+    if status >= 400:
+        raise AgentRequestError(status, str(body.get("error") or f"agent returned HTTP {status}"))
+    return body
+
+
+def agent_mutate_connection(payload: dict[str, Any], *, socket_path: Path | None = None) -> tuple[int, dict[str, Any]]:
+    """Forward one connection control action; returns the agent's status and body."""
+    status, body = request_json_status(
+        "POST",
+        "/access/connections",
+        socket_path=socket_path,
+        payload=payload,
+        timeout=CONNECTION_MUTATE_TIMEOUT,
+    )
+    if status >= 400 and "error" not in body:
+        return status, {"error": f"agent returned HTTP {status}"}
+    return status, body

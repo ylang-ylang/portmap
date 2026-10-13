@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Boxes,
@@ -10,9 +10,14 @@ import {
   Folder,
   GitBranch,
   GitFork,
+  Link2,
+  Pencil,
   Play,
+  Plus,
   Power,
   RefreshCw,
+  Trash2,
+  Unlink2,
 } from "lucide-react";
 import "./style.css";
 
@@ -428,10 +433,11 @@ async function parseActionResponse(response) {
   };
 }
 
-async function composeProjectAction({ action, composeProject, failedText }) {
+async function composeProjectAction({ action, composeProject, machineId, failedText }) {
+  const url = `/actions/compose-${action}?machine=${encodeURIComponent(machineId || "local")}`;
   const body = new URLSearchParams({ compose_project: composeProject });
   try {
-    const response = await fetch(`/actions/compose-${action}`, {
+    const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -446,10 +452,11 @@ async function composeProjectAction({ action, composeProject, failedText }) {
   }
 }
 
-async function composeWorktreeAction({ worktree, failedText }) {
+async function composeWorktreeAction({ worktree, machineId, failedText }) {
+  const url = `/actions/compose-up?machine=${encodeURIComponent(machineId || "local")}`;
   const body = new URLSearchParams({ worktree });
   try {
-    const response = await fetch("/actions/compose-up", {
+    const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -467,6 +474,31 @@ async function composeWorktreeAction({ worktree, failedText }) {
 function nowLabel() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
+
+function formatLatency(ms) {
+  // em dash for null/unmeasured; never show a fake zero
+  return ms == null ? "\u2014" : `${ms}\u2009ms`;
+}
+
+function formatCheckedAt(iso) {
+  if (!iso) return "never";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return iso;
+  }
+}
+
+const CONN_STATUS_LABEL = {
+  configured: "saved",
+  connecting: "connecting",
+  reachable: "online",
+  unreachable: "unreachable",
+  disconnected: "offline",
+  error: "error",
+};
 
 function actionLabel(action) {
   if (action === "restart") return "Restart";
@@ -548,13 +580,17 @@ function CopyButton({ targetId }) {
   );
 }
 
-function CatalogMeta({ catalog }) {
-  if (!catalog) return <p className="meta">Loading catalog...</p>;
+function CatalogMeta({ catalog, machineId }) {
+  // Always include machine= so the link is unambiguous even when accessed via SSH-apex hostname.
+  const registryUrl = machineId
+    ? `/registry.json?machine=${encodeURIComponent(machineId)}`
+    : "/registry.json";
+  if (!catalog) return <p className="meta">Loading catalog…</p>;
   return (
     <p className="meta" data-catalog-meta>
       Generated at {text(catalog.generated_at)}. HTTP proxy port: {text(catalog.http_port)}. DNS domain:{" "}
       {text(catalog.dns_domain)}. DNS server: {text(catalog.dns_server)}{catalog.dns_port && catalog.dns_port !== 53 ? `:${catalog.dns_port}` : ""}. JSON:{" "}
-      <OpenLink href="/registry.json">/registry.json</OpenLink>.
+      <OpenLink href={registryUrl}>{registryUrl}</OpenLink>.
     </p>
   );
 }
@@ -909,6 +945,65 @@ function CatalogTree({ catalog, onAction, onStart }) {
   );
 }
 
+function MachineTabs({ machines, selectedId, onSelect }) {
+  const tabRefs = useRef([]);
+
+  function handleTabKeyDown(e, index) {
+    const count = machines.length;
+    let next = -1;
+    if (e.key === "ArrowRight") next = (index + 1) % count;
+    else if (e.key === "ArrowLeft") next = (index - 1 + count) % count;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = count - 1;
+    if (next === -1) return;
+    e.preventDefault();
+    tabRefs.current[next]?.focus();
+    onSelect(machines[next].id);
+  }
+
+  return (
+    <nav className="machine-nav" aria-label="Connected machines">
+      <div className="machine-nav-scroll" role="tablist">
+        {machines.map((machine, index) => {
+          const isSelected = machine.id === selectedId;
+          const isLocal = machine.via === "local";
+          return (
+            <button
+              key={machine.id}
+              ref={(el) => { tabRefs.current[index] = el; }}
+              role="tab"
+              aria-selected={isSelected}
+              tabIndex={isSelected ? 0 : -1}
+              type="button"
+              className={[
+                "machine-tab",
+                isSelected ? "machine-tab-active" : "",
+                !machine.available ? "machine-tab-unavailable" : "",
+              ].filter(Boolean).join(" ")}
+              onClick={() => onSelect(machine.id)}
+              onKeyDown={(e) => handleTabKeyDown(e, index)}
+            >
+              <span className="machine-tab-name">{machine.label || machine.domain || machine.id}</span>
+              {!isLocal && machine.via && (
+                <span className={`machine-via-badge machine-via-${machine.via}`}>
+                  {machine.via}
+                </span>
+              )}
+              {!isLocal && machine.target && (
+                <span className="machine-tab-target">{machine.target}</span>
+              )}
+              {!machine.available && (
+                <span className="machine-unavail-badge">offline</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+
 function detectPlatform() {
   const fingerprint = `${navigator.userAgent} ${navigator.platform || ""}`.toLowerCase();
   const mobile = /android|iphone|ipad/.test(fingerprint);
@@ -1038,17 +1133,19 @@ function DownloadPanel({ catalog }) {
             <p>After install, on the computer that needs access:</p>
             <pre><code>{`portmap setup\nportmap connect <IP-or-SSH-target>\nportmap status --check`}</code></pre>
             <p>
-              Installing only places the command. <code>portmap setup</code> configures split
-              DNS and keeps <code>127.0.0.1:80</code> ready, even with no connections.
-              Direct access still goes straight to the remote server; SSH and local
-              projects share this private entry. Setup does not start Docker projects
-              or expose an entry to the LAN.
+              Installing only places the command. <code>portmap setup</code> starts a small
+              container stack — Docker or Podman must already be running. DNS and the local
+              ingress gateway run in containers; no native CoreDNS or Traefik is installed
+              on the host. Setup keeps <code>127.0.0.1:80</code> reserved and configures
+              split DNS, even with no active connections. Direct access goes straight to the
+              remote IP; SSH and local projects share the private ingress. Setup does not
+              start your business projects or expose an entry to the LAN.
             </p>
             <p>
               To also publish this computer's projects, run <code>portmap up</code>.
-              Local publishing needs Docker or Podman; remote-only access does not.
-              DNS integration and restricted HTTP ingress request sudo when required.
-              Disconnecting a remote keeps the local entry; <code>portmap teardown</code>{" "}
+              Remote-only access works without <code>portmap up</code>. DNS integration and
+              restricted port-80 ingress request sudo when needed. Disconnecting a remote
+              keeps the local entry; <code>portmap teardown</code>{" "}
               releases it after local publishing has been stopped.
             </p>
           </div>
@@ -1093,42 +1190,557 @@ function AccessStatus({ catalog }) {
   );
 }
 
-function CatalogApp() {
-  const [catalog, setCatalog] = useState(null);
-  const [error, setError] = useState("");
-  const [actionMessage, setActionMessage] = useState(null);
-  const [actionLog, setActionLog] = useState([]);
 
-  async function loadCatalog() {
+function ConnectionStatusBadge({ status }) {
+  const label = CONN_STATUS_LABEL[status] || text(status) || "unknown";
+  return (
+    <span className={`conn-status-badge conn-status-${status || "configured"}`}>
+      {label}
+    </span>
+  );
+}
+
+function ConnectionRow({ conn, onConnect, onDisconnect, onEdit, onDelete, mutating }) {
+  const active = conn.has_connection === true;
+  // Show actual_via when known (what's really used), fall back to requested via
+  const via = conn.actual_via || conn.via;
+  return (
+    <div className="conn-row" role="listitem">
+      <div className="conn-row-body">
+        <div className="conn-row-main">
+          <ConnectionStatusBadge status={conn.status} />
+          <span className="conn-row-target">{conn.target}</span>
+          {via && (
+            <span
+              className={`machine-via-badge machine-via-${
+                via === "direct" || via === "ssh" ? via : "auto"
+              }`}
+            >
+              {via}
+            </span>
+          )}
+          {conn.domain && conn.domain !== conn.target && (
+            <span className="conn-row-domain">{conn.domain}</span>
+          )}
+        </div>
+        <div className="conn-row-meta">
+          <span className="conn-latency" title="HTTP latency from last check">
+            {formatLatency(conn.latency_ms)}
+          </span>
+          {conn.last_checked_at && (
+            <span className="conn-checked">
+              {"· checked "}
+              {formatCheckedAt(conn.last_checked_at)}
+            </span>
+          )}
+          {conn.error && (
+            <span className="conn-error-inline" title={conn.error}>
+              {conn.error}
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="conn-row-actions">
+        {active ? (
+          <button
+            className="action-button conn-disconnect-btn"
+            type="button"
+            onClick={() => onDisconnect(conn.id)}
+            disabled={mutating}
+          >
+            <Unlink2 className="button-icon" aria-hidden="true" />
+            {" "}Disconnect
+          </button>
+        ) : (
+          <button
+            className="action-button conn-connect-btn"
+            type="button"
+            onClick={() => onConnect(conn.id)}
+            disabled={mutating}
+          >
+            <Link2 className="button-icon" aria-hidden="true" />
+            {" "}Connect
+          </button>
+        )}
+        <button
+          className="action-button"
+          type="button"
+          onClick={() => onEdit(conn)}
+          disabled={mutating}
+          title={active ? "Disconnect before editing" : `Edit ${conn.target || conn.id}`}
+          aria-label={
+            active
+              ? `Edit ${conn.target || conn.id} — disconnect first`
+              : `Edit ${conn.target || conn.id}`
+          }
+        >
+          <Pencil className="button-icon" aria-hidden="true" />
+        </button>
+        <button
+          className="action-button conn-delete-btn"
+          type="button"
+          onClick={() => onDelete(conn.id, conn.target)}
+          disabled={mutating}
+          aria-label={`Delete ${conn.target || conn.id}`}
+        >
+          <Trash2 className="button-icon" aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ConnectionForm({ formState, onChange, onSave, onCancel, formError, mutating }) {
+  const isEdit = Boolean(formState.id);
+  function handleKeyDown(e) {
+    if (e.key === "Enter") onSave();
+    if (e.key === "Escape") onCancel();
+  }
+  return (
+    <div
+      className="conn-form"
+      role="form"
+      aria-label={isEdit ? "Edit connection" : "Add connection"}
+    >
+      <div className="conn-form-row">
+        <label className="conn-form-label" htmlFor="conn-form-target">
+          {isEdit ? "Edit host" : "New host"}
+        </label>
+        <input
+          id="conn-form-target"
+          className="conn-form-input"
+          type="text"
+          value={formState.target}
+          onChange={(e) => onChange({ ...formState, target: e.target.value })}
+          onKeyDown={handleKeyDown}
+          placeholder="192.0.2.10 · user@host · SSH alias"
+          autoComplete="off"
+          autoFocus
+          disabled={mutating}
+        />
+        <select
+          className="conn-form-select"
+          value={formState.via}
+          onChange={(e) => onChange({ ...formState, via: e.target.value })}
+          disabled={mutating}
+          aria-label="Connection mode"
+        >
+          <option value="direct">direct</option>
+          <option value="ssh">SSH</option>
+        </select>
+        <button
+          className="action-button conn-save-btn"
+          type="button"
+          onClick={onSave}
+          disabled={mutating || !formState.target.trim()}
+        >
+          {mutating ? "Saving\u2026" : isEdit ? "Update" : "Save"}
+        </button>
+        <button
+          className="action-button"
+          type="button"
+          onClick={onCancel}
+          disabled={mutating}
+        >
+          Cancel
+        </button>
+      </div>
+      {formError && (
+        <div className="conn-form-error" role="alert">
+          {formError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConnectionManager({ canManageConnections, onMachinesRefresh }) {
+  // null = not yet loaded; [] or [...] = loaded
+  const [connections, setConnections] = useState(null);
+  const [connectionsError, setConnectionsError] = useState("");
+  const [checkLoading, setCheckLoading] = useState(false);
+  // formState: null (hidden) | { id?, target, via }
+  const [formState, setFormState] = useState(null);
+  const [formError, setFormError] = useState("");
+  // panelError: connect/disconnect/delete failures or edit-blocked messages
+  const [panelError, setPanelError] = useState("");
+  const [mutating, setMutating] = useState(false);
+
+  // Load connection list once the private portal confirms management capability.
+  useEffect(() => {
+    if (!canManageConnections) return;
+    loadConnections();
+  }, [canManageConnections]);
+
+  async function loadConnections({ check = false } = {}) {
+    if (check) setCheckLoading(true);
+    setConnectionsError("");
     try {
-      const response = await fetch("/registry.json");
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      setCatalog(await response.json());
-      setError("");
-    } catch (loadError) {
-      setError(`Failed to load catalog: ${loadError}`);
+      const res = await fetch(check ? "/api/connections?check=1" : "/api/connections");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setConnections(Array.isArray(data.connections) ? data.connections : []);
+    } catch (err) {
+      setConnectionsError(`${err.message || err}`);
+    } finally {
+      if (check) setCheckLoading(false);
     }
   }
 
+  // POST a connection action. On non-2xx, refetch the list (so any saved-but-failed
+  // entry remains visible) then return the error for the caller to surface.
+  async function postAction(payload) {
+    setMutating(true);
+    try {
+      const res = await fetch("/api/connections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      let data;
+      try { data = await res.json(); } catch { data = {}; }
+      if (!res.ok) {
+        const errMsg = text(data.error) || `HTTP ${res.status}`;
+        // Refetch so any saved-but-failed row is visible.
+        await loadConnections();
+        await onMachinesRefresh();
+        return { failed: true, error: errMsg };
+      }
+      // Success: server returns updated list payload.
+      setConnections(Array.isArray(data.connections) ? data.connections : []);
+      setConnectionsError("");
+      await onMachinesRefresh();
+      return { failed: false };
+    } catch (err) {
+      // Network/parse error: refetch to show current state.
+      await loadConnections();
+      await onMachinesRefresh();
+      return { failed: true, error: `${err.message || err}` };
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!formState) return;
+    const { id, target, via } = formState;
+    const trimmed = target.trim();
+    if (!trimmed) {
+      setFormError("Host or IP address is required.");
+      return;
+    }
+    const payload = { action: "save", target: trimmed, via };
+    if (id) payload.id = id;
+    const result = await postAction(payload);
+    if (!result.failed) {
+      setFormState(null);
+      setFormError("");
+    } else {
+      setFormError(result.error);
+    }
+  }
+
+  async function handleConnect(id) {
+    setPanelError("");
+    // Capture id before any async gap.
+    const result = await postAction({ action: "connect", id });
+    if (result.failed) setPanelError(result.error);
+    else setPanelError("");
+  }
+
+  async function handleDisconnect(id) {
+    setPanelError("");
+    const result = await postAction({ action: "disconnect", id });
+    if (result.failed) setPanelError(result.error);
+    else setPanelError("");
+  }
+
+  async function handleDelete(id, target) {
+    // Capture id and label before the async confirm gap.
+    const label = target || id;
+    if (
+      !window.confirm(
+        `Delete connection "${label}"?\nThis will disconnect it first if currently active.`,
+      )
+    ) return;
+    setPanelError("");
+    const result = await postAction({ action: "delete", id });
+    if (result.failed) setPanelError(result.error);
+    else setPanelError("");
+  }
+
+  function startEdit(conn) {
+    // Contract: editing an active entry requires explicit disconnect first.
+    const active = conn.has_connection === true || conn.status === "connecting";
+    if (active) {
+      setPanelError(`Disconnect "${text(conn.target || conn.id)}" before editing.`);
+      return;
+    }
+    // Prefer explicit via for the form; auto/unknown defaults to direct.
+    const via =
+      conn.via === "direct" || conn.via === "ssh" ? conn.via
+      : conn.actual_via === "direct" || conn.actual_via === "ssh" ? conn.actual_via
+      : "direct";
+    setFormState({ id: conn.id, target: text(conn.target), via });
+    setFormError("");
+    setPanelError("");
+  }
+
+  function startAdd() {
+    setFormState({ target: "", via: "direct" });
+    setFormError("");
+    setPanelError("");
+  }
+
+  function cancelForm() {
+    setFormState(null);
+    setFormError("");
+  }
+
+  if (!canManageConnections) return null;
+
+  return (
+    <section className="utility-panel" aria-label="Connection management">
+      <details className="quick-setup conn-section" open>
+        <summary>
+          <Link2 className="button-icon" aria-hidden="true" />
+          {" "}Connections
+        </summary>
+        <div className="quick-setup-body conn-body">
+          <div className="conn-toolbar">
+            <button
+              className="action-button"
+              type="button"
+              onClick={() => loadConnections({ check: true })}
+              disabled={checkLoading || mutating}
+              title="Probe all connections and measure HTTP latency"
+            >
+              <RefreshCw className="button-icon" aria-hidden="true" />
+              {" "}{checkLoading ? "Checking\u2026" : "Check"}
+            </button>
+            <button
+              className="action-button conn-add-btn"
+              type="button"
+              onClick={startAdd}
+              disabled={mutating || formState !== null}
+              aria-label="Add new connection"
+            >
+              <Plus className="button-icon" aria-hidden="true" />
+              {" "}Add
+            </button>
+          </div>
+          {connectionsError && (
+            <div className="empty load-error" role="alert">
+              {connectionsError}{" "}
+              <button
+                className="action-button"
+                type="button"
+                onClick={() => loadConnections()}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {panelError && (
+            <div className="conn-panel-error" role="alert">
+              {panelError}
+            </div>
+          )}
+          {connections === null && !connectionsError && (
+            <div className="empty">Loading connections\u2026</div>
+          )}
+          {connections !== null && connections.length === 0 && !formState && (
+            <div className="empty">
+              No saved connections.{" "}
+              <button
+                className="action-button"
+                type="button"
+                onClick={startAdd}
+                disabled={mutating}
+              >
+                Add a host
+              </button>{" "}
+              to connect to a remote machine.
+            </div>
+          )}
+          {connections !== null && connections.length > 0 && (
+            <div className="conn-list" role="list">
+              {connections.map((conn) => (
+                <ConnectionRow
+                  key={conn.id ?? conn.target}
+                  conn={conn}
+                  onConnect={handleConnect}
+                  onDisconnect={handleDisconnect}
+                  onEdit={startEdit}
+                  onDelete={handleDelete}
+                  mutating={mutating}
+                />
+              ))}
+            </div>
+          )}
+          {formState !== null && (
+            <ConnectionForm
+              formState={formState}
+              onChange={setFormState}
+              onSave={handleSave}
+              onCancel={cancelForm}
+              formError={formError}
+              mutating={mutating}
+            />
+          )}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function CatalogApp() {
+  // null = not yet fetched (loading or failed); [] or [...] = loaded
+  const [machines, setMachines] = useState(null);
+  const [machinesError, setMachinesError] = useState("");
+  // null = waiting for /api/machines to resolve; never falls back silently
+  const [selectedMachineId, setSelectedMachineId] = useState(null);
+  const [catalog, setCatalog] = useState(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [actionMessage, setActionMessage] = useState(null);
+  const [actionLog, setActionLog] = useState([]);
+  const [canManageConnections, setCanManageConnections] = useState(false);
+  // Shared abort ref: the controller stored here is the authoritative catalog request.
+  // Both the useEffect and reloadCatalog write to this ref after aborting the prior value,
+  // so whichever started last is the one that may apply its result.
+  const catalogAbortRef = useRef(null);
+
+  // Fetch machine list. keepSelection=true updates the list without changing selectedMachineId.
+  // Failures are surfaced as errors; no silent fallback. /api/machines works in both private
+  // (multi-machine) and public (single-local) scopes.
+  async function loadMachines({ keepSelection = false } = {}) {
+    if (!keepSelection) setMachinesError("");
+    try {
+      const res = await fetch("/api/machines");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const list = Array.isArray(data.machines) ? data.machines : [];
+      setMachines(list);
+      setCanManageConnections(data.can_manage_connections === true);
+      setMachinesError("");
+      if (!keepSelection) {
+        setSelectedMachineId(data.selected || list[0]?.id || "local");
+      }
+    } catch (err) {
+      setMachinesError(`Failed to load machines: ${err.message || err}`);
+      // On initial failure: machines stays null, selectedMachineId stays null.
+      // The catalog area renders a Retry button. No automatic fallback to local.
+    }
+  }
+
+  // When selectedMachineId changes: abort any in-flight catalog request, clear the tree,
+  // fetch the new machine's catalog. Always sends machine= — omitting it causes the server
+  // to select by Host header, which returns the wrong catalog on SSH-apex URLs.
+  useEffect(() => {
+    if (selectedMachineId === null) return;
+    if (catalogAbortRef.current) catalogAbortRef.current.abort();
+    const controller = new AbortController();
+    catalogAbortRef.current = controller;
+    setCatalog(null);
+    setCatalogLoading(true);
+    setCatalogError("");
+    setActionMessage(null);
+    fetch(`/registry.json?machine=${encodeURIComponent(selectedMachineId)}`, { signal: controller.signal })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (catalogAbortRef.current === controller) {
+          setCatalog(data);
+          setCatalogError("");
+          setCatalogLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError" && catalogAbortRef.current === controller) {
+          setCatalogError(`Failed to load catalog: ${err.message || err}`);
+          setCatalogLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [selectedMachineId]);
+
+  useEffect(() => { loadMachines(); }, []);
+
+  // Post-action reload. Uses the same catalogAbortRef so the A→B→A race is handled:
+  // switching B→A triggers a new useEffect fetch that becomes catalogAbortRef.current;
+  // if an older reloadCatalog for A then finishes, its controller !== catalogAbortRef.current
+  // and the result is silently discarded without touching state.
+  async function reloadCatalog() {
+    if (selectedMachineId === null) return;
+    if (catalogAbortRef.current) catalogAbortRef.current.abort();
+    const controller = new AbortController();
+    catalogAbortRef.current = controller;
+    try {
+      const res = await fetch(
+        `/registry.json?machine=${encodeURIComponent(selectedMachineId)}`,
+        { signal: controller.signal },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (catalogAbortRef.current === controller) {
+        setCatalog(data);
+        setCatalogError("");
+      }
+    } catch (err) {
+      if (err.name !== "AbortError" && catalogAbortRef.current === controller) {
+        setCatalogError(`Failed to reload catalog: ${err.message || err}`);
+      }
+    }
+    // Refresh machines list; never changes selection.
+    try {
+      const res = await fetch("/api/machines");
+      if (res.ok) {
+        const data = await res.json();
+        setMachines(Array.isArray(data.machines) ? data.machines : []);
+        setMachinesError("");
+      }
+    } catch {
+      // Non-critical; existing list retained.
+    }
+  }
+
+  // Explicit refresh: preserves the user's current machine selection.
+  // If /api/machines never loaded (initial failure), retry the full initial load;
+  // the useEffect on selectedMachineId will trigger catalog fetch once it resolves.
+  async function handleRefresh() {
+    if (machines === null) {
+      await loadMachines();
+    } else {
+      await loadMachines({ keepSelection: true });
+      await reloadCatalog();
+    }
+  }
+
+  function handleSelectMachine(id) {
+    if (id === selectedMachineId) return;
+    setSelectedMachineId(id);
+  }
+
   async function handleAction(action, composeProject) {
+    // Capture machine ID synchronously before confirm() — no async gap possible.
+    const machineId = selectedMachineId;
+    const machine = machines ? machines.find((m) => m.id === machineId) : null;
+    const machineLabel = machine
+      ? (machine.label || machine.domain || machineId)
+      : (machineId || "local");
     const label = actionLabel(action);
-    if (!window.confirm(`Run docker compose ${action} for ${composeProject}?`)) return;
+    if (!window.confirm(`Run docker compose ${action} for ${composeProject} on ${machineLabel}?`)) return;
     const logId = `${Date.now()}-${action}-${composeProject}`;
     const detail = `docker compose -p ${composeProject} ${action}`;
     setActionLog((entries) => [
-      {
-        id: logId,
-        time: nowLabel(),
-        status: "running",
-        message: `${label} requested`,
-        detail,
-      },
+      { id: logId, time: nowLabel(), status: "running", message: `${label} requested on ${machineLabel}`, detail },
       ...entries,
     ].slice(0, 8));
     const result = await composeProjectAction({
-      action,
-      composeProject,
-      failedText: `compose ${action} failed`,
+      action, composeProject, machineId, failedText: `compose ${action} failed`,
     });
     setActionMessage(result);
     setActionLog((entries) => entries.map((entry) => (
@@ -1137,32 +1749,31 @@ function CatalogApp() {
           ...entry,
           time: nowLabel(),
           status: result.failed ? "failed" : "ok",
-          message: result.failed ? `${label} failed: ${result.message}` : `${label} completed: ${result.message}`,
+          message: result.failed
+            ? `${label} failed on ${machineLabel}: ${result.message}`
+            : `${label} completed on ${machineLabel}: ${result.message}`,
         }
         : entry
     )));
-    if (!result.failed) await loadCatalog();
+    if (!result.failed) await reloadCatalog();
   }
 
   async function handleStart(worktree) {
+    const machineId = selectedMachineId;
+    const machine = machines ? machines.find((m) => m.id === machineId) : null;
+    const machineLabel = machine
+      ? (machine.label || machine.domain || machineId)
+      : (machineId || "local");
     const label = actionLabel("up");
     const target = worktree.worktree;
-    if (!window.confirm(`Run docker compose up -d in ${target}?`)) return;
+    if (!window.confirm(`Run docker compose up -d in ${target} on ${machineLabel}?`)) return;
     const logId = `${Date.now()}-up-${target}`;
-    const detail = `docker compose up -d`;
     setActionLog((entries) => [
-      {
-        id: logId,
-        time: nowLabel(),
-        status: "running",
-        message: `${label} requested`,
-        detail,
-      },
+      { id: logId, time: nowLabel(), status: "running", message: `${label} requested on ${machineLabel}`, detail: "docker compose up -d" },
       ...entries,
     ].slice(0, 8));
     const result = await composeWorktreeAction({
-      worktree: target,
-      failedText: "compose up failed",
+      worktree: target, machineId, failedText: "compose up failed",
     });
     setActionMessage(result);
     setActionLog((entries) => entries.map((entry) => (
@@ -1171,16 +1782,73 @@ function CatalogApp() {
           ...entry,
           time: nowLabel(),
           status: result.failed ? "failed" : "ok",
-          message: result.failed ? `${label} failed: ${result.message}` : `${label} completed: ${result.message}`,
+          message: result.failed
+            ? `${label} failed on ${machineLabel}: ${result.message}`
+            : `${label} completed on ${machineLabel}: ${result.message}`,
         }
         : entry
     )));
-    if (!result.failed) await loadCatalog();
+    if (!result.failed) await reloadCatalog();
   }
 
-  useEffect(() => {
-    loadCatalog();
-  }, []);
+  const selectedMachine = machines ? machines.find((m) => m.id === selectedMachineId) : null;
+  const machineDisappeared = machines !== null && machines.length > 0
+    && selectedMachineId !== null && !selectedMachine;
+  const machineUnavailable = selectedMachine && !selectedMachine.available;
+
+  let catalogContent;
+  if (machines === null) {
+    // /api/machines not yet resolved: loading or failed.
+    catalogContent = machinesError ? (
+      <section className="catalog-tree" data-catalog-tree>
+        <div className="empty load-error">
+          {machinesError}{" "}
+          <button className="action-button" type="button" onClick={() => loadMachines()}>Retry</button>
+        </div>
+      </section>
+    ) : (
+      <section className="catalog-tree" data-catalog-tree>
+        <div className="empty">Loading…</div>
+      </section>
+    );
+  } else if (machineDisappeared) {
+    catalogContent = (
+      <section className="catalog-tree" data-catalog-tree>
+        <div className="empty load-error">
+          Machine <code>{selectedMachineId}</code> is no longer connected.
+          Select another machine above to continue.
+        </div>
+      </section>
+    );
+  } else if (machineUnavailable) {
+    catalogContent = (
+      <section className="catalog-tree" data-catalog-tree>
+        <div className="empty load-error">
+          <strong>{text(selectedMachine.label || selectedMachine.domain)}</strong>
+          {selectedMachine.via && selectedMachine.via !== "local"
+            ? ` (${selectedMachine.via}${selectedMachine.target ? ` → ${selectedMachine.target}` : ""})`
+            : ""}
+          {" "}is not currently connected. Choose another machine or reconnect.
+        </div>
+      </section>
+    );
+  } else if (catalogLoading) {
+    catalogContent = (
+      <section className="catalog-tree" data-catalog-tree>
+        <div className="empty">
+          {`Loading${selectedMachine && selectedMachine.via !== "local" ? ` ${text(selectedMachine.label || selectedMachine.domain)}` : ""} catalog…`}
+        </div>
+      </section>
+    );
+  } else if (catalogError) {
+    catalogContent = (
+      <section className="catalog-tree" data-catalog-tree>
+        <div className="empty load-error">{catalogError}</div>
+      </section>
+    );
+  } else {
+    catalogContent = <CatalogTree catalog={catalog} onAction={handleAction} onStart={handleStart} />;
+  }
 
   return (
     <main>
@@ -1189,20 +1857,37 @@ function CatalogApp() {
           <div className="title-row">
             <h1>portmap catalog</h1>
             <AccessStatus catalog={catalog} />
+            <button
+              className="action-button"
+              type="button"
+              title="Refresh machines and catalog"
+              onClick={handleRefresh}
+            >
+              <RefreshCw className="button-icon" aria-hidden="true" />
+              Refresh
+            </button>
           </div>
-          <CatalogMeta catalog={catalog} />
+          <CatalogMeta catalog={catalog} machineId={selectedMachineId} />
+          {machines !== null && machines.length > 1 && (
+            <MachineTabs
+              machines={machines}
+              selectedId={selectedMachineId}
+              onSelect={handleSelectMachine}
+            />
+          )}
+          {machinesError && machines !== null && (
+            <p className="meta machine-nav-error">{machinesError}</p>
+          )}
         </div>
       </header>
       <ActionMessage message={actionMessage} />
       <ActionLog entries={actionLog} />
+      <ConnectionManager
+        canManageConnections={canManageConnections}
+        onMachinesRefresh={() => loadMachines({ keepSelection: true })}
+      />
       <DownloadPanel catalog={catalog} />
-      {error ? (
-        <section className="catalog-tree" data-catalog-tree>
-          <div className="empty load-error">{error}</div>
-        </section>
-      ) : (
-        <CatalogTree catalog={catalog} onAction={handleAction} onStart={handleStart} />
-      )}
+      {catalogContent}
     </main>
   );
 }

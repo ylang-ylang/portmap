@@ -1,11 +1,14 @@
 """Client access to remote portmap gateways and the local server role.
 
-Direct connections publish a DNS record for the locally verified reachable
-remote IP and keep using the remote HTTP port: no local HTTP gateway is
-involved. SSH connections share one browser-facing local HTTP gateway whose
-public port is separated from its unprivileged private listener. The local
-server role is persisted separately from user remote connections and proxies
-its whole domain to the local backend.
+Direct connections keep using the verified numeric remote IP and its remote
+HTTP port. SSH connections start one private OpenSSH master per remote and
+route its HTTP catalog through an owned Unix-socket forward inside the
+shared container infrastructure; no host-loopback upstream is exposed to the
+container. DNS records, the gateway routes and the resolver are owned by the
+one infrastructure controller, so every client mutation republishes through
+it. The local server role is persisted separately from user remote
+connections; it needs no native backend because the shared infrastructure
+routes the local domain to its own Docker-provider web entry.
 """
 from __future__ import annotations
 
@@ -18,23 +21,41 @@ import socket
 import stat
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit
 
-from .client_discovery import GatewayInfo, discover_ssh_hosts, discover_targets, probe_gateway, resolve_ssh_host
-from .client_dns import dns_status, resolver_status, setup_resolver, stop_dns, sync_dns, teardown_resolver, verify_resolution
-from .client_gateway import (
-    gateway_status,
-    preferred_http_port,
-    save_public_http_port,
-    stop_gateway,
-    sync_gateway,
+from .agent import ensure_agent_started
+from .client_discovery import (
+    GatewayInfo,
+    discover_ssh_hosts,
+    discover_targets,
+    probe_gateway,
+    probe_gateway_socket,
+    resolve_ssh_host,
 )
 from .client_runtime import legacy_client_state_dir
-from .client_tunnel import add_forward, cancel_forward, start_tunnel, stop_tunnel, tunnel_alive
+from .client_tunnel import (
+    add_forward,
+    add_http_forward,
+    cancel_forward,
+    cancel_http_forward,
+    start_tunnel,
+    stop_tunnel,
+    tunnel_alive,
+)
+from .infrastructure import (
+    infrastructure_status,
+    preferred_http_port,
+    save_public_http_port,
+    stop_infrastructure,
+    sync_infrastructure,
+)
 from .errors import PortmapError
+from .settings import PortmapSettings, load_portmap_settings
 
 
 class SSHSelectionRequired(PortmapError):
@@ -55,12 +76,12 @@ def client_lock(state_dir: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _load(state_dir: Path) -> dict[str, dict[str, Any]]:
+def _load_state(state_dir: Path) -> dict[str, Any]:
     path = state_dir / "connections.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
+        return {"version": 1, "connections": {}}
     except (OSError, ValueError) as exc:
         raise PortmapError(f"invalid connection state: {path}: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("connections"), dict):
@@ -68,14 +89,28 @@ def _load(state_dir: Path) -> dict[str, dict[str, Any]]:
     profiles = payload["connections"]
     if any(not isinstance(profile, dict) or domain != profile.get("domain") for domain, profile in profiles.items()):
         raise PortmapError(f"invalid connection profiles: {path}")
-    return profiles
+    legacy = payload.get("legacy_state_dir")
+    if legacy is not None and (not isinstance(legacy, str) or not Path(legacy).is_absolute()):
+        raise PortmapError(f"invalid legacy source state: {path}")
+    return payload
 
 
-def _save(state_dir: Path, profiles: dict[str, dict[str, Any]]) -> None:
+def _load(state_dir: Path) -> dict[str, dict[str, Any]]:
+    return _load_state(state_dir)["connections"]
+
+
+def _save(state_dir: Path, profiles: dict[str, dict[str, Any]], *, legacy_state_dir: Path | None = None) -> None:
+    # Keep import ownership in the same atomic record as the connections. A
+    # failed cutover, or a later disconnect, must not lose the source or cause
+    # the old directory's profiles to be imported again.
+    payload = _load_state(state_dir)
+    payload["connections"] = profiles
+    if legacy_state_dir is not None:
+        payload["legacy_state_dir"] = str(legacy_state_dir.expanduser().resolve())
     fd, name = tempfile.mkstemp(prefix=".connections-", dir=state_dir)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump({"version": 1, "connections": profiles}, handle, indent=2, sort_keys=True)
+            json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
         Path(name).replace(state_dir / "connections.json")
     finally:
@@ -112,53 +147,6 @@ def _save_local(state_dir: Path, profile: dict[str, Any] | None) -> None:
         Path(name).replace(state_dir / "local-server.json")
     finally:
         Path(name).unlink(missing_ok=True)
-
-
-def _records(profiles: dict[str, dict[str, Any]]) -> dict[str, str]:
-    """DNS records for the published domains.
-
-    Direct domains resolve to their verified remote IP; the local server and
-    routed SSH connections resolve to loopback behind the shared gateway. A
-    dormant SSH profile has no owned gateway route, so it gets no record at
-    all: a loopback record without our listener could send the domain to an
-    unrelated local service, while the honest answer is that the name is not
-    currently served.
-    """
-    records = {}
-    for domain, profile in profiles.items():
-        if profile.get("via") == "direct":
-            address = profile.get("address")
-            if not isinstance(address, str) or not address:
-                raise PortmapError(f"direct connection {domain} has no verified remote address")
-            records[domain] = address
-        elif profile.get("via") == "ssh":
-            if profile.get("tunnel") is not None:
-                records[domain] = "127.0.0.1"
-        else:
-            records[domain] = "127.0.0.1"
-    return records
-
-
-def _published_profiles(state_dir: Path, profiles: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Every domain that needs a DNS record: remote connections plus the local role."""
-    local = _load_local(state_dir)
-    return {**profiles, **({local["domain"]: local} if local else {})}
-
-
-def _gateway_profiles(profiles: dict[str, dict[str, Any]], local: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    """Only live SSH tunnels and the local role are routed through the gateway.
-
-    A migrated SSH profile whose tunnel was stopped stays saved but dormant
-    until the user reconnects it; direct connections never appear here.
-    """
-    managed = {
-        domain: profile
-        for domain, profile in profiles.items()
-        if profile.get("via") == "ssh" and profile.get("tunnel") is not None
-    }
-    if local is not None:
-        managed[local["domain"]] = local
-    return managed
 
 
 def _port(port: int) -> int:
@@ -239,16 +227,21 @@ def _open_ssh_upstream(
     expected_domain: str | None = None,
     use_sudo: bool = True,
 ) -> tuple[dict[str, Any], GatewayInfo, str]:
-    """Start an SSH master and forward the remote HTTP gateway to loopback.
+    """Start an SSH master and forward the remote HTTP gateway to a Unix socket.
 
-    Returns the tunnel descriptor, the verified gateway info, and the local
-    backend URL. A tunnel that cannot prove a catalog is stopped again before
-    the failure surfaces, so the caller only ever owns a live transport.
+    A short loopback TCP bootstrap proves the remote catalog and its domain,
+    then is cancelled immediately. The persistent upstream is the parent's
+    owned stream-local forward, so the container reaches the remote through
+    its private socket directory and no host-loopback HTTP listener remains.
+    Returns the tunnel descriptor, the verified gateway info, and the socket
+    path. A tunnel that cannot prove a catalog is stopped again before the
+    failure surfaces, so the caller only ever owns a live transport.
     """
     key = hashlib.sha256(chosen_ssh.encode()).hexdigest()[:20]
     tunnel = start_tunnel(chosen_ssh, state_dir=state_dir, key=key, config_file=ssh_config, timeout=max(timeout, 30), use_sudo=use_sudo)
-    bootstrap_port = _free_port()
+    socket_path: str | None = None
     try:
+        bootstrap_port = _free_port()
         candidate = _port(remote_port) if remote_port is not None else 80
         added = False
         try:
@@ -270,14 +263,21 @@ def _open_ssh_upstream(
                 f"the SSH target now serves {domain!r}, not the saved {expected_domain!r}; "
                 "refusing to replace the saved mapping"
             )
-        upstream_port = _free_port()
-        add_forward(tunnel, local_address="127.0.0.1", local_port=upstream_port, remote_port=info.http_port)
-        backend_url = _url("127.0.0.1", upstream_port)
-        info = probe_gateway(backend_url, timeout=timeout, expected_domain=domain)
+        upstream_port = info.http_port
+        socket_path = add_http_forward(tunnel, state_dir=state_dir, domain=domain, remote_port=upstream_port, timeout=max(timeout, 5))
+        try:
+            info = probe_gateway_socket(socket_path, timeout=timeout, expected_domain=domain)
+        except BaseException as exc:
+            failure = str(exc)
+            try:
+                cancel_http_forward(tunnel, socket_path=socket_path, remote_port=upstream_port)
+            except Exception as cleanup:
+                failure = f"{failure}; HTTP forward cleanup needs attention: {cleanup}"
+            raise PortmapError(failure) from exc
     except BaseException:
         stop_tunnel(tunnel)
         raise
-    return tunnel, info, backend_url
+    return tunnel, info, socket_path
 
 
 def _forward_tcp_ports(tunnel: dict[str, Any], info: GatewayInfo, tcp_address: str) -> list[int]:
@@ -295,16 +295,20 @@ def _forward_tcp_ports(tunnel: dict[str, Any], info: GatewayInfo, tcp_address: s
     return ports
 
 
+def _cancel_http_forward_quietly(tunnel: dict[str, Any], profile: dict[str, Any]) -> None:
+    """Retire a saved profile's socket forward through its ownership checks."""
+    socket_path = profile.get("http_socket")
+    if profile.get("tunnel") and isinstance(socket_path, str) and socket_path:
+        cancel_http_forward(tunnel, socket_path=socket_path, remote_port=_port(profile.get("remote_http_port") or 80))
+
+
 def _public_gateway_port(state_dir: Path) -> int:
     """Choose URLs before publication; a first SSH backend does not exist yet."""
-    status = gateway_status(state_dir)
-    if status.get("version") == 2 and status.get("running"):
-        return _port(status["http_port"])
-    return (
-        preferred_http_port(state_dir)
-        or (status.get("http_port") if status.get("version") == 2 else None)
-        or 80
-    )
+    status = infrastructure_status(state_dir)
+    gateway = status.get("gateway") or {}
+    if status.get("running") and gateway.get("http_port"):
+        return _port(gateway["http_port"])
+    return preferred_http_port(state_dir) or gateway.get("http_port") or 80
 
 
 def _endpoints(catalog: dict[str, Any], profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -322,7 +326,28 @@ def _endpoints(catalog: dict[str, Any], profile: dict[str, Any]) -> list[dict[st
 
 
 def _public(profile: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in profile.items() if key not in {"tunnel", "backend_url"}}
+    return {key: value for key, value in profile.items() if key not in {"tunnel", "backend_url", "http_socket", "ssh_config", "legacy_http_forward"}}
+
+
+def _probe_transport(profile: dict[str, Any], timeout: float) -> GatewayInfo:
+    """Probe the actual remote HTTP transport of one saved profile.
+
+    Direct profiles request their verified numeric remote origin; SSH
+    profiles request the remote catalog through the owned Unix-socket
+    forward, never through the local aggregate portal.
+    """
+    if profile.get("via") == "ssh":
+        if profile.get("tunnel") and not tunnel_alive(profile["tunnel"]):
+            raise PortmapError("SSH tunnel is down")
+        socket_path = profile.get("http_socket")
+        if not isinstance(socket_path, str) or not socket_path:
+            identity = profile.get("ssh_target") or profile.get("target")
+            raise PortmapError(f"saved SSH transport is dormant; restore it with 'portmap connect {identity}' or disconnect it")
+        return probe_gateway_socket(socket_path, timeout=timeout, expected_domain=profile["domain"])
+    backend_url = profile.get("backend_url")
+    if not isinstance(backend_url, str) or not backend_url:
+        raise PortmapError(f"direct connection {profile.get('domain')} has no verified remote address")
+    return probe_gateway(backend_url, timeout=timeout, expected_domain=profile["domain"])
 
 
 def _origin_parts(url: object) -> tuple[str, int]:
@@ -337,12 +362,11 @@ def _origin_parts(url: object) -> tuple[str, int]:
 
 
 def _migrated_profile(profile: dict[str, Any]) -> dict[str, Any]:
-    """Convert a saved standalone portmap-client profile to the unified model.
+    """Normalize a standalone profile without discarding its saved transport.
 
-    Direct profiles republish against their verified remote address and port.
-    SSH profiles keep their exact saved target and SSH config identity for
-    restoration; their stopped tunnel and dead loopback upstream are dropped,
-    leaving the profile dormant until setup or connect restores it.
+    Direct profiles retain their verified numeric origin. SSH profiles retain
+    the exact master, authentication, custom port and raw TCP forwards until
+    the common live-master adoption or normal dead-master restoration runs.
     """
     domain = profile.get("domain")
     if not isinstance(domain, str) or not domain:
@@ -365,68 +389,147 @@ def _migrated_profile(profile: dict[str, Any]) -> dict[str, Any]:
         }
     tunnel = profile.get("tunnel")
     saved_config = tunnel.get("config_file") if isinstance(tunnel, dict) else None
-    migrated = {
-        "domain": domain,
-        "target": profile.get("target"),
-        "ssh_target": profile.get("ssh_target"),
-        "via": "ssh",
-        "address": "127.0.0.1",
-        "scheme": "http",
-        "tcp_address": profile.get("tcp_address"),
-        "tcp_ports": [],
-        "include_tcp": bool(profile.get("include_tcp")),
-    }
-    if isinstance(saved_config, str) and saved_config:
-        # Preserve the exact configuration identity the saved connection used,
-        # never an invented alias, so restoration reconnects as it did before.
+    migrated = dict(profile)
+    if not migrated.get("ssh_config") and isinstance(saved_config, str) and saved_config:
         migrated["ssh_config"] = saved_config
     return migrated
 
 
-def _import_legacy_state(state_dir: Path, *, use_sudo: bool = True) -> None:
-    """Safely import the standalone portmap-client state directory once.
+def _import_legacy_state(state_dir: Path) -> None:
+    """Import only an unused, non-isolated standalone state directory.
 
-    Import only before the first saved connections file. An empty saved mapping
-    records an intentional disconnect or teardown and must not resurrect old
-    targets. Explicit shared or role-specific state overrides never import.
-    Every legacy worker, tunnel, DNS server, and resolver route is stopped
-    through its ownership-verified path; nothing unrelated is touched and the
-    legacy directory itself is retained.
+    Existing connections, including an intentionally empty mapping, are never
+    reimported. Source ownership survives failed/interrupted cutover in the
+    destination's connections record; the source itself remains untouched.
+    In-place migration does not import anything and is handled by _publish.
     """
+    if (state_dir / "connections.json").exists() or _load_local(state_dir) is not None:
+        return
     if os.environ.get("PORTMAP_CLIENT_STATE_DIR") or os.environ.get("PORTMAP_STATE_DIR"):
         return
     legacy = legacy_client_state_dir()
     if legacy == state_dir.expanduser().resolve() or not legacy.exists():
         return
-    if (state_dir / "connections.json").exists() or _load_local(state_dir) is not None:
-        return
     with client_lock(legacy):
-        profiles = _load(legacy)
-        for label, stop in (
-            ("gateway", lambda: stop_gateway(legacy, use_sudo=use_sudo)),
-            ("dns", lambda: stop_dns(legacy)),
-        ):
-            try:
-                stop()
-            except Exception as exc:
-                raise PortmapError(
-                    f"legacy portmap-client {label} under {legacy} could not be stopped safely; "
-                    f"resolve it before running setup: {exc}"
-                ) from exc
-        for domain, profile in profiles.items():
-            if profile.get("tunnel"):
-                try:
-                    stop_tunnel(profile["tunnel"])
-                except Exception as exc:
-                    raise PortmapError(
-                        f"legacy SSH tunnel for {domain} under {legacy} could not be stopped; "
-                        f"resolve it before running setup: {exc}"
-                    ) from exc
+        profiles = {domain: _migrated_profile(profile) for domain, profile in _load(legacy).items()}
+        _save(state_dir, profiles, legacy_state_dir=legacy)
+
+
+def _adopt_live_ssh(
+    state_dir: Path, profile: dict[str, Any], *, public: int, timeout: float,
+) -> dict[str, Any]:
+    """Attach the saved master, leaving its old HTTP and raw TCP forwards live."""
+    domain, tunnel = profile["domain"], profile["tunnel"]
+    remote_port = _port(profile.get("remote_http_port") or 80)
+    try:
+        socket_path = add_http_forward(tunnel, state_dir=state_dir, domain=domain, remote_port=remote_port, timeout=max(timeout, 5))
+    except Exception as exc:
+        raise PortmapError(f"legacy SSH connection {domain} could not be attached to the shared infrastructure: {exc}") from exc
+    try:
+        info = probe_gateway_socket(socket_path, timeout=timeout, expected_domain=domain)
+        migrated = _migrated_profile(profile)
+        obsolete = {}
         try:
-            teardown_resolver(legacy, use_sudo=use_sudo)
-        except Exception as exc:
-            raise PortmapError(f"legacy resolver route under {legacy} could not be removed safely: {exc}") from exc
-        _save(state_dir, {domain: _migrated_profile(profile) for domain, profile in profiles.items()})
+            address, local_port = _origin_parts(profile.get("backend_url"))
+        except PortmapError:
+            pass  # Without an exact tuple, the old forward stays on its master.
+        else:
+            shared_tcp = (
+                address == profile.get("tcp_address")
+                and local_port in (profile.get("tcp_ports") or [])
+                and local_port == remote_port
+            )
+            if ipaddress.ip_address(address).is_loopback and not shared_tcp:
+                obsolete = {"local_address": address, "local_port": local_port, "remote_port": remote_port}
+        migrated.update({
+            "http_socket": socket_path,
+            "remote_http_port": remote_port,
+            "http_port": public,
+            "catalog_url": _url(domain, public) + "/",
+            # Even an unknown obsolete tuple needs published-route proof before
+            # native retirement. Empty means there is nothing safe to cancel.
+            "legacy_http_forward": obsolete,
+        })
+        # Keep the original URL usable by native readers until cutover commits.
+        migrated["endpoints"] = _endpoints(info.catalog, migrated)
+        return migrated
+    except BaseException as exc:
+        try:
+            cancel_http_forward(tunnel, socket_path=socket_path, remote_port=remote_port)
+        except Exception as cleanup:
+            raise PortmapError(f"{exc}; HTTP forward cleanup needs attention: {cleanup}") from exc
+        raise
+
+
+def _prepare_live_ssh(
+    state_dir: Path, profiles: dict[str, dict[str, Any]], *, http_port: int | None = None, timeout: float = 5,
+) -> None:
+    """Persist each proved socket and its retirement tuple before publication.
+
+    The same operation handles standalone imports, in-place native state and
+    matching connects. A proved socket is retained if infrastructure cutover
+    fails: the old TCP listener still serves and the durable tuple permits a
+    retry without opening another master or losing source ownership.
+    """
+    public = http_port if http_port is not None else _public_gateway_port(state_dir)
+    for profile in profiles.values():
+        if profile.get("via") != "ssh" or not profile.get("tunnel"):
+            continue
+        if profile.get("http_socket") and "legacy_http_forward" not in profile:
+            continue
+        if not tunnel_alive(profile["tunnel"]):
+            # A dead master has no live HTTP listener to cut over. Keep its
+            # descriptor/config for normal restoration after publication.
+            profile.pop("legacy_http_forward", None)
+            continue
+        if profile.get("http_socket"):
+            if "legacy_http_forward" in profile:
+                _probe_transport(profile, timeout)
+            continue
+        migrated = _adopt_live_ssh(state_dir, profile, public=public, timeout=timeout)
+        original = dict(profile)
+        profile.clear()
+        profile.update(migrated)
+        try:
+            _save(state_dir, profiles)
+        except BaseException:
+            profile.clear()
+            profile.update(original)
+            _cancel_http_forward_quietly(migrated["tunnel"], migrated)
+            raise
+
+
+def _retire_obsolete_forwards(state_dir: Path, profiles: dict[str, dict[str, Any]]) -> list[str]:
+    """Retire exact old HTTP tuples only after shared-route readiness.
+
+    Save after each retirement. If interrupted between cancellation and save,
+    a refused cancellation is complete only when that exact listener is gone;
+    an accepting or indeterminate listener keeps its ownership record.
+    """
+    failures = []
+    for domain, profile in profiles.items():
+        if "legacy_http_forward" not in profile:
+            continue
+        forward = profile["legacy_http_forward"]
+        if forward:
+            try:
+                cancel_forward(profile["tunnel"], **forward)
+            except Exception as exc:
+                try:
+                    with socket.create_connection((forward["local_address"], forward["local_port"]), timeout=1):
+                        pass
+                except ConnectionRefusedError:
+                    pass
+                except OSError:
+                    failures.append(f"{domain}: {exc}")
+                    continue
+                else:
+                    failures.append(f"{domain}: {exc}")
+                    continue
+        del profile["legacy_http_forward"]
+        profile.pop("backend_url", None)
+        _save(state_dir, profiles)
+    return failures
 
 
 def _apply_public_http_port(state_dir: Path, profiles: dict[str, dict[str, Any]], http_port: int) -> None:
@@ -444,67 +547,86 @@ def _apply_public_http_port(state_dir: Path, profiles: dict[str, dict[str, Any]]
         if profile.get("via") != "direct":
             profile.pop("endpoints", None)
             profile["http_port"] = http_port
+            if isinstance(profile.get("domain"), str):
+                profile["catalog_url"] = _url(profile["domain"], http_port) + "/"
     if profiles:
         _save(state_dir, profiles)
 
 
-def setup_client(state_dir: Path, *, use_sudo: bool = True, http_port: int | None = None) -> dict[str, Any]:
+def setup_client(
+    state_dir: Path,
+    *,
+    use_sudo: bool = True,
+    http_port: int | None = None,
+    settings: PortmapSettings | None = None,
+) -> dict[str, Any]:
     if http_port is not None:
         _port(http_port)
     with client_lock(state_dir):
-        _import_legacy_state(state_dir, use_sudo=use_sudo)
+        _import_legacy_state(state_dir)
         profiles = _load(state_dir)
-        local = _load_local(state_dir)
-        had_resolver = resolver_status(state_dir)["installed"]
-        had_dns = dns_status(state_dir)["running"]
-        had_gateway = gateway_status(state_dir)["running"]
-        try:
-            # Linux DNS binds the dedicated dummy address, which must exist
-            # before CoreDNS starts (also works with systemd-resolved 249).
-            resolver = setup_resolver(state_dir, use_sudo=use_sudo)
-            dns = sync_dns(state_dir, _records(_published_profiles(state_dir, profiles)), use_sudo=use_sudo)
-            # Keep the private HTTP entry ready even before an SSH connection
-            # or local publishing role exists. Direct DNS still bypasses it.
-            gateway = sync_gateway(state_dir, _gateway_profiles(profiles, local), http_port=http_port, use_sudo=use_sudo)
-            if http_port is not None:
-                _apply_public_http_port(state_dir, profiles, http_port)
-            # Re-establish saved SSH transports whose authentication is still
-            # available (exactly one attempt each); remotes that cannot be
-            # restored keep their saved configuration and are reported.
-            restored, restore_failures = _restore_saved_ssh(state_dir, profiles, use_sudo=use_sudo)
-            result = {"dns": dns, "resolver": resolver, "gateway": gateway, "state_dir": str(state_dir)}
-            if restored:
-                result["restored_connections"] = restored
-            if restore_failures:
-                result["restore_failures"] = restore_failures
-            return result
-        except Exception as exc:
-            cleanups = []
-            if not had_gateway:
-                cleanups.append(lambda: stop_gateway(state_dir, use_sudo=use_sudo))
-            if not had_resolver:
-                cleanups.append(lambda: teardown_resolver(state_dir, use_sudo=use_sudo))
-            if not had_dns:
-                cleanups.append(lambda: stop_dns(state_dir))
-            cleanup_errors = []
-            for cleanup in cleanups:
-                try:
-                    cleanup()
-                except Exception as failure:
-                    cleanup_errors.append(str(failure))
-            if cleanup_errors:
-                raise PortmapError(f"{exc}; cleanup failed: {'; '.join(cleanup_errors)}") from exc
-            raise
+        _prepare_live_ssh(state_dir, profiles, http_port=http_port)
+        effective = settings if settings is not None else load_portmap_settings()
+        # Portal controls need the host agent even for remote-only users.
+        agent = ensure_agent_started(effective, use_sudo=use_sudo, access_state_dir=state_dir)
+        if not agent.running:
+            raise PortmapError(agent.message)
+        # _publish adopts live native masters before the controller can prove
+        # or retire anything. The controller owns transactional rollback; a
+        # blanket stop here could destroy the old route or a committed cutover.
+        shared = _publish(state_dir, profiles, settings=settings, http_port=http_port, use_sudo=use_sudo)
+        if http_port is not None:
+            _apply_public_http_port(state_dir, profiles, http_port)
+        restored, restore_failures = _restore_saved_ssh(state_dir, profiles, use_sudo=use_sudo)
+        result = {"dns": shared["dns"], "resolver": shared["resolver"], "gateway": shared["gateway"], "state_dir": str(state_dir)}
+        if restored:
+            result["restored_connections"] = restored
+        if restore_failures:
+            result["restore_failures"] = restore_failures
+        if shared.get("legacy_forward_failures"):
+            result["legacy_forward_failures"] = shared["legacy_forward_failures"]
+
+    # The shared infrastructure is ready and the client lock is released, so
+    # an already-publishing legacy server can migrate onto it now instead of
+    # keeping a second stack until the next `up`. Server -> client ->
+    # infrastructure is the canonical lock order; the client lock is never
+    # held while the server role takes its own.
+    migration = _migrate_legacy_publishing(effective, use_sudo=use_sudo)
+    if migration:
+        result["legacy_server_migration"] = migration
+    return result
 
 
-def _publish(state_dir: Path, profiles: dict[str, dict[str, Any]], *, use_sudo: bool = True) -> None:
-    # The local catalog view reads connections.json. Publish it before the
-    # routes, then DNS last; mutations are serialized by client_lock and rolled
-    # back. Direct records keep their verified remote addresses, so a failing
-    # SSH publication never disturbs them.
+def _migrate_legacy_publishing(settings: PortmapSettings, *, use_sudo: bool = True) -> dict[str, Any] | None:
+    """Move an already-publishing legacy server onto the shared infrastructure.
+
+    Runs only after setup proved the shared infrastructure and released the
+    client lock, respecting the canonical server -> client -> infrastructure
+    lock order; the server role never recurses into client setup itself.
+    """
+    from .server import migrate_legacy_server
+
+    return migrate_legacy_server(settings, use_sudo=use_sudo)
+
+
+def _publish(
+    state_dir: Path, profiles: dict[str, dict[str, Any]], *, use_sudo: bool = True,
+    settings: PortmapSettings | None = None, http_port: int | None = None, timeout: float = 5,
+) -> dict[str, Any]:
+    # The local catalog view reads connections.json. Persist both the proposed
+    # routes and their pending legacy ownership before the controller stages
+    # them; every publication path must adopt live native SSH first.
+    _prepare_live_ssh(state_dir, profiles, http_port=http_port, timeout=timeout)
     _save(state_dir, profiles)
-    sync_gateway(state_dir, _gateway_profiles(profiles, _load_local(state_dir)), use_sudo=use_sudo)
-    sync_dns(state_dir, _records(_published_profiles(state_dir, profiles)), use_sudo=use_sudo)
+    source = _load_state(state_dir).get("legacy_state_dir")
+    shared = sync_infrastructure(
+        state_dir, profiles, _load_local(state_dir), use_sudo=use_sudo, settings=settings,
+        http_port=http_port, legacy_state_dir=Path(source) if source else None,
+    )
+    failures = _retire_obsolete_forwards(state_dir, profiles)
+    if failures:
+        shared["legacy_forward_failures"] = failures
+    return shared
 
 
 def _restore_ssh_profile(
@@ -527,40 +649,53 @@ def _restore_ssh_profile(
     profile = profiles.get(domain)
     if not isinstance(profile, dict) or profile.get("via") != "ssh":
         raise PortmapError(f"no saved SSH connection for {domain}")
+    stale = profile.get("tunnel")
+    if stale is not None and tunnel_alive(stale):
+        # A matching native connection needs adoption, never authentication or
+        # reconnect. _publish proves its socket and the shared public route.
+        shared = _publish(state_dir, profiles, use_sudo=use_sudo, timeout=timeout)
+        result = _public(profiles[domain])
+        if shared.get("legacy_forward_failures"):
+            result["legacy_forward_failures"] = shared["legacy_forward_failures"]
+        return result
     identity = profile.get("ssh_target") or profile.get("target")
     if not isinstance(identity, str) or not identity:
         raise PortmapError(f"{domain} has no saved SSH target to restore; disconnect it and connect again")
-    saved_config = profile.get("ssh_config")
+    saved_config = profile.get("ssh_config") or (stale.get("config_file") if isinstance(stale, dict) else None)
     ssh_config = Path(saved_config) if isinstance(saved_config, str) and saved_config else None
-    stale = profile.get("tunnel")
     original = dict(profile)
     tunnel = None
+    socket_path: str | None = None
+    forward_port: int | None = None
     mutated = False
     try:
         if stale is not None:
-            profile.pop("tunnel", None)
             mutated = True
+            _cancel_http_forward_quietly(stale, profile)
+            profile.pop("tunnel", None)
             stop_tunnel(stale)
         public = _public_gateway_port(state_dir)
-        tunnel, info, backend_url = _open_ssh_upstream(
+        tunnel, info, socket_path = _open_ssh_upstream(
             state_dir, identity, ssh_config=ssh_config, remote_port=profile.get("remote_http_port"),
             timeout=timeout, expected_domain=domain, use_sudo=use_sudo,
         )
         mutated = True
+        forward_port = info.http_port
         tcp_address = profile.get("tcp_address") or _tcp_loopback(domain, profiles)
         tcp_ports = _forward_tcp_ports(tunnel, info, tcp_address) if profile.get("include_tcp") else []
         profile.update({
-            "backend_url": backend_url,
+            "http_socket": socket_path,
             "remote_http_port": info.http_port,
             "http_port": public,
             "tcp_address": tcp_address,
             "tcp_ports": tcp_ports,
             "catalog_url": _url(domain, public) + "/",
         })
+        profile.pop("backend_url", None)
+        profile.pop("legacy_http_forward", None)
         profile["endpoints"] = _endpoints(info.catalog, profile)
         profile["tunnel"] = tunnel
         _publish(state_dir, profiles, use_sudo=use_sudo)
-        verify_resolution(domain, "127.0.0.1")
         probe_gateway(_url(domain, public), timeout=timeout, expected_domain=domain)
         return _public(profile)
     except BaseException as exc:
@@ -569,11 +704,18 @@ def _restore_ssh_profile(
             profile.clear()
             profile.update(original)
             profile.pop("tunnel", None)
+            profile.pop("http_socket", None)
+            profile.pop("legacy_http_forward", None)
             try:
                 _publish(state_dir, profiles, use_sudo=use_sudo)
             except Exception as cleanup:
                 rollback_errors.append(str(cleanup))
         if tunnel is not None:
+            if socket_path is not None and forward_port is not None:
+                try:
+                    cancel_http_forward(tunnel, socket_path=socket_path, remote_port=forward_port)
+                except Exception as cleanup:
+                    rollback_errors.append(str(cleanup))
             try:
                 stop_tunnel(tunnel)
             except Exception as cleanup:
@@ -611,7 +753,7 @@ def _restore_saved_ssh(
     for domain, profile in list(profiles.items()):
         if profile.get("via") != "ssh":
             continue
-        if profile.get("tunnel") is not None and tunnel_alive(profile["tunnel"]):
+        if profile.get("http_socket") and profile.get("tunnel") is not None and tunnel_alive(profile["tunnel"]):
             continue
         try:
             restored.append(_restore_ssh_profile(state_dir, profiles, domain, use_sudo=use_sudo, timeout=timeout))
@@ -645,7 +787,7 @@ def connect(
     if remote_port is not None:
         _port(remote_port)
     with client_lock(state_dir):
-        if not resolver_status(state_dir)["installed"]:
+        if not infrastructure_status(state_dir).get("resolver", {}).get("installed"):
             raise PortmapError("local split DNS is not configured; run portmap setup first")
         profiles = _load(state_dir)
         local = _load_local(state_dir)
@@ -662,7 +804,7 @@ def connect(
             if profile.get("via") == "ssh":
                 if include_tcp and not profile.get("include_tcp"):
                     raise PortmapError(f"TCP forwarding options changed; disconnect {profile['domain']} before reconnecting")
-                if not profile.get("tunnel") or not tunnel_alive(profile["tunnel"]):
+                if "legacy_http_forward" in profile or not profile.get("http_socket") or not profile.get("tunnel") or not tunnel_alive(profile["tunnel"]):
                     # The verified saved identity matched: revive the saved
                     # transport instead of dead-ending behind a forced
                     # disconnect. A different target still hits the domain
@@ -673,19 +815,20 @@ def connect(
                         "restored": True,
                         "dns_ready": True,
                     }
-            info = probe_gateway(profile["backend_url"], timeout=timeout, expected_domain=profile["domain"])
+            info = _probe_transport(profile, timeout)
             profile["remote_http_port"] = info.http_port
             if profile.get("via") == "ssh":
                 profile["http_port"] = _public_gateway_port(state_dir)
             profile["endpoints"] = _endpoints(info.catalog, profile)
             _publish(state_dir, profiles, use_sudo=use_sudo)
-            verify_resolution(profile["domain"], profile["address"])
             port = info.http_port if profile.get("via") == "direct" else profile["http_port"]
             probe_gateway(_url(profile["domain"], port), timeout=timeout, expected_domain=profile["domain"])
             return {**_public(profile), "already_connected": True, "dns_ready": True}
         info = None
         direct_error = None
         tunnel = None
+        socket_path: str | None = None
+        upstream_port: int | None = None
         publishing = False
         try:
             if via != "ssh":
@@ -705,6 +848,7 @@ def connect(
             tcp_ports: list[int] = []
             chosen_ssh = None
             local_gateway_port = None
+            backend_url = None
             if info is not None:
                 selected = "direct"
                 domain, tcp_address = info.domain, info.address
@@ -717,13 +861,14 @@ def connect(
                         f"direct connection failed: {direct_error}. No configured SSH target could be identified. "
                         "Use --via ssh with a full target (including .coder aliases), or --ssh-target user@host."
                     )
-                # Publication starts the gateway only after a verified SSH
-                # backend exists; choosing the port does not start a listener.
+                # Publication starts the shared gateway only after a verified
+                # SSH backend exists; choosing the port does not start anything.
                 local_gateway_port = _public_gateway_port(state_dir)
-                tunnel, info, backend_url = _open_ssh_upstream(
+                tunnel, info, socket_path = _open_ssh_upstream(
                     state_dir, chosen_ssh, ssh_config=ssh_config,
                     remote_port=remote_port, timeout=timeout, use_sudo=use_sudo,
                 )
+                upstream_port = info.http_port
                 domain = info.domain
                 tcp_address = _tcp_loopback(domain, profiles)
                 if include_tcp:
@@ -739,20 +884,21 @@ def connect(
                 "address": info.address if selected == "direct" else "127.0.0.1",
                 "remote_http_port": info.http_port,
                 "scheme": "http",
-                "backend_url": backend_url,
                 "catalog_url": _url(domain, info.http_port if selected == "direct" else local_gateway_port) + "/",
                 "tcp_address": tcp_address,
                 "tcp_ports": tcp_ports,
                 "include_tcp": include_tcp,
             }
-            if selected == "ssh":
+            if selected == "direct":
+                profile["backend_url"] = backend_url
+            else:
                 profile["http_port"] = local_gateway_port
+                profile["http_socket"] = socket_path
             profile["endpoints"] = _endpoints(info.catalog, profile)
             if tunnel:
                 profile["tunnel"] = tunnel
             publishing = True
             _publish(state_dir, {**profiles, domain: profile}, use_sudo=use_sudo)
-            verify_resolution(domain, profile["address"])
             # Prove the published path. Direct connections resolve straight to
             # the verified remote IP on the remote port; SSH connections prove
             # the public local gateway with the HTTP Host preserved remotely.
@@ -766,6 +912,11 @@ def connect(
                 except Exception as cleanup:
                     cleanup_errors.append(str(cleanup))
             if tunnel:
+                if socket_path is not None and upstream_port is not None:
+                    try:
+                        cancel_http_forward(tunnel, socket_path=socket_path, remote_port=upstream_port)
+                    except Exception as cleanup:
+                        cleanup_errors.append(str(cleanup))
                 try:
                     stop_tunnel(tunnel)
                 except Exception as cleanup:
@@ -776,7 +927,11 @@ def connect(
 
 
 def _local_role(state_dir: Path, spec: dict[str, Any]) -> dict[str, Any]:
-    """Validate a caller-supplied local role into its canonical profile."""
+    """Validate a caller-supplied local role into its canonical profile.
+
+    The local role needs no native backend: the shared infrastructure routes
+    the local domain to its own Docker-provider web entry.
+    """
     if not isinstance(spec, dict):
         raise PortmapError("local server profile must be an object")
     domain = spec.get("domain")
@@ -784,25 +939,6 @@ def _local_role(state_dir: Path, spec: dict[str, Any]) -> dict[str, Any]:
         raise PortmapError("local server profile requires a domain")
     domain = domain.strip().lower()
     _require_domain(domain)
-    backend_port = spec.get("backend_port")
-    if backend_port is not None:
-        backend_url = _url("127.0.0.1", _port(backend_port))
-    else:
-        backend_url = spec.get("backend_url")
-        if not isinstance(backend_url, str):
-            raise PortmapError("local server profile requires backend_port or backend_url")
-        parsed = urlsplit(backend_url)
-        if (
-            parsed.scheme != "http"
-            or parsed.hostname != "127.0.0.1"
-            or parsed.path not in {"", "/"}
-            or parsed.query
-            or parsed.fragment
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise PortmapError("local backend must be a plain http://127.0.0.1:<port> origin")
-        backend_url = _url("127.0.0.1", _port(parsed.port if parsed.port is not None else 80))
     public = spec.get("http_port")
     if public is None:
         public = preferred_http_port(state_dir)
@@ -812,7 +948,6 @@ def _local_role(state_dir: Path, spec: dict[str, Any]) -> dict[str, Any]:
     return {
         "domain": domain,
         "via": "local",
-        "backend_url": backend_url,
         "remote_http_port": public,
         "http_port": public,
         "address": "127.0.0.1",
@@ -824,7 +959,7 @@ def _local_role(state_dir: Path, spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def set_local_server(state_dir: Path, profile: dict[str, Any] | None, *, use_sudo: bool = True) -> dict[str, Any]:
+def set_local_server(state_dir: Path, profile: dict[str, Any] | None, *, use_sudo: bool = True, settings: PortmapSettings | None = None) -> dict[str, Any]:
     """Publish or remove the local server role without touching remote connections."""
     with client_lock(state_dir):
         profiles = _load(state_dir)
@@ -832,28 +967,19 @@ def set_local_server(state_dir: Path, profile: dict[str, Any] | None, *, use_sud
         if profile is None:
             role = None
             if current is None:
-                return {
-                    "local": None,
-                    "dns": dns_status(state_dir),
-                    "resolver": resolver_status(state_dir),
-                    "gateway": gateway_status(state_dir),
-                }
+                status = infrastructure_status(state_dir)
+                return {"local": None, **status}
         else:
             role = _local_role(state_dir, profile)
             if role["domain"] in profiles:
                 raise PortmapError(f"{role['domain']} is used by a remote connection; disconnect it before publishing the local server")
         _save_local(state_dir, role)
         try:
-            _publish(state_dir, profiles, use_sudo=use_sudo)
+            status = _publish(state_dir, profiles, use_sudo=use_sudo, settings=settings)
         except Exception:
             _save_local(state_dir, current)
             raise
-        return {
-            "local": _public(role) if role else None,
-            "dns": dns_status(state_dir),
-            "resolver": resolver_status(state_dir),
-            "gateway": gateway_status(state_dir),
-        }
+        return {"local": _public(role) if role else None, **status}
 
 
 def connections(state_dir: Path, *, check: bool = False) -> dict[str, Any]:
@@ -864,26 +990,32 @@ def connections(state_dir: Path, *, check: bool = False) -> dict[str, Any]:
             row = _public(profile)
             row["status"] = "configured"
             if check:
-                port = profile.get("remote_http_port") if profile.get("via") == "direct" else profile.get("http_port")
+                # One bounded request against the actual remote transport:
+                # direct profiles hit their numeric remote origin, SSH
+                # profiles the owned Unix-socket forward. The elapsed time is
+                # an HTTP catalog round trip, never a ping or the local
+                # aggregate portal, and a failure carries no number.
+                checked_at = datetime.now(timezone.utc).isoformat()
                 try:
-                    if profile.get("tunnel") and not tunnel_alive(profile["tunnel"]):
-                        raise PortmapError("SSH tunnel is down")
-                    if port is None:
-                        identity = profile.get("ssh_target") or profile.get("target")
-                        raise PortmapError(f"saved SSH transport is dormant; restore it with 'portmap connect {identity}' or disconnect it")
-                    probe_gateway(_url(profile["domain"], port), expected_domain=profile["domain"])
-                    row["status"] = "reachable"
+                    started = time.monotonic()
+                    _probe_transport(profile, 5)
+                    elapsed = time.monotonic() - started
                 except PortmapError as exc:
                     row["status"] = "unreachable"
                     row["error"] = str(exc)
+                else:
+                    row["status"] = "reachable"
+                    row["latency_ms"] = round(elapsed * 1000, 2)
+                row["last_checked_at"] = checked_at
             rows.append(row)
         local = _load_local(state_dir)
+        status = infrastructure_status(state_dir)
         return {
             "connections": rows,
             "local": _public(local) if local else None,
-            "dns": dns_status(state_dir),
-            "resolver": resolver_status(state_dir),
-            "gateway": gateway_status(state_dir),
+            "dns": status["dns"],
+            "resolver": status["resolver"],
+            "gateway": status["gateway"],
         }
 
 
@@ -901,6 +1033,7 @@ def disconnect(state_dir: Path, domain: str, *, use_sudo: bool = True) -> dict[s
         try:
             _publish(state_dir, proposed, use_sudo=use_sudo)
             if profile.get("tunnel"):
+                _cancel_http_forward_quietly(profile["tunnel"], profile)
                 stop_tunnel(profile["tunnel"])
         except Exception:
             _publish(state_dir, profiles, use_sudo=use_sudo)
@@ -914,23 +1047,23 @@ def teardown_client(state_dir: Path, *, use_sudo: bool = True) -> dict[str, Any]
         if _load_local(state_dir) is not None:
             raise PortmapError("local publishing is active; run portmap down before teardown")
         profiles = _load(state_dir)
-        # If removing the resolver route fails, retain its working DNS target.
-        teardown_resolver(state_dir, use_sudo=use_sudo)
         errors = []
         remaining = {}
         for domain, profile in profiles.items():
-            if profile.get("tunnel"):
-                try:
-                    stop_tunnel(profile["tunnel"])
-                except Exception as exc:
-                    errors.append(str(exc))
-                    remaining[domain] = profile
-        _save(state_dir, remaining)
-        for stop in (lambda path: stop_gateway(path, use_sudo=use_sudo), stop_dns):
+            tunnel = profile.get("tunnel")
+            if not tunnel:
+                continue
             try:
-                stop(state_dir)
+                _cancel_http_forward_quietly(tunnel, profile)
+                stop_tunnel(tunnel)
             except Exception as exc:
                 errors.append(str(exc))
+                remaining[domain] = profile
+        _save(state_dir, remaining)
+        try:
+            stop_infrastructure(state_dir, use_sudo=use_sudo)
+        except Exception as exc:
+            errors.append(str(exc))
         if errors:
             raise PortmapError("client teardown incomplete: " + "; ".join(errors))
         return {"stopped": True, "state_dir": str(state_dir)}
