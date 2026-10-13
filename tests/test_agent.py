@@ -12,6 +12,7 @@ def settings(tmp_path):
         "PORTMAP_ROOT": str(tmp_path),
         "PORTMAP_STATE_DIR": str(tmp_path / "state"),
         "PORTMAP_AGENT_RUNTIME_DIR": str(tmp_path / "agent"),
+        "PORTMAP_RUNTIME": "docker",
     })
 
 
@@ -40,3 +41,23 @@ def test_agent_start_refuses_session_escape_without_sudo_before_spawn(settings, 
         agent.ensure_agent_started(settings, use_sudo=False)
 
     assert not settings.agent_log_file.exists()
+
+
+def test_agent_upgrade_preserves_live_worker_when_scope_permission_is_denied(settings, monkeypatch):
+    monkeypatch.setattr(client_runtime.sys, "platform", "linux")
+    monkeypatch.setattr(client_runtime, "_persistent_scope", None)
+    monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: [
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/portmap-brew-setup.service",
+    ])
+    monkeypatch.setattr(client_runtime.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(agent, "agent_status", lambda _settings: _status(settings, running=True))
+    monkeypatch.setattr(agent, "agent_health", lambda **kwargs: {
+        "protocol": agent.AGENT_PROTOCOL, "version": "0.0.0",
+    })
+
+    def must_not_stop(*args, **kwargs):
+        raise AssertionError("a working old agent must survive failed upgrade preflight")
+
+    monkeypatch.setattr(agent, "_stop_agent", must_not_stop)
+    with pytest.raises(PortmapError, match="--no-sudo"):
+        agent.ensure_agent_started(settings, use_sudo=False)

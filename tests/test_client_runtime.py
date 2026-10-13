@@ -80,6 +80,7 @@ def test_worker_environment_resets_bootloader_only_when_frozen(monkeypatch, tmp_
 
 
 SESSION = "/user.slice/user-1000.slice/user@1000.service/session-9.scope"
+USER_SERVICE = "/user.slice/user-1000.slice/user@1000.service/app.slice/portmap-brew-setup.service"
 
 
 def reset_scope_state(monkeypatch):
@@ -93,20 +94,19 @@ def forbid_busctl(monkeypatch):
     monkeypatch.setattr(client_runtime.subprocess, "run", forbidden)
 
 
-def test_login_session_scope_matches_only_session_scopes(monkeypatch):
+def test_disposable_scope_distinguishes_user_lifetimes_from_system_services(monkeypatch):
     legacy = "/user.slice/user-1000.slice/session-c2.scope"
     monkeypatch.setattr(
         client_runtime, "_cgroup_paths",
-        lambda: ["", "/system.slice/portmap.service", "/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope"],
+        lambda: ["", "/system.slice/portmap.service", "/system.slice/portmap-1000-123.scope"],
     )
-    assert client_runtime._login_session_scope() is None
-    monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: [SESSION])
-    assert client_runtime._login_session_scope() == SESSION
-    monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: [legacy])
-    assert client_runtime._login_session_scope() == legacy
+    assert client_runtime._disposable_user_scope() is None
+    for disposable in (SESSION, legacy, USER_SERVICE):
+        monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda path=disposable: [path])
+        assert client_runtime._disposable_user_scope() == disposable
 
 
-def test_persistent_scope_does_nothing_outside_a_login_session(monkeypatch):
+def test_persistent_scope_does_nothing_in_a_system_service(monkeypatch):
     reset_scope_state(monkeypatch)
     forbid_busctl(monkeypatch)
     monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: ["/system.slice/portmap.service"])
@@ -122,19 +122,20 @@ def test_persistent_scope_does_nothing_off_linux(monkeypatch):
     assert client_runtime.ensure_persistent_scope(use_sudo=False) is None
 
 
-def test_persistent_scope_refuses_without_sudo_before_any_worker(monkeypatch):
+@pytest.mark.parametrize("disposable", [SESSION, USER_SERVICE])
+def test_persistent_scope_refuses_without_sudo_before_any_worker(monkeypatch, disposable):
     reset_scope_state(monkeypatch)
     forbid_busctl(monkeypatch)
     monkeypatch.setattr(client_runtime.os, "geteuid", lambda: 1000)
-    monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: [SESSION])
+    monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: [disposable])
     with pytest.raises(PortmapError, match="--no-sudo"):
         client_runtime.ensure_persistent_scope(use_sudo=False)
     assert client_runtime._persistent_scope is None
 
 
-def adopt_scope(monkeypatch, *, euid):
+def adopt_scope(monkeypatch, *, euid, initial=SESSION):
     commands = []
-    paths = [SESSION]
+    paths = [initial]
 
     def run(command, **kwargs):
         commands.append(list(command))
@@ -150,11 +151,12 @@ def adopt_scope(monkeypatch, *, euid):
 
 
 @pytest.mark.parametrize("euid", [0, 1000])
-def test_persistent_scope_adopts_once_per_cli_process(monkeypatch, euid):
+@pytest.mark.parametrize("initial", [SESSION, USER_SERVICE])
+def test_persistent_scope_adopts_once_per_cli_process(monkeypatch, euid, initial):
     reset_scope_state(monkeypatch)
-    commands = adopt_scope(monkeypatch, euid=euid)
+    commands = adopt_scope(monkeypatch, euid=euid, initial=initial)
     scope = client_runtime.ensure_persistent_scope(use_sudo=euid != 0)
-    assert client_runtime._login_session_scope() is None
+    assert client_runtime._disposable_user_scope() is None
     assert client_runtime.ensure_persistent_scope(use_sudo=False) == scope
     assert len(commands) == 1
 

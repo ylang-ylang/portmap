@@ -120,3 +120,15 @@
   installed upgrades, host/container access, logout survival and isolated
   teardown on PVE VM101/102. Restore NSS/dependency state and remove only owned
   fixtures; preserve original workloads, DNS and running 4096 MiB VM settings.
+- Integrate `feat/brew-install-lifecycle`: reconcile replaced source bind mounts
+  on Brew reinstall, preserve ordinary-user workers outside user-manager cleanup,
+  and preflight scope permissions before retiring an existing host agent.
+- Append Settings to the machine tab row for Downloads and Connections; keep
+  service empty states within machine views, remove the technical metadata
+  row, and use canonical machine URLs for Web access checks.
+- Verify 595 source cases, real notebook Brew install/reinstall and scoped
+  ordinary-user agent/state preservation. The final native UI/download check
+  remains blocked when the notebook subsequently leaves the reachable network.
+- Confirm the final compiled UI in a read-only recorded-data Chromium preview,
+  including the local-only `本机` badge, retained drafts and keyboard/remote
+  navigation; keep that evidence separate from blocked native notebook checks.

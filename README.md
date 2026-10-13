@@ -76,8 +76,8 @@ or range exposure is delegated to Docker Compose port mappings.
 Every machine running `portmap setup` needs a working local Docker or rootless
 Podman API socket and the Docker Compose CLI, including remote-only clients.
 CoreDNS, Traefik, the catalog, and the SSH socket relay run in one shared
-container stack; there is no native DNS/HTTP fallback. Installing the command
-alone starts nothing. See [Unified CLI](#unified-cli).
+container stack; there is no native DNS/HTTP fallback. Standalone installation
+alone starts nothing; Homebrew also runs setup. See [Unified CLI](#unified-cli).
 
 For local publishing, your project should use Compose, and managed services
 should have:
@@ -214,10 +214,14 @@ that endpoint. If a service needs a specific upstream Host, set
 ## Unified CLI
 
 One `portmap` command can access remote machines, publish this machine's
-projects, or do both. Installing it does not enable either role.
+projects, or do both. The standalone installer only places the command;
+Homebrew also initializes the access role. Neither publishes projects or
+enables boot services automatically.
 
-Open a trusted server's catalog and use **Download portmap**, or run its
-installer:
+Open a trusted server's catalog and select **Settings → Download portmap**,
+or run its installer below. **Settings** is the last tab after the machines;
+in the private portal it also contains **Connections**. Service empty states
+stay inside machine tabs. The portal's own machine carries a small **本机** badge.
 
 ```bash
 SERVER=http://192.0.2.10
@@ -244,15 +248,26 @@ the one-time OS prerequisite; it is not repeated per project, connection, or
 upgrade, and is also necessary for native DNS servers. Portmap does not rewrite
 those global files; enable the OS resolver integration separately.
 
-The Web page also offers Homebrew installation and upgrade:
+On Linux, Homebrew installs the command and runs `portmap setup` in the same
+operation. A successful install leaves `http://127.0.0.1/` usable; no separate
+setup command is required:
 
 ```bash
 brew install ylang-ylang/tap/portmap
 brew upgrade ylang-ylang/tap/portmap
 ```
 
-The container runtime is a separate prerequisite, not something the installer
-starts or enables. Source installations are also supported:
+The container runtime is a separate prerequisite. Portmap reuses an accessible
+local Docker or Podman API, preferring Docker when both are available and
+honoring explicit runtime configuration. It does not install, start, enable,
+or reconfigure a container engine. A missing/inaccessible API or failed
+initialization makes the Brew command fail; installing the CLI alone is not
+reported as a ready gateway. The login user needs a user systemd manager and
+sudo authorization for the existing scoped DNS/HTTP integration. Owned old
+standalone launchers are retired, but their bundles and saved connections
+are retained.
+
+Source installations are also supported:
 
 ```bash
 uv tool install --editable /path/to/portmap --force
@@ -309,7 +324,8 @@ another host zone under `.portmap`.
 `127.0.0.1:80` entry, including when there are no profiles or only direct
 connections. Disconnecting the last remote does not release the entry.
 After stopping local publishing, `portmap teardown` releases the owned
-entry and DNS integration. Installation alone performs none of these steps.
+entry and DNS integration. Standalone installation alone performs none of
+these steps; the Brew formula initializes access automatically.
 
 The private ingress forwards to the shared container Traefik's access
 entrypoint. Traefik routes each SSH domain through a container relay to that
@@ -329,16 +345,17 @@ binary capabilities, or lower `net.ipv4.ip_unprivileged_port_start`.
 Units are not enabled at boot. Rerun `setup` and `up` as needed after reboot.
 
 Host-side SSH masters and the agent must outlive the terminal or SSH login
-that started them. Inside a disposable logind `session-*.scope`, portmap moves
-its own process into a transient systemd scope through one exact privileged
-`busctl StartTransientUnit` call before starting workers. Their user credentials
-do not change. Outside such a session, nothing is attempted. `--no-sudo`
-refuses a new worker if this escape needs elevation. No linger or logind policy
-is changed, and no boot service is enabled.
+that started them. Inside a logind `session-*.scope` or a per-user systemd
+manager cgroup, portmap moves its own CLI process into a transient
+system-manager scope through one exact privileged `busctl StartTransientUnit`
+call before starting workers. Their credentials do not change. This also keeps
+workers alive after a Brew installer service exits or the user manager stops.
+`--no-sudo` refuses a new worker if this escape needs elevation. No linger,
+logind policy, or boot setting is changed.
 The container runtime/API service must independently remain available after
-logout; Portmap does not change its service policy. Installing or upgrading
-the CLI does not restart existing workers; an idempotent `setup`, `up`,
-`connect`, or `agent start` may reuse them.
+logout; Portmap does not change its service policy. Replacing a standalone
+bundle or source checkout alone does not restart existing workers. Brew runs
+setup, but compatible live workers can still be reused rather than restarted.
 
 Port 80 is exclusive per address. A competing `docker -p 80:80` wildcard
 mapping is a conflict, not another independent virtual host. Portmap never
@@ -482,13 +499,13 @@ drop-in, not this access resolver, and are not part of the unified setup path.
 
 ### Installing and Migrating Legacy Installations
 
-The installer requires `curl`, `tar`, `awk`, `grep`, `readlink`, and either
+The standalone installer requires `curl`, `tar`, `awk`, `grep`, `readlink`, and either
 `sha256sum` or `shasum`. It verifies the archive using the trusted server's
 manifest, not an independent signature. Use HTTPS or a trusted network.
 Interactive stderr shows download progress; redirected logs retain stage
 messages and failures without the progress meter.
 
-Installation places each verified bundle in a new immutable directory under
+Standalone installation places each verified bundle in a new immutable directory under
 `${XDG_DATA_HOME:-$HOME/.local/share}/portmap/` and atomically switches
 `~/.local/bin/portmap`. Reinstalling the same version also keeps previous
 bundles intact: running workers and pending migrations may still need their

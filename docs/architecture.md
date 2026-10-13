@@ -54,7 +54,8 @@ optional roles of the same command, not separate installations. The frozen
 one-directory bundle includes Python, the CLI/agent, access and publishing
 modules, infrastructure/demo/scaffold assets, and frontend. It does not contain
 host CoreDNS or Traefik executables. Setup always requires a working runtime
-and Docker Compose; merely installing the command starts nothing.
+and Docker Compose. Standalone installation alone starts nothing; the Brew
+formula also performs setup against an existing accessible runtime API.
 
 The frozen executable re-executes itself for the host agent and inside the
 catalog container. Native/OS subprocesses receive an environment without
@@ -154,9 +155,10 @@ records are restored on a pre-commit interruption; unrelated listeners remain
 outside the transaction.
 
 Distribution uses `/api/downloads`, `/install.sh`, and
-`/downloads/portmap/<filename>`. The Web offers standalone download/installation
-and optional Homebrew install/upgrade, distinguishing installation from setup.
-The old client-only endpoints and executable alias are removed.
+`/downloads/portmap/<filename>`. The Web distinguishes standalone installation,
+which requires a later setup, from Homebrew installation, which waits for
+successful setup and the loopback page. Neither installs or starts a container
+engine. The old client-only endpoints and executable alias are removed.
 
 `release.json` pins real versioned assets, size and SHA-256. Frozen installs
 resolve an adjacent sidecar first, source/Brew use packaged metadata, and raw
@@ -166,7 +168,10 @@ and installer write the sidecar separately. Invalid local metadata fails
 honestly instead of selecting another release. Archive cache entries are
 verified before serving. Canonical HTTPS GitHub URLs and trusted signed-CDN
 redirects remain constrained; arbitrary hosts and credential-bearing URLs
-are rejected. Installation itself changes no DNS, processes or listeners.
+are rejected. Standalone installation itself changes no DNS, processes or
+listeners. Brew activates its setup helper through the ordinary user's service
+manager, preserving Homebrew's package-install sandbox. Failure propagates back
+to the Brew command instead of reporting a ready gateway.
 
 ## Fixed Model
 
@@ -264,17 +269,21 @@ infrastructure only after local publishing has stopped, and retains networks
 still consumed by business containers.
 
 Background portmap workers inherit the invoking CLI user's credentials;
-scope creation does not elevate them or enable boot services. On Linux, when that process sits in
-a disposable logind `session-*.scope`, it first adopts its own PID into a
-transient system-manager scope (one exact privileged `busctl
-StartTransientUnit`, mode `fail`, `CollectMode=inactive-or-failed`) so the
-workers survive the session that started them; outside such a session, and on
-other platforms, nothing is attempted. Installing or upgrading portmap does
-not restart or rescue workers that an earlier version left running. They must
-stop and start again before the new lifetime rule applies; an idempotent
-setup, up, connect, or agent start may reuse a running worker.
+scope creation does not elevate them or enable boot services. On Linux, a CLI
+in a logind `session-*.scope` or a per-user manager cgroup adopts only its own
+PID into a transient system-manager scope (one exact privileged `busctl
+StartTransientUnit`, mode `fail`, `CollectMode=inactive-or-failed`). Workers
+therefore survive both the caller's session and an installer/user service
+ending, without enabling linger. Processes already in a system service need
+no move. Replacing a standalone bundle or source tree alone does not rescue
+old workers; Brew runs setup, which can still reuse compatible live workers.
 
 Source/Brew catalog containers mount packaged Python modules read-only.
+The catalog's Compose configuration includes the bind-source device/inode
+identity. Replacing a keg at the same pathname therefore recreates only the
+catalog before Brew removes the old directory; unchanged mounts do not cause
+recreation. The access indicator uses the selected machine's canonical catalog
+URL rather than inventing a publishing-only hostname for setup-only clients.
 Frozen mode uses the same generated Compose model, mounting the complete
 bundle read-only and executing `portmap _serve-catalog` in a compatible image.
 Host agent workers re-execute that executable rather than assuming an external
