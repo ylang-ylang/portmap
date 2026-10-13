@@ -721,6 +721,27 @@ def test_download_cache_dir_defaults_to_state_dir(monkeypatch: pytest.MonkeyPatc
     assert download_cache_dir() == Path(os.environ["PORTMAP_STATE_DIR"]) / "downloads"
 
 
+@pytest.mark.parametrize("override", [None, ""])
+def test_download_cache_dir_explicit_state_precedes_ambient_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, override: str | None
+) -> None:
+    if override is None:
+        monkeypatch.delenv("PORTMAP_DOWNLOAD_DIR")
+    else:
+        monkeypatch.setenv("PORTMAP_DOWNLOAD_DIR", override)
+    state_dir = tmp_path / "publishing-state"
+    assert download_cache_dir(state_dir) == state_dir / "downloads"
+
+
+@pytest.mark.parametrize("state_dir", [None, Path("publishing-state")])
+def test_download_cache_dir_environment_precedes_explicit_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state_dir: Path | None
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PORTMAP_DOWNLOAD_DIR", "~/artifacts")
+    assert download_cache_dir(state_dir) == tmp_path / "artifacts"
+
+
 def test_concurrent_resolves_share_one_fetch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     archive = fake_portmap_archive()
     publish_manifest(
@@ -783,7 +804,7 @@ def run_installer(
     )
 
 
-def test_installer_refuses_unrelated_bundle(
+def test_installer_preserves_unrelated_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
 ) -> None:
     archive = fake_portmap_archive()
@@ -793,10 +814,10 @@ def test_installer_refuses_unrelated_bundle(
     (unrelated / "precious.txt").write_text("keep me")
 
     result = run_installer(catalog.origin, installer_home=installer_home)
-    assert result.returncode != 0
-    assert "refusing to overwrite unrelated directory" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert assert_installed(installer_home) != unrelated
     assert (unrelated / "precious.txt").read_text() == "keep me"
-    assert list((installer_home.data / "portmap").iterdir()) == [unrelated]
+    assert [item.name for item in unrelated.iterdir()] == ["precious.txt"]
     assert list(installer_home.tmp.iterdir()) == []
 
 
@@ -815,7 +836,7 @@ def test_installer_refuses_unrelated_launcher(
     assert result.returncode != 0
     assert "refusing to replace unrelated" in result.stderr
     assert launcher.read_text().startswith("#!/bin/sh")
-    assert not (installer_home.data / "portmap" / VERSION).exists()
+    assert not (installer_home.data / "portmap").exists()
 
     # A foreign symlink is refused too.
     launcher.unlink()
@@ -838,7 +859,6 @@ def test_installer_refuses_unsafe_archive_paths(
     assert not (installer_home.data / "evil.txt").exists()
     assert not (installer_home.data / "portmap" / "evil.txt").exists()
     # Nothing was installed and no staging artifacts survive the failure.
-    assert not (installer_home.data / "portmap" / VERSION).exists()
     stage_root = installer_home.data / "portmap"
     assert not stage_root.exists() or list(stage_root.iterdir()) == []
     assert list(installer_home.tmp.iterdir()) == []
@@ -876,7 +896,7 @@ def test_installer_preserves_install_when_archive_layout_is_wrong(
     good = fake_portmap_archive()
     publish_release(monkeypatch, tmp_path, archive=good)
     assert run_installer(catalog.origin, installer_home=installer_home).returncode == 0
-    assert_installed(installer_home)
+    original_bundle = assert_installed(installer_home)
 
     # A builder regression wraps everything in an enclosing directory.
     wrapped = build_archive(
@@ -894,7 +914,7 @@ def test_installer_preserves_install_when_archive_layout_is_wrong(
     ran = subprocess.run([str(link), "--version"], capture_output=True, text=True, timeout=30)
     assert ran.returncode == 0
     assert ran.stdout.strip() == f"fake-portmap {VERSION}"
-    assert [item.name for item in (installer_home.data / "portmap").iterdir()] == [VERSION]
+    assert link.resolve() == original_bundle / "portmap"
     assert list(installer_home.tmp.iterdir()) == []
 
 
@@ -905,7 +925,7 @@ def test_installer_rejects_non_executable_root_binary(
     result = run_installer(catalog.origin, installer_home=installer_home)
     assert result.returncode != 0
     assert "does not ship an executable" in result.stderr
-    assert not (installer_home.data / "portmap" / VERSION).exists()
+    assert not (installer_home.home / ".local" / "bin" / "portmap").exists()
     assert list(installer_home.tmp.iterdir()) == []
 
 
@@ -928,18 +948,17 @@ def test_installer_rejects_link_members(
     result = run_installer(catalog.origin, installer_home=installer_home)
     assert result.returncode != 0
     assert "non-regular members" in result.stderr
-    assert not (installer_home.data / "portmap" / VERSION).exists()
+    assert not (installer_home.home / ".local" / "bin" / "portmap").exists()
     assert list(installer_home.tmp.iterdir()) == []
 
 def assert_installed(installer_home: SimpleNamespace) -> Path:
-    bundle = installer_home.data / "portmap" / VERSION
-    assert (bundle / ".portmap-install").is_file()
-    assert (bundle / "portmap").is_file()
     link = installer_home.home / ".local" / "bin" / "portmap"
     assert link.is_symlink()
-    # The launcher must point at the executable inside the bundle — a symlink
-    # to the bundle directory is not runnable (execve(2) of a dir is EACCES).
-    assert os.readlink(link) == str(bundle / "portmap")
+    executable = link.resolve()
+    bundle = executable.parent
+    assert bundle.parent == installer_home.data / "portmap"
+    assert (bundle / ".portmap-install").is_file()
+    assert executable.is_file()
     ran = subprocess.run(
         [str(link), "--version"], capture_output=True, text=True, timeout=30
     )
@@ -958,7 +977,6 @@ def assert_installed(installer_home: SimpleNamespace) -> Path:
     )
     parse_release(sidecar)
     # No staging or download temp files survive a successful install.
-    assert [item.name for item in (installer_home.data / "portmap").iterdir()] == [VERSION]
     assert list(installer_home.tmp.iterdir()) == []
     return bundle
 
@@ -971,7 +989,7 @@ def test_installer_writes_canonical_manifest_sidecar(
 
     result = run_installer(catalog.origin, installer_home=installer_home)
     assert result.returncode == 0, result.stderr
-    bundle = installer_home.data / "portmap" / VERSION
+    bundle = (installer_home.home / ".local" / "bin" / "portmap").resolve().parent
     assert json.loads((bundle / "release.json").read_text(encoding="utf-8")) == {
         "version": VERSION,
         "assets": [
@@ -997,10 +1015,43 @@ def test_installer_end_to_end_from_catalog(
     assert result.returncode == 0, result.stderr
     assert_installed(installer_home)
 
-    # A managed reinstall of the same version upgrades in place.
+    # Reinstalling also activates a complete bundle without overwriting the old one.
     again = run_installer(catalog.origin, installer_home=installer_home)
     assert again.returncode == 0, again.stderr
     assert_installed(installer_home)
+
+
+def test_same_version_upgrade_preserves_running_bundle_assets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, catalog: CatalogServer, installer_home: SimpleNamespace
+) -> None:
+    old_archive = build_archive({
+        "portmap": b'#!/bin/sh\nread request\ncat "$(dirname "$0")/_internal/worker-assets"\n',
+        "_internal/worker-assets": b"assets required by the running worker\n",
+    })
+    publish_release(monkeypatch, tmp_path, archive=old_archive)
+    installed = run_installer(catalog.origin, installer_home=installer_home)
+    assert installed.returncode == 0, installed.stderr
+    launcher = installer_home.home / ".local" / "bin" / "portmap"
+    old_executable = launcher.resolve()
+    worker = subprocess.Popen(
+        [str(old_executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        publish_release(monkeypatch, tmp_path, archive=fake_portmap_archive())
+        upgraded = run_installer(catalog.origin, installer_home=installer_home)
+        assert upgraded.returncode == 0, upgraded.stderr
+        output, error = worker.communicate("read\n", timeout=10)
+        assert worker.returncode == 0, error
+        assert output == "assets required by the running worker\n"
+        assert launcher.resolve() != old_executable
+        version = subprocess.run([str(launcher), "--version"], capture_output=True, text=True, timeout=10)
+        assert version.returncode == 0, version.stderr
+        assert version.stdout.strip() == f"fake-portmap {VERSION}"
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+            worker.communicate(timeout=10)
 
 
 def test_installer_retires_only_owned_legacy_launcher(

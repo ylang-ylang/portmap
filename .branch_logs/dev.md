@@ -113,3 +113,10 @@
 - Publish `V0.11` with 391 passing non-integration tests, frozen-bundle smoke,
   real creator-SSH-session termination and running same-version reinstall
   acceptance. The notebook ends in direct mode without a local HTTP listener.
+- Merge `feat/default-local-ingress` for unified Docker/rootless Podman DNS,
+  HTTP, catalog and SSH relay infrastructure, with a persistent private port-80
+  entry, explicit local/LAN publication and shared CLI/Web remote controls.
+- Verify 590 source tests plus genuine legacy rollback/resume, immutable
+  installed upgrades, host/container access, logout survival and isolated
+  teardown on PVE VM101/102. Restore NSS/dependency state and remove only owned
+  fixtures; preserve original workloads, DNS and running 4096 MiB VM settings.

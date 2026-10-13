@@ -1,29 +1,54 @@
-"""Local publishing behind separate private-access and public ingress sockets."""
+"""Local publishing as a role of the shared container infrastructure.
+
+One owned container infrastructure serves the access role (private portal,
+DNS, remotes) and the local-publishing role. ``up`` applies the local role on
+top of :func:`~portmap.infrastructure.sync_infrastructure`, proves the shared
+public backend, and installs a LAN ingress only when one is explicitly
+configured or was preserved from a migrated legacy server; ``down`` removes
+exactly that role and ingress while the infrastructure, DNS, private HTTP
+entry, agent and remote connections stay untouched. Server state is version
+2; the removed version-1 second Compose stack is migrated by
+:mod:`portmap.legacy_server` through :func:`migrate_legacy_server`, which the
+client setup calls once the shared infrastructure is ready.
+"""
 from __future__ import annotations
 
 import fcntl
 import ipaddress
 import json
 import os
-import shutil
-import socket
 import stat
-import subprocess
-import sys
 import tempfile
-import time
 from contextlib import contextmanager
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterator
 
-from .agent import agent_status, ensure_agent_started, stop_agent
+from .agent import agent_status
+from .client import _load_local as _load_client_local
 from .client import set_local_server, setup_client
 from .client_discovery import probe_gateway
-from .client_runtime import client_state_dir, frozen, native_environment
+from .container_runtime import ContainerRuntime
 from .errors import PortmapError
+from .infrastructure import infrastructure_status, load_infrastructure
 from .ingress import ensure_ingress, ingress_status, stop_ingress
+from .legacy_server import (
+    capture_legacy_server,
+    clear_migration,
+    load_legacy_record,
+    load_migration,
+    public_dns_bindings,
+    restore_legacy_stack,
+    retire_legacy_server,
+    save_migration,
+    stop_legacy_stack,
+    verify_public_dns_bindings,
+)
 from .settings import PortmapSettings
+
+_STATE_VERSION = 2
+_QUERY_COMMANDS = ("config", "images", "logs", "ps", "top")
+_INGRESS_NAME = "public"
 
 
 @contextmanager
@@ -42,8 +67,12 @@ def _server_lock(settings: PortmapSettings) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _record_path(settings: PortmapSettings) -> Path:
+    return settings.state_dir / "server" / "instance.json"
+
+
 def _load(settings: PortmapSettings) -> dict[str, Any] | None:
-    path = settings.state_dir / "server" / "instance.json"
+    path = _record_path(settings)
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -52,18 +81,33 @@ def _load(settings: PortmapSettings) -> dict[str, Any] | None:
         raise PortmapError(f"unsafe server state file: {path}")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if (not isinstance(data, dict) or data.get("version") != 1 or data.get("uid") != os.getuid()
-                or data.get("state_dir") != str(settings.state_dir.resolve())
+        if not isinstance(data, dict):
+            raise ValueError("invalid server state")
+        if data.get("version") == 1:
+            # A legacy record belongs to portmap.legacy_server, not this role.
+            return None
+        if (data.get("version") != _STATE_VERSION or data.get("uid") != os.getuid()
+                or data.get("state_dir") != str(settings.state_dir.expanduser().resolve())
                 or not isinstance(data.get("settings"), dict)):
             raise ValueError("invalid owner or schema")
-        port = data["backend_port"]
-        if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
-            raise ValueError("invalid backend port")
         if not Path(data["client_state_dir"]).is_absolute():
             raise ValueError("invalid client state directory")
+        for key in ("http_port",):
+            port = data[key]
+            if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+                raise ValueError(f"invalid {key}")
+        lan = data.get("lan")
+        if lan is not None:
+            if (not isinstance(lan, dict) or not isinstance(lan.get("bind_address"), str)
+                    or isinstance(lan.get("port"), bool) or not isinstance(lan.get("port"), int)
+                    or not 1 <= lan["port"] <= 65535):
+                raise ValueError("invalid LAN ingress record")
+            address = ipaddress.ip_address(lan["bind_address"])
+            if address.is_loopback or address.is_unspecified:
+                raise ValueError("invalid LAN ingress address")
         _saved_settings(settings, data)
         return data
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, TypeError, KeyError) as exc:
         raise PortmapError(f"invalid server state: {path}: {exc}") from exc
 
 
@@ -87,76 +131,306 @@ def _saved_settings(current: PortmapSettings, data: dict[str, Any]) -> PortmapSe
     values = dict(data["settings"])
     for key in ("root", "state_dir", "agent_runtime_dir"):
         values[key] = Path(values[key])
-    saved = PortmapSettings(**values)
-    # Bundle upgrades may remove an old asset root. Resource names remain stable;
-    # stopping them with the current compose asset still uses their saved runtime.
-    if not (saved.root / "docker-compose.yml").is_file():
-        saved = replace(saved, root=current.root)
-    return saved
+    return PortmapSettings(**values)
 
 
-def _public_address(settings: PortmapSettings) -> str | None:
-    value = settings.host_ip if settings.http_bind in {"", "0.0.0.0"} else settings.http_bind
+def _explicit_bind(settings: PortmapSettings) -> str | None:
+    """The explicitly configured HTTP bind address, or None for the wildcard default."""
+    bind = settings.http_bind.strip()
+    if not bind or bind in {"0.0.0.0", "::"}:
+        return None
     try:
-        address = ipaddress.IPv4Address(value)
-    except ipaddress.AddressValueError as exc:
-        raise PortmapError("HTTP publishing requires an explicit IPv4 bind address or 0.0.0.0 with an IPv4 host address") from exc
-    if address.is_unspecified or address.is_multicast:
-        raise PortmapError(f"invalid public HTTP bind address: {value}")
-    return None if address.is_loopback else str(address)
+        return str(ipaddress.ip_address(bind))
+    except ValueError as exc:
+        raise PortmapError(f"invalid HTTP bind address {bind!r}: expected an IPv4/IPv6 address") from exc
 
 
-def _available_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
+def lan_ingress_spec(settings: PortmapSettings) -> dict[str, Any] | None:
+    """LAN ingress target only when the user explicitly configured one.
+
+    The wildcard default never publishes to the LAN by itself; loopback binds
+    publish nothing. A LAN entry preserved from a migrated legacy server is
+    reported through the server record, not recreated from defaults here.
+    """
+    address = _explicit_bind(settings)
+    if address is None or ipaddress.ip_address(address).is_loopback:
+        return None
+    return {"bind_address": address, "port": settings.http_port}
 
 
-def run_gateway_compose(
-    settings: PortmapSettings, compose_args: list[str], *, backend_port: int | None = None,
-) -> int:
-    """Run the container-network backend; never bind it to a public address."""
-    if shutil.which("docker") is None:
-        raise PortmapError("local publishing needs Docker Compose (with Docker or Podman); setup/connect need neither")
-    saved = _load(settings) if backend_port is None else None
-    port = backend_port or (saved["backend_port"] if saved else _available_port())
-    environment = native_environment()
-    environment.update(settings.gateway_env())
-    environment.update({
-        "PORTMAP_ROOT": str(settings.root),
-        "PORTMAP_BROKER_BYPASS": "1",
-        "PORTMAP_BACKEND_HTTP_PORT": str(port),
-    })
-    command = ["docker", "compose", "-f", str(settings.root / "docker-compose.yml")]
-    if frozen():
-        environment["PORTMAP_BUNDLE_DIR"] = str(Path(sys.executable).resolve().parent)
-        command += ["-f", str(settings.root / "docker-compose.frozen.yml")]
-    command += compose_args
+def _effective_lan(settings: PortmapSettings, previous: dict[str, Any] | None, capture: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Explicit configuration wins; an explicit loopback clears; the wildcard
+    default keeps LAN publishing that a previous record or a legacy capture
+    proves existed, so an unchanged upgraded machine keeps publishing."""
+    address = _explicit_bind(settings)
+    if address is not None:
+        if ipaddress.ip_address(address).is_loopback:
+            return None
+        return {"bind_address": address, "port": settings.http_port}
+    if previous is not None and isinstance(previous.get("lan"), dict):
+        return {"bind_address": previous["lan"]["bind_address"], "port": settings.http_port}
+    if capture is not None and isinstance(capture.get("ingress"), dict):
+        return {"bind_address": capture["ingress"]["bind_address"], "port": settings.http_port}
+    return None
+
+
+def local_role(settings: PortmapSettings) -> dict[str, Any]:
+    """The local-publishing profile handed to the shared infrastructure."""
+    return {"domain": settings.dns_domain, "http_port": settings.http_port}
+
+
+def _require_public_backend(status: dict[str, Any], settings: PortmapSettings) -> None:
+    gateway = status.get("gateway") or {}
+    port = gateway.get("public_backend_port")
+    if not status.get("running") or not isinstance(port, int):
+        raise PortmapError("the shared container infrastructure did not report a running public backend")
+    probe_gateway(f"http://127.0.0.1:{port}", expected_domain=settings.dns_domain)
+
+
+def _set_public_dns_bindings(state: dict[str, Any], bindings: dict[str, Any] | None) -> dict[str, Any]:
+    """Controller hook: recreate only the owned DNS container (or clear the
+    public-only view when bindings is None). Provided by the infrastructure
+    owner; there is no local fallback."""
+    from .infrastructure import set_public_dns_bindings
+
+    return set_public_dns_bindings(state, bindings)
+
+
+def run_gateway_compose(settings: PortmapSettings, compose_args: list[str]) -> int:
+    """Run read-only Compose queries against the generated owned compose file.
+
+    Destructive lifecycle (up/down/restart/kill/rm/...) must go through the
+    role functions so ownership and rollback stay enforced; overriding the
+    generated project or files is refused.
+    """
+    if not compose_args:
+        raise PortmapError("portmap gateway requires a compose query command")
+    if any(token in {"-f", "--file", "-p", "--project-name"} or token.startswith(("--file=", "--project-name=")) for token in compose_args):
+        raise PortmapError("portmap gateway queries cannot override the generated compose project or files")
+    if compose_args[0] not in _QUERY_COMMANDS:
+        raise PortmapError(
+            f"portmap gateway only runs read-only queries ({', '.join(_QUERY_COMMANDS)}); use portmap up/down for gateway lifecycle changes"
+        )
+    state = load_infrastructure(settings.client_state_dir)
+    if state is None:
+        if load_legacy_record(settings) is not None:
+            raise PortmapError("the legacy server stack still owns local publishing; run portmap setup or portmap up to cut it over first")
+        raise PortmapError("the shared container infrastructure is not configured; run portmap setup or portmap up first")
+    if state.get("phase") != "ready":
+        raise PortmapError("the shared container infrastructure has an incomplete transaction; inspect portmap status before querying it")
+    runtime = ContainerRuntime.from_record(state["runtime"])
+    return runtime.compose(Path(state["instance_dir"]) / "compose.yaml", list(compose_args)).returncode
+
+
+def _apply_role(settings: PortmapSettings, *, use_sudo: bool) -> dict[str, Any]:
+    """Apply or refresh the local-publishing role on the shared infrastructure."""
+    access_dir = settings.client_state_dir
+    previous = _load(settings)
+    if previous is not None:
+        saved = _saved_settings(settings, previous)
+        immutable = ("http_port", "dns_domain", "runtime_socket", "gateway_network")
+        if (any(getattr(saved, key) != getattr(settings, key) for key in immutable)
+                or previous["client_state_dir"] != str(access_dir)):
+            raise PortmapError(
+                "local publishing configuration changed; stop local publishing and teardown the container infrastructure "
+                "before changing the runtime, network, domain or HTTP port"
+            )
+    lan = _effective_lan(settings, previous, None)
+    role_installed = False
+    ingress_installed = False
     try:
-        return subprocess.run(command, check=False, env=environment).returncode
-    except OSError as exc:
-        raise PortmapError(f"cannot run the local container gateway: {exc}") from exc
+        status = set_local_server(access_dir, local_role(settings), settings=settings, use_sudo=use_sudo)
+        role_installed = True
+        _require_public_backend(status, settings)
+        if lan is not None:
+            ensure_ingress(
+                access_dir, name=_INGRESS_NAME, bind_address=lan["bind_address"], port=lan["port"],
+                target_port=status["gateway"]["public_backend_port"], use_sudo=use_sudo,
+            )
+            # Idempotent for an unchanged entry; only a changed or fresh
+            # entry is removed again if a later step fails.
+            ingress_installed = previous is None or previous.get("lan") != lan
+        if lan is None and previous is not None and previous.get("lan") is not None:
+            # An explicit loopback bind withdraws previously published LAN
+            # ingress; the wildcard default preserves it via _effective_lan.
+            stop_ingress(access_dir, name=_INGRESS_NAME, use_sudo=use_sudo)
+        _save(settings, {
+            "version": _STATE_VERSION, "uid": os.getuid(),
+            "state_dir": str(settings.state_dir.expanduser().resolve()),
+            "client_state_dir": str(access_dir), "http_port": settings.http_port,
+            "lan": lan, "settings": _settings_record(settings),
+        })
+        # A healthy role application also settles any retained failure
+        # metadata from an earlier interrupted migration attempt.
+        clear_migration(settings.state_dir)
+    except BaseException as exc:
+        failures: list[str] = []
+        if ingress_installed:
+            try:
+                stop_ingress(access_dir, name=_INGRESS_NAME, use_sudo=use_sudo)
+            except Exception as cleanup:
+                failures.append(f"LAN ingress cleanup failed: {cleanup}")
+        if role_installed and previous is None:
+            try:
+                set_local_server(access_dir, None, settings=settings, use_sudo=use_sudo)
+            except Exception as cleanup:
+                failures.append(f"local role cleanup failed: {cleanup}")
+        suffix = f"; cleanup needs attention: {'; '.join(failures)}" if failures else ""
+        raise PortmapError(f"local publishing failed: {exc}{suffix}") from exc
+    return status
 
 
-def _ready(port: int, domain: str) -> bool:
+def _finish_legacy_retirement(settings: PortmapSettings, migration: dict[str, Any]) -> dict[str, Any]:
+    """Resume irreversible retirement without rolling back the proven new chain."""
+    details = migration["details"]
+    role_record, capture = details["server"], details["capture"]
+    effective = _saved_settings(settings, role_record)
+    access_dir = Path(role_record["client_state_dir"])
+    state = load_infrastructure(access_dir)
+    if state is None or state["owner"] != details["infrastructure_owner"]:
+        raise PortmapError("legacy retirement requires the infrastructure that passed the cutover checks")
+    _require_public_backend(infrastructure_status(access_dir, check=True), effective)
+    if state.get("public_dns") is not None:
+        verify_public_dns_bindings(state["public_dns"])
+    # Durable role ownership precedes deletion. A partial deletion is retried
+    # from the captured IDs, never by bringing an incomplete old stack back up.
+    _save(settings, role_record)
+    retire_legacy_server(settings, migration["record"], capture, ContainerRuntime.from_record(state["runtime"]))
+    clear_migration(settings.state_dir)
+    return {"migrated": True, "lan": role_record["lan"], "dns_publish": (state.get("public_dns") or {}).get("publish"),
+            "retired": [entry["service"] for entry in capture["containers"].values() if entry]}
+
+
+def _migrate_legacy(settings: PortmapSettings, *, use_sudo: bool) -> dict[str, Any] | None:
+    """Cut a legacy version-1 server stack over to the shared infrastructure.
+
+    Must run with the server lock held and client setup already complete; it
+    never calls ``setup_client`` itself. Stages and proves the new backend
+    first, then stops the old owned resources, applies the preserved public
+    DNS bindings, verifies, and only afterwards removes the old resources.
+    Failures before commit restore the old chain. After commit the proven new
+    chain stays active while interrupted retirement is resumed from saved IDs.
+    """
+    pending = load_migration(settings.state_dir)
+    if pending is not None and pending["phase"] == "retire":
+        return _finish_legacy_retirement(settings, pending)
+    record = load_legacy_record(settings)
+    if record is None:
+        return None
+    access_dir = settings.client_state_dir
+    runtime = ContainerRuntime.connect(settings)
+    capture = capture_legacy_server(settings, record, runtime)
+    legacy_dir = Path(record["client_state_dir"])
+    phase = "stage"
+    role_set = False
+    ingress_moved = False
+    ingress_installed = False
+    containers_stopped = False
+    bindings_applied = False
+    committed = False
+    previous_local = _load_client_local(access_dir)
+    legacy_ingress = capture.get("ingress")
     try:
-        probe_gateway(f"http://127.0.0.1:{port}", expected_domain=domain)
-        return True
-    except PortmapError:
-        return False
+        lan = _effective_lan(settings, None, capture)
+        status = set_local_server(access_dir, local_role(settings), settings=settings, use_sudo=use_sudo)
+        role_set = True
+        _require_public_backend(status, settings)
+        phase = "ingress"
+        if legacy_ingress is not None:
+            stop_ingress(legacy_dir, name=_INGRESS_NAME, use_sudo=use_sudo)
+            ingress_moved = True
+        if lan is not None:
+            ensure_ingress(
+                access_dir, name=_INGRESS_NAME, bind_address=lan["bind_address"], port=lan["port"],
+                target_port=status["gateway"]["public_backend_port"], use_sudo=use_sudo,
+            )
+            ingress_installed = True
+        phase = "stop"
+        containers_stopped = True
+        stop_legacy_stack(capture, runtime)
+        phase = "dns"
+        bindings = public_dns_bindings(_saved_settings(settings, record), capture)
+        if bindings is not None:
+            bindings_applied = True
+            _set_public_dns_bindings(load_infrastructure(access_dir), bindings)
+        phase = "verify"
+        if bindings is not None:
+            verify_public_dns_bindings(bindings)
+        healthy = infrastructure_status(access_dir, check=True)
+        if not healthy.get("running"):
+            raise PortmapError(f"the shared infrastructure lost readiness after the DNS cutover: {healthy.get('error', 'not running')}")
+        role_record = {
+            "version": _STATE_VERSION, "uid": os.getuid(),
+            "state_dir": str(settings.state_dir.expanduser().resolve()),
+            "client_state_dir": str(access_dir), "http_port": settings.http_port,
+            "lan": lan, "settings": _settings_record(settings),
+        }
+        save_migration(settings.state_dir, record=record, phase="retire", error="", details={
+            "server": role_record, "capture": capture,
+            "infrastructure_owner": load_infrastructure(access_dir)["owner"],
+        })
+        committed = True
+        return _finish_legacy_retirement(settings, load_migration(settings.state_dir))
+    except BaseException as exc:
+        if committed:
+            raise PortmapError(f"the new infrastructure is active; legacy retirement needs a setup retry: {exc}") from exc
+        failures: list[str] = []
+        dns_released = True
+        if bindings_applied:
+            try:
+                _set_public_dns_bindings(load_infrastructure(access_dir), None)
+            except Exception as cleanup:
+                dns_released = False
+                failures.append(f"public DNS binding rollback failed: {cleanup}")
+        if containers_stopped and dns_released:
+            try:
+                restore_legacy_stack(capture, runtime)
+            except Exception as cleanup:
+                failures.append(f"legacy stack restore failed: {cleanup}")
+        if ingress_installed:
+            try:
+                stop_ingress(access_dir, name=_INGRESS_NAME, use_sudo=use_sudo)
+            except Exception as cleanup:
+                failures.append(f"LAN ingress cleanup failed: {cleanup}")
+        if ingress_moved and legacy_ingress is not None:
+            try:
+                ensure_ingress(
+                    legacy_dir, name=_INGRESS_NAME, bind_address=legacy_ingress["bind_address"],
+                    port=legacy_ingress["port"], target_port=legacy_ingress["target_port"], use_sudo=use_sudo,
+                )
+            except Exception as cleanup:
+                failures.append(f"legacy ingress restore failed: {cleanup}")
+        if role_set:
+            try:
+                set_local_server(access_dir, previous_local, settings=settings, use_sudo=use_sudo)
+            except Exception as cleanup:
+                failures.append(f"local role restore failed: {cleanup}")
+                if previous_local is not None:
+                    try:
+                        set_local_server(access_dir, None, settings=settings, use_sudo=use_sudo)
+                    except Exception as fallback:
+                        failures.append(f"local role removal failed: {fallback}")
+        try:
+            save_migration(settings.state_dir, record=record, phase=phase, error=str(exc), details={
+                "stopped": containers_stopped, "bindings_applied": bindings_applied,
+            })
+        except Exception as cleanup:
+            failures.append(f"migration metadata retention failed: {cleanup}")
+        suffix = f"; rollback needs attention: {'; '.join(failures)}" if failures else ""
+        raise PortmapError(f"legacy server migration failed at {phase}: {exc}{suffix}") from exc
 
 
-def _wait_ready(port: int, domain: str) -> None:
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        if _ready(port, domain):
-            return
-        time.sleep(0.2)
-    raise PortmapError(f"local catalog did not become ready at 127.0.0.1:{port}; inspect portmap gateway logs")
+def migrate_legacy_server(settings: PortmapSettings, *, use_sudo: bool = True) -> dict[str, Any] | None:
+    """Complete the legacy server cutover once client setup finished.
 
-
-def _local_profile(settings: PortmapSettings, port: int) -> dict[str, Any]:
-    return {"domain": settings.dns_domain, "backend_port": port, "http_port": settings.http_port}
+    Takes the server lock, then the client lock (local role) and the
+    infrastructure lock; never calls ``setup_client``. Returns None when no
+    legacy version-1 server record exists, otherwise a summary dict for the
+    caller's ``legacy_server_migration`` result key. Failures raise after
+    restoring the legacy resources and retaining recovery metadata.
+    """
+    with _server_lock(settings):
+        return _migrate_legacy(settings, use_sudo=use_sudo)
 
 
 def start_server(
@@ -168,70 +442,14 @@ def start_server(
         raise PortmapError(f"invalid HTTP port: {settings.http_port}")
     if "://" in settings.runtime_socket:
         raise PortmapError("local publishing needs a local Docker/Podman socket; use portmap connect for remote machines")
-    public_address = _public_address(settings)
-    access_dir = client_state_dir()
+    access_dir = settings.client_state_dir
+    # Client setup takes the client lock and may itself run the legacy server
+    # migration; it must finish before the server lock is taken.
+    setup_client(access_dir, settings=settings, use_sudo=use_sudo, http_port=settings.http_port)
     with _server_lock(settings):
-        previous = _load(settings)
-        if previous:
-            saved = _saved_settings(settings, previous)
-            immutable = ("http_port", "dns_domain", "runtime_socket", "gateway_network", "dns_bind", "dns_port", "agent_runtime_dir")
-            if (any(getattr(saved, key) != getattr(settings, key) for key in immutable)
-                    or _public_address(saved) != public_address or previous["client_state_dir"] != str(access_dir)):
-                raise PortmapError("local publishing configuration changed; run portmap restart to apply it without changing remote connections")
-        if run_gateway_compose(settings, ["config", "--quiet"], backend_port=previous["backend_port"] if previous else 10240):
-            raise PortmapError("invalid local gateway configuration")
-        setup_client(access_dir, use_sudo=use_sudo, http_port=settings.http_port)
-        was_running = agent_status(settings).running
-        agent = ensure_agent_started(settings, use_sudo=use_sudo)
-        if not agent.running:
-            raise PortmapError(agent.message)
-        port = previous["backend_port"] if previous else _available_port()
-        record = {
-            "version": 1, "uid": os.getuid(), "state_dir": str(settings.state_dir.resolve()),
-            "backend_port": port, "client_state_dir": str(access_dir),
-            "settings": _settings_record(settings),
-        }
-        local_added = False
-        public_added = False
-        backend_attempted = False
-        try:
-            backend_attempted = True
-            if run_gateway_compose(settings, compose_args, backend_port=port):
-                raise PortmapError("local gateway compose up failed")
-            _wait_ready(port, settings.dns_domain)
-            set_local_server(access_dir, _local_profile(settings, port), use_sudo=use_sudo)
-            local_added = True
-            if public_address:
-                ensure_ingress(access_dir, name="public", bind_address=public_address,
-                               port=settings.http_port, target_port=port, use_sudo=use_sudo)
-                public_added = True
-            _save(settings, record)
-        except Exception as exc:
-            failures = []
-            if previous is None:
-                cleanup = []
-                if public_added:
-                    cleanup.append(lambda: stop_ingress(access_dir, name="public", use_sudo=use_sudo))
-                if local_added:
-                    cleanup.append(lambda: set_local_server(access_dir, None, use_sudo=use_sudo))
-                # An existing agent can belong to a legacy publishing instance.
-                # Keep its backend recoverable rather than destroying it on a
-                # first-upgrade ingress conflict; record its new private port.
-                if backend_attempted and was_running:
-                    _save(settings, record)
-                elif backend_attempted:
-                    cleanup.append(lambda: run_gateway_compose(settings, ["down"], backend_port=port))
-                if not was_running:
-                    cleanup.append(lambda: stop_agent(settings))
-                for action in cleanup:
-                    try:
-                        result = action()
-                        if isinstance(result, int) and result:
-                            failures.append(f"cleanup command returned {result}")
-                    except Exception as cleanup_error:
-                        failures.append(str(cleanup_error))
-            suffix = f"; cleanup needs attention: {'; '.join(failures)}" if failures else ""
-            raise PortmapError(f"local publishing failed: {exc}{suffix}") from exc
+        if _migrate_legacy(settings, use_sudo=use_sudo) is not None:
+            return server_status(settings, check=True)
+        _apply_role(settings, use_sudo=use_sudo)
     return server_status(settings, check=True)
 
 
@@ -243,38 +461,77 @@ def stop_server(
     with _server_lock(settings):
         record = _load(settings)
         if record is None:
+            if load_legacy_record(settings) is not None:
+                raise PortmapError(
+                    "local publishing is still owned by the legacy server stack; run portmap setup or portmap up to cut it over to the shared container infrastructure first"
+                )
             return {"configured": False, "running": False, "state_dir": str(settings.state_dir)}
         effective = _saved_settings(settings, record)
         access_dir = Path(record["client_state_dir"])
-        stop_ingress(access_dir, name="public", use_sudo=use_sudo)
-        set_local_server(access_dir, None, use_sudo=use_sudo)
-        port = record["backend_port"]
-        result = run_gateway_compose(effective, compose_args, backend_port=port)
-        if result:
-            raise PortmapError("local gateway compose down failed; remote connections are unchanged")
-        agent = stop_agent(effective)
-        if agent.running:
-            raise PortmapError(agent.message)
-        (settings.state_dir / "server" / "instance.json").unlink(missing_ok=True)
+        lan = record.get("lan")
+        lan_removed = False
+        role_removed = False
+        try:
+            if lan is not None:
+                stop_ingress(access_dir, name=_INGRESS_NAME, use_sudo=use_sudo)
+                lan_removed = True
+            set_local_server(access_dir, None, settings=effective, use_sudo=use_sudo)
+            role_removed = True
+            _record_path(settings).unlink(missing_ok=True)
+        except BaseException as exc:
+            failures: list[str] = []
+            if role_removed:
+                try:
+                    set_local_server(access_dir, local_role(effective), settings=effective, use_sudo=use_sudo)
+                except Exception as cleanup:
+                    failures.append(f"local role restore failed: {cleanup}")
+            if lan_removed and lan is not None:
+                try:
+                    state = load_infrastructure(access_dir)
+                    target = (state or {}).get("public_backend_port")
+                    if isinstance(target, int):
+                        ensure_ingress(
+                            access_dir, name=_INGRESS_NAME, bind_address=lan["bind_address"],
+                            port=lan["port"], target_port=target, use_sudo=use_sudo,
+                        )
+                    else:
+                        failures.append("LAN ingress restore skipped: the shared infrastructure is not available")
+                except Exception as cleanup:
+                    failures.append(f"LAN ingress restore failed: {cleanup}")
+            suffix = f"; rollback needs attention: {'; '.join(failures)}" if failures else ""
+            raise PortmapError(f"local publishing could not be stopped: {exc}{suffix}") from exc
     return {"configured": False, "running": False, "state_dir": str(settings.state_dir)}
 
 
 def server_status(settings: PortmapSettings, *, check: bool = False) -> dict[str, Any]:
     record = _load(settings)
     if record is None:
+        legacy = load_legacy_record(settings)
+        if legacy is not None:
+            saved = _saved_settings(settings, legacy)
+            return {
+                "configured": True, "running": None, "state_dir": str(settings.state_dir),
+                "migration_required": True,
+                "legacy": {"version": 1, "domain": saved.dns_domain, "http_port": saved.http_port},
+                "migration": load_migration(settings.state_dir),
+            }
         return {"configured": False, "running": False, "state_dir": str(settings.state_dir)}
     effective = _saved_settings(settings, record)
-    address = _public_address(effective)
+    lan = record.get("lan")
+    infra = infrastructure_status(Path(record["client_state_dir"]), check=check)
     result: dict[str, Any] = {
-        "configured": True, "domain": effective.dns_domain,
-        "http_port": effective.http_port, "backend_port": record["backend_port"],
-        "catalog_url": f"http://{effective.dns_domain}" + (f":{effective.http_port}" if effective.http_port != 80 else "") + "/",
-        "public_address": address, "state_dir": str(settings.state_dir),
+        "configured": True, "version": _STATE_VERSION, "domain": effective.dns_domain,
+        "http_port": record["http_port"], "state_dir": str(settings.state_dir),
+        "catalog_url": f"http://{effective.dns_domain}" + (f":{record['http_port']}" if record["http_port"] != 80 else "") + "/",
+        "public_address": lan["bind_address"] if lan else None,
+        "infrastructure": infra,
         "agent": agent_status(effective).as_dict(),
-        "public_ingress": ingress_status(Path(record["client_state_dir"]), name="public") if address else None,
+        "lan_ingress": ingress_status(Path(record["client_state_dir"]), name=_INGRESS_NAME) if lan else None,
+        "migration": load_migration(settings.state_dir),
     }
+    lan_running = not lan or bool(result["lan_ingress"].get("running"))
     if check:
-        result["backend_reachable"] = _ready(record["backend_port"], effective.dns_domain)
-        result["running"] = bool(result["backend_reachable"] and result["agent"]["running"]
-                                 and (not address or result["public_ingress"].get("running")))
+        result["running"] = bool(infra.get("running") and result["agent"]["running"] and lan_running)
+    else:
+        result["running"] = bool(infra.get("gateway", {}).get("running") and result["agent"]["running"] and lan_running)
     return result

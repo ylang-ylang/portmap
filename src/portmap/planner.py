@@ -142,7 +142,7 @@ def plan_endpoint(
         raise ComposeError(f"endpoint {endpoint.name!r} references unknown service: {endpoint.service}")
 
     instance = instance_slug(identity=identity, branch=branch, project_directory=request.project_directory)
-    router = route_id(identity.display_name, branch, endpoint.name)
+    router = route_id(instance, endpoint.name)
     traefik_service = router
     service = compose.services[endpoint.service]
     if service.network_mode == "host":
@@ -379,7 +379,7 @@ def build_compose_override(
     gateway_service_names = {
         endpoint.service
         for endpoint in planned
-        if endpoint.kind == EndpointKind.HTTP
+        if endpoint.kind == EndpointKind.HTTP or container_dns_server
     }
     environment = portmap_environment(planned)
     for endpoint in planned:

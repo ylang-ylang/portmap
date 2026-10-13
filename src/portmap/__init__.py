@@ -2,7 +2,7 @@
 
 from importlib import import_module
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 # The Python API stays lazy; remote-only access needs no container runtime.
 _EXPORTS = {

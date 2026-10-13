@@ -119,12 +119,12 @@ if [ "${{PORTMAP_COMPOSE_TAKEOVER:-1}}" != "1" ]; then
   exec "$REAL_COMPOSE" "$@"
 fi
 
-# Runtime auto-detect: honor an explicit socket configuration first, then
-# probe well-known paths when dockerd's socket is absent. An explicit
-# DOCKER_HOST always wins. This also covers Podman invoking this file as
-# its compose provider (provider search path includes ~/.docker/cli-plugins).
-# Note: shell probes test file existence; connect-liveness is enforced by
-# the Python settings resolver.
+if [ -f ".portmap/endpoints.toml" ]; then
+  {takeover_exec}
+fi
+
+# Unmanaged projects retain the existing provider fallback. Managed projects
+# above use the shared Python resolver without pre-populating DOCKER_HOST.
 if [ -z "${{DOCKER_HOST:-}}" ]; then
   if [ -n "${{PORTMAP_RUNTIME_SOCKET:-}}" ]; then
     DOCKER_HOST="unix://$PORTMAP_RUNTIME_SOCKET"
@@ -138,10 +138,6 @@ if [ -z "${{DOCKER_HOST:-}}" ]; then
     DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
     export DOCKER_HOST
   fi
-fi
-
-if [ -f ".portmap/endpoints.toml" ]; then
-  {takeover_exec}
 fi
 
 exec "$REAL_COMPOSE" "$@"

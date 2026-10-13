@@ -41,6 +41,7 @@ h1 {
 
 .catalog-tree {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -399,6 +400,7 @@ button {
 
 .project-body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   padding: 12px;
   padding-left: 16px;
@@ -408,6 +410,7 @@ button {
 
 .worktree-body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: 10px;
   padding-left: 14px;
@@ -416,6 +419,7 @@ button {
 
 .branch-body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: 10px;
   background: #ffffff;
@@ -576,7 +580,7 @@ button {
 }
 
 .table-wrap {
-  overflow-x: hidden;
+  overflow-x: auto;
 }
 
 table {
@@ -836,6 +840,7 @@ a {
 .utility-panel {
   margin-top: 20px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -849,6 +854,7 @@ a {
 
 .quick-setup-body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   padding: 14px;
   border-top: 1px solid #e6ebf1;
@@ -890,6 +896,361 @@ pre {
 }
 
 
+/* Machine navigation tabs */
+.machine-nav {
+  margin: 10px 0 0;
+  overflow-x: auto;
+  /* ensure inner buttons don't wrap on narrow screens */
+  -webkit-overflow-scrolling: touch;
+}
+
+.machine-nav-scroll {
+  display: flex;
+  gap: 4px;
+  min-width: max-content;
+}
+
+.machine-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid #c8d3dc;
+  border-bottom: 2px solid transparent;
+  background: #eef2f6;
+  color: #283544;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.machine-tab:focus {
+  outline: 2px solid #0ea5e9;
+  outline-offset: 2px;
+}
+
+.machine-tab-active {
+  background: #ffffff;
+  color: #1e40af;
+  border-color: #2563eb;
+  border-bottom-color: #ffffff;
+}
+
+.machine-tab-unavailable {
+  color: #7b8794;
+}
+
+.machine-tab-name {
+  font-weight: 700;
+}
+
+.machine-via-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border: 1px solid;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.machine-via-direct {
+  background: #eff6ff;
+  color: #1e40af;
+  border-color: #93c5fd;
+}
+
+.machine-via-ssh {
+  background: #fdf4ff;
+  color: #7e22ce;
+  border-color: #d8b4fe;
+}
+
+.machine-tab-target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #52606d;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.machine-unavail-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border: 1px solid #dc2626;
+  background: #fee2e2;
+  color: #991b1b;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.machine-nav-error {
+  color: #9f1d16;
+  font-size: 13px;
+  margin: 6px 0 0;
+}
+
+
+/* Connection management */
+.conn-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.conn-list {
+  border: 1px solid #d1dae3;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.conn-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #ffffff;
+  border-bottom: 1px solid #e6ebf1;
+}
+
+.conn-row:last-child {
+  border-bottom: 0;
+}
+
+.conn-row-body {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.conn-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.conn-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+  flex-wrap: wrap;
+}
+
+.conn-row-target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: #283544;
+}
+
+.conn-row-domain {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #52606d;
+}
+
+.conn-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.conn-status-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border: 1px solid;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.conn-status-configured {
+  color: #52606d;
+  background: #f0f4f8;
+  border-color: #9aa7b4;
+}
+
+.conn-status-connecting {
+  color: #1d4ed8;
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+.conn-status-reachable {
+  color: #15803d;
+  background: #dcfce7;
+  border-color: #86efac;
+}
+
+.conn-status-unreachable {
+  color: #b91c1c;
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
+
+.conn-status-disconnected {
+  color: #92400e;
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+
+.conn-status-error {
+  color: #9f1d16;
+  background: #fff1f2;
+  border-color: #fda4af;
+}
+
+.machine-via-auto {
+  background: #f0f4f8;
+  color: #52606d;
+  border-color: #9aa7b4;
+}
+
+.conn-latency {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: #283544;
+}
+
+.conn-checked {
+  font-size: 12px;
+  color: #7b8794;
+}
+
+.conn-error-inline {
+  font-size: 12px;
+  color: #9f1d16;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-connect-btn {
+  background: #f0fdf4;
+  color: #15803d;
+  border-color: #86efac;
+}
+
+.conn-disconnect-btn {
+  background: #fffbeb;
+  color: #92400e;
+  border-color: #fcd34d;
+}
+
+.conn-delete-btn {
+  background: #fff1f2;
+  color: #9f1d16;
+  border-color: #fda4af;
+}
+
+.conn-panel-error {
+  background: #fee2e2;
+  color: #7f1d1d;
+  border: 1px solid #dc2626;
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.conn-form {
+  background: #f8fafc;
+  border: 1px solid #d1dae3;
+  border-radius: 4px;
+  padding: 12px;
+}
+
+.conn-form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.conn-form-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #283544;
+  white-space: nowrap;
+}
+
+.conn-form-input {
+  flex: 1 1 200px;
+  min-width: 150px;
+  padding: 6px 8px;
+  border: 1px solid #9aa7b4;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #ffffff;
+  color: #283544;
+}
+
+.conn-form-input:focus {
+  outline: 2px solid #0ea5e9;
+  outline-offset: 1px;
+  border-color: #0ea5e9;
+}
+
+.conn-form-input:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.conn-form-select {
+  padding: 6px 8px;
+  border: 1px solid #9aa7b4;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 13px;
+  background: #ffffff;
+  color: #283544;
+  cursor: pointer;
+}
+
+.conn-form-select:focus {
+  outline: 2px solid #0ea5e9;
+  outline-offset: 1px;
+  border-color: #0ea5e9;
+}
+
+.conn-form-select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.conn-save-btn {
+  background: #eff6ff;
+  color: #1e40af;
+  border-color: #93c5fd;
+}
+
+.conn-form-error {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #7f1d1d;
+  background: #fee2e2;
+  border: 1px solid #dc2626;
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+
+
 /* portmap download panel */
 .portmap-platform-list {
   list-style: none;
@@ -899,6 +1260,7 @@ pre {
 
 .portmap-platform-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 7px 0;
@@ -949,7 +1311,7 @@ pre {
 .portmap-platform-req {
   font-size: 12px;
   color: #6b7280;
-  white-space: nowrap;
+  white-space: normal;
   font-style: italic;
 }
 
@@ -1041,12 +1403,18 @@ pre {
   .branch-header-right {
     justify-items: start;
     justify-content: flex-start;
+    max-width: 100%;
+    flex-wrap: wrap;
   }
 
   .project-header,
   .worktree-header,
   .branch-header {
     flex-wrap: wrap;
+  }
+
+  .table-wrap table {
+    min-width: 640px;
   }
 
   .running-list,
@@ -1058,6 +1426,39 @@ pre {
   .action-log-entry {
     grid-template-columns: 1fr;
   }
+
+  .machine-tab {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .machine-tab-target {
+    display: none;
+  }
+
+  .conn-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .conn-row-actions {
+    align-self: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .conn-form-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .conn-form-input {
+    min-width: 0;
+    flex-basis: auto;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
 }
 
 @media (prefers-color-scheme: dark) {
@@ -1326,5 +1727,185 @@ pre {
 
   .portmap-download-error {
     color: #fca5a5;
+  }
+
+  .machine-tab {
+    background: #1e2730;
+    border-color: #3b4652;
+    color: #cbd5e1;
+  }
+
+  .machine-tab-active {
+    background: #171d23;
+    color: #93c5fd;
+    border-color: #3b82f6;
+    border-bottom-color: #171d23;
+  }
+
+  .machine-tab-unavailable {
+    color: #7d8997;
+  }
+
+  .machine-via-direct {
+    background: #1e3a5f;
+    color: #93c5fd;
+    border-color: #3b82f6;
+  }
+
+  .machine-via-ssh {
+    background: #3b1a5f;
+    color: #d8b4fe;
+    border-color: #7c3aed;
+  }
+
+  .machine-tab-target {
+    color: #a7b2bf;
+  }
+
+  .machine-unavail-badge {
+    background: #3b1717;
+    color: #fca5a5;
+    border-color: #b42318;
+  }
+
+  .machine-nav-error {
+    color: #fca5a5;
+  }
+
+  /* Connection management - dark */
+  .conn-list {
+    border-color: #2b3540;
+  }
+
+  .conn-row {
+    background: #151b22;
+    border-color: #2b3540;
+  }
+
+  .conn-row-target {
+    color: #eef2f6;
+  }
+
+  .conn-row-domain {
+    color: #a7b2bf;
+  }
+
+  .conn-status-configured {
+    color: #a7b2bf;
+    background: #202832;
+    border-color: #52606d;
+  }
+
+  .conn-status-connecting {
+    color: #93c5fd;
+    background: #172554;
+    border-color: #1d4ed8;
+  }
+
+  .conn-status-reachable {
+    color: #86efac;
+    background: #14532d;
+    border-color: #16a34a;
+  }
+
+  .conn-status-unreachable {
+    color: #fca5a5;
+    background: #3b1717;
+    border-color: #b42318;
+  }
+
+  .conn-status-disconnected {
+    color: #fcd34d;
+    background: #3a2c0a;
+    border-color: #92400e;
+  }
+
+  .conn-status-error {
+    color: #fca5a5;
+    background: #3b1717;
+    border-color: #b42318;
+  }
+
+  .machine-via-auto {
+    background: #202832;
+    color: #a7b2bf;
+    border-color: #52606d;
+  }
+
+  .conn-latency {
+    color: #eef2f6;
+  }
+
+  .conn-checked {
+    color: #7d8997;
+  }
+
+  .conn-error-inline {
+    color: #fca5a5;
+  }
+
+  .conn-connect-btn {
+    background: #12331f;
+    color: #86efac;
+    border-color: #16a34a;
+  }
+
+  .conn-disconnect-btn {
+    background: #3a2c0a;
+    color: #fcd34d;
+    border-color: #92400e;
+  }
+
+  .conn-delete-btn {
+    background: #2a1212;
+    color: #fca5a5;
+    border-color: #b42318;
+  }
+
+  .conn-panel-error {
+    background: #3b1717;
+    color: #fca5a5;
+    border-color: #b42318;
+  }
+
+  .conn-form {
+    background: #171d23;
+    border-color: #2b3540;
+  }
+
+  .conn-form-label {
+    color: #eef2f6;
+  }
+
+  .conn-form-input {
+    background: #1e2730;
+    border-color: #52606d;
+    color: #eef2f6;
+  }
+
+  .conn-form-input:focus {
+    border-color: #0ea5e9;
+  }
+
+  .conn-form-select {
+    background: #1e2730;
+    border-color: #52606d;
+    color: #eef2f6;
+  }
+
+  .conn-form-select:focus {
+    border-color: #0ea5e9;
+  }
+
+  .conn-save-btn {
+    background: #172554;
+    color: #93c5fd;
+    border-color: #1d4ed8;
+  }
+
+  .conn-form-error {
+    background: #3b1717;
+    color: #fca5a5;
+    border-color: #b42318;
   }
 }

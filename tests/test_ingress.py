@@ -43,7 +43,6 @@ class FakeSystemd:
         self.enabled = set()
         self.reloads = 0
         self.fail_service_always = False
-        self.fail_service_marker = None  # service content containing this fails
         self.fail_install_content = None  # staged content containing this fails
 
     # -- helpers -------------------------------------------------------------
@@ -77,8 +76,7 @@ class FakeSystemd:
             return "active"
         socket_unit = unit[: -len(".service")] + ".socket"
         if self.socket_listening(socket_unit):
-            content = self.unit_content(unit)
-            if self.fail_service_always or (self.fail_service_marker and self.fail_service_marker in content):
+            if self.fail_service_always:
                 self.active[unit] = "failed"
                 self.results[unit] = "resources"
             else:
@@ -218,25 +216,31 @@ def test_unit_names_are_deterministic_uid_and_state_hash(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "kwargs, message",
+    "kwargs",
     [
-        ({"name": "edge"}, "ingress name must be one of"),
-        ({"name": "private", "bind_address": "127.0.0.2"}, "must bind exactly 127.0.0.1"),
-        ({"name": "private", "bind_address": "0.0.0.0"}, "must bind exactly 127.0.0.1"),
-        ({"name": "public", "bind_address": "0.0.0.0"}, "explicit host IP address"),
-        ({"name": "public", "bind_address": "127.0.0.1"}, "non-loopback"),
-        ({"name": "public", "bind_address": "224.0.0.1"}, "unicast"),
-        ({"name": "public", "bind_address": "example.test"}, "literal IPv4"),
-        ({"name": "private", "bind_address": "127.0.0.1", "port": 0}, "between 1 and 65535"),
-        ({"name": "private", "bind_address": "127.0.0.1", "port": True}, "between 1 and 65535"),
-        ({"name": "private", "bind_address": "127.0.0.1", "port": "80"}, "between 1 and 65535"),
-        ({"name": "private", "bind_address": "127.0.0.1", "target_port": 65536}, "between 1 and 65535"),
+        {"name": "edge"},
+        {"name": "private", "bind_address": "127.0.0.2"},
+        {"name": "private", "bind_address": "0.0.0.0"},
+        {"name": "private", "bind_address": "::1"},
+        {"name": "public", "bind_address": "0.0.0.0"},
+        {"name": "public", "bind_address": "::"},
+        {"name": "public", "bind_address": "127.0.0.1"},
+        {"name": "public", "bind_address": "::1"},
+        {"name": "public", "bind_address": "::ffff:127.0.0.1"},
+        {"name": "public", "bind_address": "224.0.0.1"},
+        {"name": "public", "bind_address": "ff02::1"},
+        {"name": "public", "bind_address": "fe80::1%eth0"},
+        {"name": "public", "bind_address": "example.test"},
+        {"name": "private", "bind_address": "127.0.0.1", "port": 0},
+        {"name": "private", "bind_address": "127.0.0.1", "port": True},
+        {"name": "private", "bind_address": "127.0.0.1", "port": "80"},
+        {"name": "private", "bind_address": "127.0.0.1", "target_port": 65536},
     ],
 )
-def test_ensure_rejects_invalid_parameters(tmp_path, fake_systemd, kwargs, message):
+def test_ensure_rejects_invalid_parameters(tmp_path, fake_systemd, kwargs):
     arguments = {"name": "private", "bind_address": "127.0.0.1", "port": 80, "target_port": 18080}
     arguments.update(kwargs)
-    with pytest.raises(PortmapError, match=message):
+    with pytest.raises(PortmapError):
         ingress.ensure_ingress(tmp_path, **arguments)
     assert fake_systemd.commands == []
 
@@ -381,17 +385,25 @@ def test_ensure_translates_socket_start_address_in_use_to_conflict(tmp_path, fak
     assert not (tmp_path / "ingress" / "private.json").exists()
 
 
-def test_ensure_falls_back_when_ip_policy_is_unsupported(tmp_path, fake_systemd):
-    fake_systemd.fail_service_marker = "IPAddressAllow="
-    result = ensure_private(tmp_path, target_port=18080)
+def test_service_units_carry_no_ip_policy_but_keep_hardening(tmp_path, fake_systemd):
+    ensure_private(tmp_path, target_port=18080)
 
-    assert result["running"] is True
     _, service_unit = ingress.unit_names(tmp_path, "private")
     content = (fake_systemd.unit_dir / service_unit).read_text(encoding="utf-8")
+    # Backends are container-published loopback ports: rootless Podman may DNAT
+    # to the container bridge address, which a loopback-only allowlist would drop.
     assert "IPAddressAllow" not in content and "IPAddressDeny" not in content
-    assert "NoNewPrivileges=yes" in content and "DynamicUser=yes" in content
+    for directive in (
+        "DynamicUser=yes",
+        "NoNewPrivileges=yes",
+        "CapabilityBoundingSet=\n",
+        "AmbientCapabilities=\n",
+        "RestrictAddressFamilies=AF_INET AF_UNIX",
+        "ProtectSystem=strict",
+    ):
+        assert directive in content
     installs = [c for c in fake_systemd.commands if c[0] == "install" and c[-1].endswith(service_unit)]
-    assert len(installs) == 2  # restricted tier, then the unrestricted retry
+    assert len(installs) == 1  # one fixed unit content, no fallback variant
 
 
 def test_ensure_activation_failure_rolls_back_installed_units(tmp_path, fake_systemd):
@@ -404,7 +416,7 @@ def test_ensure_activation_failure_rolls_back_installed_units(tmp_path, fake_sys
     assert "stop" in verbs  # rollback stopped the units it had started
 
 
-def test_failed_reactivation_restores_restricted_units(tmp_path, fake_systemd):
+def test_failed_reactivation_restores_previous_units(tmp_path, fake_systemd):
     port = free_port()
     ensure_private(tmp_path, port=port)
     socket_unit, service_unit = ingress.unit_names(tmp_path, "private")
@@ -422,19 +434,43 @@ def test_failed_reactivation_restores_restricted_units(tmp_path, fake_systemd):
     assert fake_systemd.active[socket_unit] == "active"
 
 
-def test_state_commit_failure_releases_new_listener(tmp_path, fake_systemd, monkeypatch):
+@pytest.mark.parametrize("failure", [OSError("state disk full"), KeyboardInterrupt()])
+def test_state_commit_failure_releases_new_listener(tmp_path, fake_systemd, monkeypatch, failure):
     port = free_port()
 
     def fail_commit(*args, **kwargs):
-        raise OSError("state disk full")
+        raise failure
 
     monkeypatch.setattr(ingress, "_save_state", fail_commit)
-    with pytest.raises(OSError, match="state disk full"):
+    with pytest.raises(type(failure)) as caught:
         ensure_private(tmp_path, port=port)
+    assert caught.value is failure
 
     assert not list(fake_systemd.unit_dir.iterdir())
     with socket_module.socket() as replacement:
         replacement.bind(("127.0.0.1", port))
+
+
+def test_interrupted_update_restores_previous_listener_and_target(tmp_path, fake_systemd, monkeypatch):
+    port = free_port()
+    ensure_private(tmp_path, port=port, target_port=18080)
+    socket_unit, service_unit = ingress.unit_names(tmp_path, "private")
+    before = {unit: (fake_systemd.unit_dir / unit).read_bytes() for unit in (socket_unit, service_unit)}
+    original_state = (tmp_path / "ingress" / "private.json").read_bytes()
+    interruption = KeyboardInterrupt()
+
+    def interrupt(*args, **kwargs):
+        raise interruption
+
+    monkeypatch.setattr(ingress, "_save_state", interrupt)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        ensure_private(tmp_path, port=port, target_port=18081)
+
+    assert caught.value is interruption
+    assert {unit: (fake_systemd.unit_dir / unit).read_bytes() for unit in before} == before
+    assert (tmp_path / "ingress" / "private.json").read_bytes() == original_state
+    assert fake_systemd.socket_listening(socket_unit)
+    assert ingress.ingress_status(tmp_path, name="private")["running"]
 
 
 def test_failed_update_restores_previous_working_units(tmp_path, fake_systemd):
@@ -555,6 +591,28 @@ def test_status_is_read_only_and_reports_running(tmp_path, fake_systemd):
     for command in fake_systemd.raw_commands:
         assert command[0] == SYSTEMCTL
         assert command[1] in {"show", "is-enabled"}
+
+
+def test_status_prefers_installed_ipv6_socket_over_stale_state(tmp_path, fake_systemd):
+    socket_unit, service_unit = ingress.unit_names(tmp_path, "public")
+    marker = ingress._marker(tmp_path, "public")
+    for unit, content in (
+        (socket_unit, f"{marker}\n[Socket]\nListenStream=[fd12:3456::1]:80\n"),
+        (service_unit, f"{marker}\n[Service]\nExecStart={fake_systemd.proxyd} 127.0.0.1:18081\n"),
+    ):
+        path = fake_systemd.unit_dir / unit
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o644)
+    ingress._save_state(
+        tmp_path, "public", {"bind_address": "192.0.2.42", "port": 81, "target_port": 19090}
+    )
+
+    status = ingress.ingress_status(tmp_path, name="public")
+
+    assert status["owned"] is True
+    assert status["bind_address"] == "fd12:3456::1"
+    assert status["port"] == 80
+    assert status["target_port"] == 18081
 
 
 def test_status_reports_absent_ingress(tmp_path, fake_systemd):

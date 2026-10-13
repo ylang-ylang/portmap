@@ -12,7 +12,6 @@ from .slug import slugify
 
 
 CONFIG_FILE_NAME = "portmap.toml"
-GATEWAY_COMPOSE_FILE_NAME = "docker-compose.yml"
 USER_CONFIG_PATH = Path.home() / ".config" / "portmap" / CONFIG_FILE_NAME
 DEFAULT_DNS_DOMAIN = "portmap"
 DEFAULT_GATEWAY_NETWORK = "portmap_gateway"
@@ -51,6 +50,12 @@ class PortmapSettings:
             # Remote engine endpoint (tcp://, ssh://); pass through verbatim.
             return self.runtime_socket
         return f"unix://{self.runtime_socket}"
+
+    @property
+    def client_state_dir(self) -> Path:
+        from .client_runtime import client_state_dir
+
+        return client_state_dir(shared_state_dir=self.state_dir)
 
     @property
     def allocation_state_file(self) -> Path:
@@ -239,10 +244,8 @@ def socket_alive(path: str, *, timeout: float = 0.3) -> bool:
 
 
 def podman_socket_path(environ: Mapping[str, str], *, probe: bool = False) -> str | None:
-    candidates = [DEFAULT_PODMAN_SOCKET]
-    runtime_dir = string_env(environ, "XDG_RUNTIME_DIR")
-    if runtime_dir:
-        candidates.append(str(Path(runtime_dir) / "podman" / "podman.sock"))
+    runtime_dir = string_env(environ, "XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    candidates = [str(Path(runtime_dir) / "podman" / "podman.sock"), DEFAULT_PODMAN_SOCKET]
     for candidate in candidates:
         if not probe or socket_alive(candidate):
             return candidate
@@ -277,18 +280,9 @@ def resolve_portmap_root(
     if raw_root := string_env(env, "PORTMAP_ROOT"):
         return Path(raw_root).expanduser().resolve()
     candidate = Path(__file__).resolve().parents[2]
-    if (candidate / GATEWAY_COMPOSE_FILE_NAME).exists():
-        # Source checkout: the repo root holds the gateway compose file.
+    if (candidate / "pyproject.toml").is_file():
         return candidate
-    assets = gateway_assets_dir()
-    if (assets / GATEWAY_COMPOSE_FILE_NAME).exists():
-        # Installed package (brew/pip/uv): gateway assets live in the wheel.
-        return assets
-    return candidate
-
-
-def gateway_assets_dir() -> Path:
-    return Path(__file__).resolve().parent / "gateway_assets"
+    return USER_CONFIG_PATH.parent
 
 
 def pythonpath_dir() -> Path:
@@ -364,6 +358,6 @@ def expand_path(value: str, *, root: Path) -> Path:
 
 
 def default_agent_runtime_dir(env: Mapping[str, str]) -> str:
-    if runtime_dir := string_env(env, "XDG_RUNTIME_DIR"):
-        return str(Path(runtime_dir) / "portmap")
+    # /run/user/<uid> can disappear at the last logout even when the agent's
+    # process survives in an owned system-manager scope.
     return f"/tmp/portmap-{os.getuid()}"

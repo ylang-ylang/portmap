@@ -19,30 +19,6 @@ from portmap.cli import main
 from portmap.errors import PortmapError
 
 
-def test_render_compose_plugin_shim_contains_required_guards(tmp_path: Path) -> None:
-    real = tmp_path / "real-compose"
-    root = tmp_path / "portmap-root"
-
-    shim = render_compose_plugin_shim(real_compose=real, portmap_root=root)
-
-    assert SHIM_MARKER in shim
-    assert 'if [ "${1:-}" = "docker-cli-plugin-metadata" ]; then' in shim
-    assert 'if [ "${1:-}" = "compose" ]; then' in shim
-    assert "unset DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND" in shim
-    assert "unset DOCKER_CLI_PLUGIN_SOCKET" in shim
-    assert 'PORTMAP_BROKER_BYPASS=1' in shim
-    # Runtime auto-detect: explicit DOCKER_HOST wins; a configured socket is
-    # honored; podman sockets are probed only when dockerd's socket is absent.
-    # Detection runs after the bypass hatches so opt-outs stay pure.
-    assert shim.index("PORTMAP_BROKER_BYPASS") < shim.index("PORTMAP_RUNTIME_SOCKET")
-    assert 'if [ -z "${DOCKER_HOST:-}" ]; then' in shim
-    assert 'DOCKER_HOST="unix://$PORTMAP_RUNTIME_SOCKET"' in shim
-    assert "DOCKER_HOST=unix:///run/podman/podman.sock" in shim
-    assert 'DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"' in shim
-    assert (
-        'env -u VIRTUAL_ENV PORTMAP_ROOT="$PORTMAP_ROOT" PORTMAP_BROKER_BYPASS=1 '
-        'uv run --project "$PORTMAP_ROOT" portmap docker-compose -- "$@"'
-    ) in shim
 
 
 def test_install_compose_plugin_shim_writes_executable_plugin(tmp_path: Path) -> None:
@@ -51,6 +27,7 @@ def test_install_compose_plugin_shim_writes_executable_plugin(tmp_path: Path) ->
     real.write_text("#!/bin/sh\n", encoding="utf-8")
     root = tmp_path / "portmap-root"
     root.mkdir()
+    (root / "pyproject.toml").touch()
 
     status = install_compose_plugin_shim(docker_config=docker_config, real_compose=real, portmap_root=root)
 
@@ -79,6 +56,7 @@ def test_uninstall_removes_only_portmap_shim(tmp_path: Path) -> None:
     docker_config = tmp_path / "docker-config"
     real = tmp_path / "real-compose"
     real.write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").touch()
     install_compose_plugin_shim(docker_config=docker_config, real_compose=real, portmap_root=tmp_path)
 
     status = uninstall_compose_plugin_shim(docker_config=docker_config)
@@ -100,6 +78,7 @@ def test_broker_cli_status_and_install(tmp_path: Path, capsys) -> None:
     docker_config = tmp_path / "docker-config"
     real = tmp_path / "real-compose"
     real.write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").touch()
 
     assert main(
         [

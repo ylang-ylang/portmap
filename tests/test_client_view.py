@@ -1,14 +1,8 @@
-import http.client
 import json
-import threading
-from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
-from portmap.web_static import read_static_asset
-from portmap.client_view import ClientViewServer, project_catalog
+from portmap.client_view import project_catalog, request_host
 from portmap.errors import PortmapError
 
 
@@ -223,159 +217,24 @@ def test_unsupported_transport_is_rejected() -> None:
         project_catalog(remote_catalog([]), connection_profile(via="weird"), 80)
 
 
-@contextmanager
-def serving(server):
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
+
+def test_projection_uses_controller_dns_when_provided() -> None:
+    result = project_catalog(
+        remote_catalog([]),
+        connection_profile(via="ssh"),
+        18080,
+        dns_address="169.254.254.53",
+        dns_port=1053,
+    )
+    assert result["dns_server"] == "169.254.254.53"
+    assert result["dns_port"] == 1053
 
 
-def request(server, path: str, *, host: str = "remote.portmap", method: str = "GET", duplicate_host: str | None = None):
-    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
-    try:
-        connection.putrequest(method, path, skip_host=True)
-        connection.putheader("Host", host)
-        if duplicate_host is not None:
-            connection.putheader("Host", duplicate_host)
-        connection.endheaders()
-        response = connection.getresponse()
-        return response.status, response.headers, response.read()
-    finally:
-        connection.close()
-
-
-def replace_json(path: Path, value: dict) -> None:
-    staging = path.with_suffix(".tmp")
-    staging.write_text(json.dumps(value), encoding="utf-8")
-    staging.replace(path)
-
-
-@pytest.fixture
-def local_view(tmp_path):
-    catalog = remote_catalog([{"kind": "http", "url": "http://app.remote.portmap:8080/"}])
-
-    class RemoteHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path != "/registry.json":
-                self.send_error(404)
-                return
-            body = json.dumps(catalog).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass
-
-    with serving(ThreadingHTTPServer(("127.0.0.1", 0), RemoteHandler)) as remote:
-        profile = connection_profile(via="ssh", backend_url=f"http://127.0.0.1:{remote.server_port}")
-        replace_json(tmp_path / "connections.json", {"version": 1, "connections": {"remote.portmap": profile}})
-        replace_json(tmp_path / "gateway.json", {"http_port": 18080, "owner": "private-gateway-owner"})
-        with serving(ClientViewServer(tmp_path, 0, "view-owner")) as server:
-            yield server, catalog, tmp_path
-
-
-def test_registry_fetches_real_remote_catalog_and_reloads_atomic_state(local_view) -> None:
-    server, catalog, state_dir = local_view
-    status, _, body = request(server, "/registry.json", host="remote.portmap:18080")
-    assert status == 200
-    projected = json.loads(body)
-    # An SSH connection rewrites endpoint URLs onto the shared public port.
-    assert projected["services"][0]["endpoints"][0]["url"] == "http://app.remote.portmap:18080/"
-    assert projected["worktrees"] == catalog["worktrees"]
-    for private in (b"private-gateway-owner", b"private-tunnel-token", b"/private/controller/socket", b"view-owner"):
-        assert private not in body
-
-    replace_json(state_dir / "gateway.json", {"http_port": 80})
-    status, _, body = request(server, "/registry.json")
-    assert status == 200
-    assert json.loads(body)["services"][0]["endpoints"][0]["url"] == "http://app.remote.portmap/"
-
-    replace_json(state_dir / "connections.json", {"version": 1, "connections": {}})
-    assert request(server, "/registry.json")[0] == 404
-    assert request(server, "/index.html")[0] == 404
-
-
-def test_host_scope_is_exact_and_only_valid_numeric_ports_are_stripped(local_view) -> None:
-    server, _, _ = local_view
-    assert request(server, "/registry.json", host="REMOTE.PORTMAP:80")[0] == 200
-    for host in (
-        "app.remote.portmap",
-        "remote.portmap.example",
-        "remote.portmap:",
-        "remote.portmap:abc",
-        "remote.portmap:0",
-        "remote.portmap:65536",
-        "remote.portmap:80:80",
-        "remote.portmap@other.example",
-        "[remote.portmap]:80",
-    ):
-        assert request(server, "/registry.json", host=host)[0] == 404
-        assert request(server, "/favicon.svg", host=host)[0] == 404
-    assert request(server, "/registry.json", duplicate_host="other.portmap")[0] == 404
-    assert request(server, "/healthz", host="other.portmap")[0] == 404
-
-
-def test_static_files_reuse_catalog_serving_and_reject_traversal(local_view) -> None:
-    server, _, _ = local_view
-    for path, asset in (
-        ("/", "index.html"),
-        ("/index.html", "index.html"),
-        ("/assets/dns-check.svg", "assets/dns-check.svg"),
-        ("/favicon.svg", "favicon.svg"),
-    ):
-        status, headers, body = request(server, path)
-        expected, content_type = read_static_asset(asset)
-        assert status == 200
-        assert body == expected
-        assert headers["Content-Type"] == content_type
-    assert request(server, "/assets/../../client_view.py")[0] == 404
-    status, headers, body = request(server, "/favicon.svg", method="HEAD")
-    assert status == 200
-    assert body == b""
-    assert int(headers["Content-Length"]) == len(read_static_asset("favicon.svg")[0])
-
-
-def test_local_post_actions_are_rejected_without_docker_or_agent_access(local_view, monkeypatch) -> None:
-    server, _, _ = local_view
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("local catalog must not query or mutate local containers")
-
-    monkeypatch.setattr("portmap.catalog.docker_request", forbidden)
-    monkeypatch.setattr("portmap.catalog.agent_compose_up_worktree", forbidden)
-    for path in ("/actions/compose-up", "/actions/compose-down", "/actions/compose-restart"):
-        status, headers, body = request(server, path, method="POST")
-        assert status == 405
-        assert headers["Allow"] == "GET, HEAD"
-        assert body == b""
-    assert request(server, "/actions/compose-up", host="other.portmap", method="POST")[0] == 404
-    assert request(server, "/registry.json")[0] == 200
-
-
-def test_mismatched_remote_domain_does_not_project_another_catalog(local_view) -> None:
-    server, catalog, _ = local_view
-    catalog["dns_domain"] = "unexpected.portmap"
-    status, _, body = request(server, "/registry.json")
-    assert status == 502
-    assert json.loads(body) == {"error": "remote catalog unavailable; check portmap connections"}
-
-
-def test_health_is_available_before_connections_exist(tmp_path) -> None:
-    with serving(ClientViewServer(tmp_path, 0, "readiness-owner")) as server:
-        status, _, body = request(server, "/healthz", host=f"127.0.0.1:{server.server_port}")
-        assert status == 200
-        assert json.loads(body) == {"ok": True, "owner": "readiness-owner"}
-        status, _, body = request(server, "/healthz", host="portmap-gateway.invalid")
-        assert status == 200
-        assert json.loads(body) == {"ok": True, "owner": "readiness-owner"}
-        assert request(server, "/registry.json", host="portmap-gateway.invalid")[0] == 404
-        assert request(server, "/registry.json", host="127.0.0.1")[0] == 404
-        assert request(server, "/healthz", host="unregistered.portmap")[0] == 404
+def test_request_host_accepts_authority_forms_only() -> None:
+    assert request_host("server.portmap") == "server.portmap"
+    assert request_host("Server.Portmap:8080") == "server.portmap"
+    assert request_host("server.portmap:notaport") is None
+    assert request_host("server.portmap:0") is None
+    assert request_host("192.168.201.16") == "192.168.201.16"
+    assert request_host("user@host") is None
+    assert request_host("") is None

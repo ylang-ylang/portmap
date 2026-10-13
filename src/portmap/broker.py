@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Mapping
 
 from .compose_takeover import find_compose_file, first_compose_command, should_passthrough, strip_remainder_separator
+from .client_runtime import client_state_dir
+from .infrastructure import container_dns_address
 from .model import GenerateRequest
 from .planner import generate_plan
 from .scaffold import ensure_portmap_support_files
@@ -67,7 +69,7 @@ def ensure_generated_override(
         host_ip=settings.host_ip,
         domain_suffix=settings.dns_domain,
         gateway_network=settings.gateway_network,
-        container_dns_server=settings.effective_dns_bind,
+        container_dns_server=container_dns_address(client_state_dir(env, shared_state_dir=settings.state_dir)),
         allocation_state_file=allocation_state_file(env),
     )
     plan = generate_plan(request)
