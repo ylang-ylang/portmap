@@ -1672,6 +1672,7 @@ function machineStatus(machine) {
     return { label: "cannot update", title: text(machine.reason) || "" };
   }
   if (machine.error) return { label: "error", title: text(machine.error) };
+  if (!machine.latest_version) return { label: "not checked", title: "Use Check updates to discover the latest release" };
   return { label: "up to date", title: "" };
 }
 
@@ -1682,6 +1683,7 @@ function machineStatusClass(machine) {
     return machine.can_update === true ? "upd-state-info" : "upd-state-warn";
   }
   if (machine.error) return "upd-state-error";
+  if (!machine.latest_version) return "upd-state-info";
   return "upd-state-ok";
 }
 
