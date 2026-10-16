@@ -30,6 +30,7 @@ from .client import set_local_server, setup_client
 from .client_discovery import probe_gateway
 from .container_runtime import ContainerRuntime
 from .errors import PortmapError
+from .permissions import ensure_private_directory, ensure_private_file
 from .infrastructure import _START_TIMEOUT, infrastructure_status, load_infrastructure
 from .ingress import ensure_ingress, ingress_status, stop_ingress
 from .legacy_server import (
@@ -54,10 +55,10 @@ _INGRESS_NAME = "public"
 @contextmanager
 def _server_lock(settings: PortmapSettings) -> Iterator[None]:
     directory = settings.state_dir / "server"
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = directory.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o700:
-        raise PortmapError(f"server state must be an owned private directory with mode 0700: {directory}")
+    ensure_private_directory(
+        directory,
+        message=f"server state must be an owned private directory with mode 0700: {directory}",
+    )
     fd = os.open(directory / "server.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -77,6 +78,8 @@ def _load(settings: PortmapSettings) -> dict[str, Any] | None:
         metadata = path.lstat()
     except FileNotFoundError:
         return None
+    ensure_private_file(path, message=f"unsafe server state file: {path}")
+    metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
         raise PortmapError(f"unsafe server state file: {path}")
     try:

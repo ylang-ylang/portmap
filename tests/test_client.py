@@ -1,6 +1,8 @@
 import json
+import shutil
+import tempfile
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,17 @@ def isolated_legacy_state(tmp_path, monkeypatch):
     monkeypatch.delenv("PORTMAP_CLIENT_STATE_DIR", raising=False)
     monkeypatch.delenv("PORTMAP_STATE_DIR", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "legacy-home"))
+
+
+@contextmanager
+def exposed_state_root():
+    """A shared-root layout with no private owned ancestor above the state."""
+    root = Path(tempfile.mkdtemp(prefix="portmap-shared-", dir="/tmp"))
+    root.chmod(0o755)
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root)
 
 
 def gateway(address="192.0.2.10", port=8080, domain="remote.portmap"):
@@ -139,18 +152,21 @@ def test_private_client_state_preserves_group_inheritance(tmp_path, parent_mode)
 
 
 @pytest.mark.parametrize("mode", [0o750, 0o770, 0o2750])
-def test_group_access_to_client_state_remains_forbidden(tmp_path, mode):
-    directory = tmp_path / "client"
-    directory.mkdir()
-    directory.chmod(mode)
-    saved = directory / "connections.json"
-    saved.write_text("existing private data\n")
-    with pytest.raises(PortmapError, match="owned private directory"):
-        with client.client_lock(directory):
-            pytest.fail("group-readable state must not be opened")
-    assert saved.read_text() == "existing private data\n"
-    assert directory.stat().st_mode & 0o7777 == mode
-    assert not (directory / "client.lock").exists()
+def test_group_access_without_private_ancestor_remains_forbidden(mode):
+    # Recovery needs a provably private owned ancestor; a shared root has
+    # none, so the gate stays closed and the state is left untouched.
+    with exposed_state_root() as root:
+        directory = root / "client"
+        directory.mkdir()
+        directory.chmod(mode)
+        saved = directory / "connections.json"
+        saved.write_text("existing private data\n")
+        with pytest.raises(PortmapError, match="owned private directory"):
+            with client.client_lock(directory):
+                pytest.fail("group-readable state must not be opened")
+        assert saved.read_text() == "existing private data\n"
+        assert directory.stat().st_mode & 0o7777 == mode
+        assert not (directory / "client.lock").exists()
 
 
 def test_foreground_exit_retires_dead_transport_without_forgetting_identity(tmp_path, monkeypatch):
@@ -416,18 +432,19 @@ def test_teardown_keeps_the_local_role_but_removes_remote_connections(tmp_path: 
 # Setup and teardown
 
 
-def test_insecure_state_fails_before_controller_or_agent_changes(tmp_path: Path, monkeypatch):
-    state = tmp_path / "shared-state"
-    state.mkdir()
-    state.chmod(0o775)
+def test_insecure_state_fails_before_controller_or_agent_changes(monkeypatch):
     effects = []
     monkeypatch.setattr(client, "ensure_agent_started", lambda *args, **kwargs: effects.append("agent"))
     monkeypatch.setattr(client, "sync_infrastructure", lambda *args, **kwargs: effects.append("sync"))
-    with pytest.raises(PortmapError):
-        client.setup_client(state)
-    assert effects == []
-    assert state.stat().st_mode & 0o777 == 0o775
-    assert not (state / "client.lock").exists()
+    with exposed_state_root() as root:
+        state = root / "shared-state"
+        state.mkdir()
+        state.chmod(0o775)
+        with pytest.raises(PortmapError):
+            client.setup_client(state)
+        assert effects == []
+        assert state.stat().st_mode & 0o777 == 0o775
+        assert not (state / "client.lock").exists()
 
 
 @pytest.mark.parametrize("running", [False, True])

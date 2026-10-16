@@ -2,8 +2,10 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import signal
 import sys
+import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -166,15 +168,25 @@ def test_capture_reports_dead_and_foreign_workers_without_stopping_them(tmp_path
     ["dns-pid", "dns-owner", "dns-group-writable"],
 )
 def test_capture_refuses_invalid_dns_descriptors(tmp_path, procs, damage):
-    if damage == "dns-pid":
-        write_dns_state(tmp_path, 0)
-    elif damage == "dns-owner":
-        write_dns_state(tmp_path, 100, owner="not-hex")
+    if damage == "dns-group-writable":
+        # A relaxed mode is only recoverable under a provably private owned
+        # ancestor; a shared root keeps the unsafe-descriptor refusal.
+        root = Path(tempfile.mkdtemp(prefix="portmap-shared-", dir="/tmp"))
+        root.chmod(0o755)
     else:
-        path = write_dns_state(tmp_path, 100)
-        path.chmod(0o666)
-    with pytest.raises(PortmapError, match="legacy client DNS"):
-        legacy_native.capture_native_workers(tmp_path)
+        root = tmp_path
+    try:
+        if damage == "dns-pid":
+            write_dns_state(root, 0)
+        elif damage == "dns-owner":
+            write_dns_state(root, 100, owner="not-hex")
+        else:
+            write_dns_state(root, 100).chmod(0o666)
+        with pytest.raises(PortmapError, match="legacy client DNS"):
+            legacy_native.capture_native_workers(root)
+    finally:
+        if damage == "dns-group-writable":
+            shutil.rmtree(root)
 
 
 def test_capture_refuses_invalid_gateway_descriptors(tmp_path, procs):

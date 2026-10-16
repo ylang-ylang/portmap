@@ -15,3 +15,12 @@
   volume remounts restore group-write bits on persistent state beneath a
   still-private owned home. Standard startup must recover safely without
   manual permission edits or weakening foreign-state checks.
+- V0.15 restores permission-reset state only beneath a verified pre-existing
+  private owned ancestor. Descriptor identity, no-symlink traversal, single-link
+  files and rejection of parent traversal prevent adopting shared/foreign data.
+- Cover client, server, ingress, legacy and persisted-agent state without
+  recursive chmod or changes to contents, saved connections or project data.
+- Independent final regression: 870 passed, 2 integration cases deselected;
+  focused read-only security review found no blocking issue.
+- Frozen 0.15.0 Linux amd64 archive: 8128689 bytes; SHA256
+  `41dd2d75fc86f66b72021c68bc7b1c684a8181d0427cd23d1920c6a4a58c5fdd`.
