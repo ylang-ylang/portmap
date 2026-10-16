@@ -73,11 +73,27 @@ or range exposure is delegated to Docker Compose port mappings.
 
 ## Requirements
 
-Every machine running `portmap setup` needs a working local Docker or rootless
-Podman API socket and the Docker Compose CLI, including remote-only clients.
-CoreDNS, Traefik, the catalog, and the SSH socket relay run in one shared
-container stack; there is no native DNS/HTTP fallback. Standalone installation
-alone starts nothing; Homebrew also runs setup. See [Unified CLI](#unified-cli).
+Every machine running `portmap setup` or `portmap run` needs a working local
+Docker or Podman API socket and the Docker Compose CLI, including remote-only
+clients. CoreDNS, Traefik, the catalog, and the SSH socket relay remain a shared
+container stack; there is no native DNS/HTTP fallback. Systemd, resolved and
+host `CAP_NET_ADMIN` are no longer universal requirements.
+An answering API socket alone is insufficient: the engine must be able to
+create its own containers and networks.
+Use Compose 2.23.2+ with support for the generated override format.
+For Docker API 1.44+, fixed MACs use per-network `mac_address`; older APIs
+use the service-level field on each single-network infrastructure container.
+Portmap checks the actual API version rather than forcing a newer one.
+For Podman using Netavark, the network stack needs the
+[stable bridge-MAC fix](https://github.com/containers/netavark/releases/tag/v1.9.0).
+On Linux/amd64, `setup` and `run` detect an affected, idle, user-owned rootless
+Podman API and prepare checksum-verified network helpers in the user's data
+directory before starting Portmap containers. They preserve the engine's base
+configuration and restart only the verified API process with the owned override.
+Already-compatible engines are unchanged. Active workloads, foreign configuration
+or an unsupported repair environment fail explicitly instead of being modified.
+Portmap does not install or upgrade the container engine, change host neighbor
+tables, or require a separate deployment repair command.
 
 For local publishing, your project should use Compose, and managed services
 should have:
@@ -214,9 +230,10 @@ that endpoint. If a service needs a specific upstream Host, set
 ## Unified CLI
 
 One `portmap` command can access remote machines, publish this machine's
-projects, or do both. The standalone installer only places the command;
-Homebrew also initializes the access role. Neither publishes projects or
-enables boot services automatically.
+projects, or do both. Standalone installation only places the command.
+The updated Homebrew helper also initializes access when a usable user service
+manager exists; otherwise it explicitly leaves automatic setup unattempted.
+Neither publishes projects nor enables boot services automatically.
 
 Open a trusted server's catalog and select **Settings → Download portmap**,
 or run its installer below. **Settings** is the last tab after the machines;
@@ -237,20 +254,16 @@ server IP and retains the current HTTP port instead of requiring that name.
 The standalone package supports **Linux amd64 with glibc 2.31+** and bundles
 its Python runtime, CLI, agent, frontend, and infrastructure configuration.
 It does not bundle host CoreDNS or Traefik binaries. Setup requires a running
-Docker or rootless Podman runtime, Docker Compose, and access to their socket;
-OpenSSH is also needed for SSH connections. Linux DNS integration needs
-`systemd-resolved` and `iproute2`; HTTP 80 ingress needs a systemd system manager.
-Applications must actually use systemd-resolved, through its NSS integration
-(for example `libnss-resolve` on Debian) or its configured DNS stub.
-A running resolver service alone is insufficient when `/etc/nsswitch.conf`
-and `/etc/resolv.conf` still bypass it. Only machines with that bypass need
-the one-time OS prerequisite; it is not repeated per project, connection, or
-upgrade, and is also necessary for native DNS servers. Portmap does not rewrite
-those global files; enable the OS resolver integration separately.
+Docker or Podman API, Docker Compose, and permission to access the socket.
+OpenSSH is also needed for SSH connections. DNS and HTTP integration are
+selected independently; see [Portable Startup](#portable-startup).
+The historical `resolved` adapter still requires resolved, iproute2, an
+application resolver path through resolved, and permission to create its
+owned dummy interface. Those requirements do not apply to the other adapters.
 
-On Linux, Homebrew installs the command and runs `portmap setup` in the same
-operation. A successful install leaves `http://127.0.0.1/` usable; no separate
-setup command is required:
+With a usable user service manager, the updated Homebrew activation helper runs
+`portmap setup` in the same operation and checks the loopback page. Without one,
+installation succeeds but explicitly reports that automatic setup was not run:
 
 ```bash
 brew install ylang-ylang/tap/portmap
@@ -260,12 +273,15 @@ brew upgrade ylang-ylang/tap/portmap
 The container runtime is a separate prerequisite. Portmap reuses an accessible
 local Docker or Podman API, preferring Docker when both are available and
 honoring explicit runtime configuration. It does not install, start, enable,
-or reconfigure a container engine. A missing/inaccessible API or failed
-initialization makes the Brew command fail; installing the CLI alone is not
-reported as a ready gateway. The login user needs a user systemd manager and
-sudo authorization for the existing scoped DNS/HTTP integration. Owned old
-standalone launchers are retired, but their bundles and saved connections
-are retained.
+or reconfigure a container engine. When activation is attempted, an unavailable
+API or failed initialization makes the Brew command fail. When it is not
+attempted, existing services/configuration remain unchanged and readiness is
+not claimed: run `portmap run` or `portmap setup`, then `portmap status --check`.
+Owned old standalone launchers are retired, but bundles and saved connections
+are retained. Homebrew supplies the Docker CLI and the Compose client as
+client-only packages; `portmap setup` locates the installed Compose client by
+itself, so no plugin wiring or `cliPluginsExtraDirectories` step is needed,
+and no container engine or user-group change is part of the installation.
 
 Source installations are also supported:
 
@@ -279,6 +295,149 @@ and musl/Alpine are not published. The Linux workflow below is the supported
 default-port workflow; other resolver adapters do not imply verified port-80
 support on those platforms.
 
+### One-command Source Snapshot Deployment
+
+Deploy the current checkout over ordinary SSH, including workspaces without
+systemd. This path does not depend on Coder or Kubernetes:
+
+```bash
+python3 tools/deploy_portmap.py SSH_TARGET \
+  --tap-source /path/to/homebrew-tap
+```
+
+The controller needs Python 3.11+, the matching Portmap/tap checkouts, and
+a working Docker or Podman engine for the pinned Linux amd64 builder.
+The Linux amd64 target needs SSH, Python 3.11+, Homebrew, and its own usable
+Docker or Podman API. The tap installs the Compose client. Ordinary runtime
+use and standalone installation do not require this deployment tool or Brew.
+
+The command builds the real standalone archive, stages checksummed source
+and Brew helpers, installs the private `portmap-local/snapshot` formula, then
+runs setup outside Homebrew's sandbox. DNS initialization explains its scope
+and requests sudo when necessary; run from an interactive terminal if sudo
+requires a password. Success requires real system DNS, port-80 HTTP, frontend
+assets, and the catalog API—not merely a completed package installation.
+Unchanged inputs reuse the build and installed package and recheck readiness.
+
+For an old Linux amd64 rootless Podman/Netavark installation, the deploy tool
+can install pinned Netavark/Aardvark 1.9 helpers under the user's data directory.
+It preserves the existing containers configuration and uses an owned override.
+Only an identified, user-owned, idle standalone API service can be restarted
+for this repair; active workloads or uncertain ownership fail explicitly.
+It does not replace the engine, distro binaries, global policies or capabilities.
+Already compatible runtimes are left alone.
+
+This is source-snapshot deployment, not a public release. The packaged manifest
+describes the archive actually built; repository release metadata and published
+tap pins remain unchanged. On the target, use `portmap up` and `portmap demo up`
+to show a separate demo project, or start your own configured project normally.
+
+
+### Portable Startup
+
+Run in the foreground from a terminal, an existing supervisor, or a project
+startup command. No specific init system, workspace product, or orchestration
+platform is required:
+
+```bash
+portmap run
+```
+
+`run` supervises its agent worker and owned SSH processes. Normal SIGINT,
+SIGTERM and SIGHUP stop owned workers, remove their live routes, and retain
+saved connections, shared infrastructure and business containers. An already
+healthy agent is reused and is not stopped by this runner. Forced termination
+still follows the caller's process supervisor/cgroup policy. Only one runner
+may own a client state directory. Background `setup` remains available.
+
+For one-time background initialization, run `portmap setup`. Any project can
+adopt the same standard entry in its own startup path - a Makefile target, a
+dev-container service command, or a wrapper script:
+
+```bash
+portmap setup && portmap compose up -d
+```
+
+`setup` reports success only when the container infrastructure, DNS and the
+HTTP entry are actually working, so a project script fails fast instead of
+serving a broken entry; repeated invocations are safe and re-verify the
+environment first. An existing supervisor or container entrypoint can instead
+own `portmap run`; Portmap does not install a particular init system. Normal
+use needs no `--resolver` or `--ingress` selection.
+
+New HTTP entries are published by Docker or Podman at the exact requested
+address and port: private access defaults to `127.0.0.1:80`; public access
+requires an explicitly configured non-loopback address. Rootless runtimes are
+not rejected in advance. A real runtime bind failure reports the cause rather
+than switching to systemd, another port, or a different address. Existing owned
+systemd entries retain migration/recovery compatibility.
+
+On Linux with ordinary, non-loopback upstream nameservers, `setup` and `run`
+publish CoreDNS on `127.0.0.1:53` over UDP and TCP. Initialization explains the
+scope before changing the current `/etc/resolv.conf`, requesting sudo only
+when needed. `.portmap` is answered locally; ordinary queries go to the
+captured original DNS, not substituted public servers. Search domains and
+options are preserved. Port 53 is necessary because a `nameserver` entry
+cannot specify another port or route only one suffix.
+
+The recovery journal records original content, file kind, symlink target,
+device/inode, permissions and owner, plus the actual post-write identity.
+Teardown restores only a file it can still prove it owns. External edits or
+an interrupted write with uncertain ownership fail closed and retain recovery
+information. Bind mounts are updated in place, so forced termination during
+that write can require manual restoration from the journal. Readiness checks
+the system's actual resolution, not merely the CoreDNS listener.
+
+Local proxies such as `127.0.0.53`, mixed stub/upstream lists, and VPN split-DNS
+policies are not flattened into guessed upstreams. A usable policy-preserving
+resolved adapter may retain compatibility; otherwise initialization reports
+the limitation. The existing `resolved` and `external` adapters remain
+advanced/compatibility options, not mandatory choices for new users.
+
+Host/client DNS and project-container DNS are separate roles. Fresh
+`portmap up` can publish projects for remote HTTP or SSH access without
+taking over the server's host DNS or opening DNS to remote clients. The
+accessing client resolves the name and preserves its HTTP `Host`; only the
+server needs to know the project's internal port. Managed containers continue
+using CoreDNS on the private bridge.
+
+`portmap teardown` removes active remote connections and restores owned host
+DNS. While local publishing or running/stopped project containers still depend
+on the bridge, it retains shared infrastructure, including the same CoreDNS
+instance and its existing publications. After stopping publishing and removing
+those project containers, teardown releases the remaining owned resources.
+
+Before uninstalling the executable, run `portmap teardown` while the current
+container API is still available. If it reports retained project consumers,
+stop/remove those projects through their normal Compose workflow, run
+`portmap down`, then run teardown again. Do not delete the state directory
+first: it contains the resolver ownership journal needed for safe restoration.
+
+In a workspace/container, the resolver change applies only to the file visible
+there, which may be shared with sibling containers. It does not change a node's
+or cluster's global DNS. A rebuilt workspace rechecks its current resolver
+identity and environment instead of restoring a dead instance's backup.
+
+The same recheck discipline applies to the container API itself. A rebuilt
+workspace can lose the environment an existing rootless Podman API service was
+started with (for example its `CONTAINERS_CONF` override), and a regressed
+network stack can break bridge forwarding. Before creating or changing any
+portmap-owned container or network, `setup` and `run` re-verify the connected
+API - its configuration, network-stack compatibility and ownership - and
+repair only an identified, user-owned, idle mismatch. Running workloads,
+foreign services and uncertain ownership are refused with the concrete reason
+instead of being bypassed. Docker APIs pass this check unchanged. Re-run the
+same standard entry after any workspace rebuild; no separate repair command
+or source checkout is required.
+
+Permission boundaries remain real: the runtime must be able to publish the
+requested ports, the resolver file must be writable through an authorized
+operation, and the original DNS must be reachable. Portmap does not change
+global low-port policy, grant host capabilities, or stop unrelated listeners.
+An explicitly configured high HTTP port is supported; resolver-file DNS still
+requires port 53. Actual owned selections are persisted for subsequent commands.
+
+
 ### Publish Local Projects
 
 Run as your normal login user, with access to a local Docker or Podman socket:
@@ -289,10 +448,11 @@ portmap status --check
 portmap demo up
 ```
 
-`up` configures the isolated access resolver, starts the host-side agent and
-container-network gateway, then publishes the local role. The catalog and
-HTTP projects share port **80**. `demo up` starts a separate verification
-project, not your existing application.
+`up` starts the host-side agent and container-network gateway, then publishes
+the local role. Fresh server-only use does not configure host DNS or require
+port 53. The catalog and HTTP projects share port **80**. Run `setup` or `run`
+when this host's own programs also need `.portmap` resolution. `demo up` starts
+a separate verification project, not your existing application.
 
 Gateway assets are packaged with the command. Settings come from the gateway
 root's `portmap.toml`, or `~/.config/portmap/portmap.toml` for an installed
@@ -320,12 +480,12 @@ another host zone under `.portmap`.
 | Local project | `127.0.0.1` | 80 | Same private ingress |
 | LAN client of this server | This server's LAN IP | 80 | Separate public ingress |
 
-`portmap setup` configures split DNS and reserves the private
-`127.0.0.1:80` entry, including when there are no profiles or only direct
-connections. Disconnecting the last remote does not release the entry.
-After stopping local publishing, `portmap teardown` releases the owned
-entry and DNS integration. Standalone installation alone performs none of
-these steps; the Brew formula initializes access automatically.
+`portmap setup` and `portmap run` prepare the selected DNS integration and the
+private `127.0.0.1:80` entry, including empty or direct-only profiles.
+Disconnecting the last remote does not release the entry. Teardown restores
+owned host DNS immediately; shared entries and CoreDNS remain while local
+publishing or project containers still depend on them. Installation alone
+is not a readiness guarantee.
 
 The private ingress forwards to the shared container Traefik's access
 entrypoint. Traefik routes each SSH domain through a container relay to that
@@ -337,25 +497,22 @@ The LAN ingress forwards **only to the local web entrypoint**, never to the
 private access entrypoint. Its catalog lists only local projects and omits
 connection controls, imported remote catalogs, and SSH target names.
 
-Systemd owns the exact `127.0.0.1:80` and, when enabled, `<LAN-IP>:80` sockets.
-An unprivileged `systemd-socket-proxyd` service forwards each socket to its
-fixed loopback backend. Portmap installs owned units with narrowly scoped
-sudo commands; it does not run the entire CLI as root, modify sudoers, apply
-binary capabilities, or lower `net.ipv4.ip_unprivileged_port_start`.
-Units are not enabled at boot. Rerun `setup` and `up` as needed after reboot.
+The container ingress backend publishes only the exact requested address and
+port and forwards over the existing bridge: private to Traefik access, public
+to Traefik web. Each role has its own container and ownership record; changing
+one does not recreate the gateway or SSH relay. No host networking is used.
+The optional systemd backend retains its exact-address socket and unprivileged
+`systemd-socket-proxyd` units with scoped sudo operations.
+Neither backend modifies sudoers, binary capabilities, global low-port sysctls,
+linger, logind policy, or boot enablement.
 
-Host-side SSH masters and the agent must outlive the terminal or SSH login
-that started them. Inside a logind `session-*.scope` or a per-user systemd
-manager cgroup, portmap moves its own CLI process into a transient
-system-manager scope through one exact privileged `busctl StartTransientUnit`
-call before starting workers. Their credentials do not change. This also keeps
-workers alive after a Brew installer service exits or the user manager stops.
-`--no-sudo` refuses a new worker if this escape needs elevation. No linger,
-logind policy, or boot setting is changed.
-The container runtime/API service must independently remain available after
-logout; Portmap does not change its service policy. Replacing a standalone
-bundle or source checkout alone does not restart existing workers. Brew runs
-setup, but compatible live workers can still be reused rather than restarted.
+In foreground mode the runner provides worker lifetime without a systemd
+scope escape. In background mode, workers that need to outlive a logind
+`session-*.scope` or per-user manager still use the existing narrowly scoped
+`busctl StartTransientUnit` integration; `--no-sudo` refuses required elevation.
+The runtime/API service must independently remain available. Replacing a
+source checkout or bundle does not restart existing workers; compatible live
+workers can be reused by setup.
 
 Port 80 is exclusive per address. A competing `docker -p 80:80` wildcard
 mapping is a conflict, not another independent virtual host. Portmap never
@@ -370,15 +527,16 @@ not a raw gateway `docker compose up`, to publish projects and maintain ingress.
 
 `portmap down` stops the local publishing role and its public ingress while
 preserving remote connections and the prepared private HTTP entry.
-Only `portmap teardown` releases that entry and the split DNS integration.
+Only explicit teardown releases host DNS and, once consumers are gone, the entry.
 Direct DNS mappings remain independent of the local HTTP data path.
 
 Only HTTP is multiplexed here. HTTPS, DNS, raw TCP/UDP, and port ranges are not
 tunneled through port 80. CoreDNS has separate host, container, and preserved
-legacy-public views: host clients use split DNS; project containers use its
-gateway-network address, not the host's loopback address. SSH/direct clients
-do not require remote port 53. Public project controls remain unauthenticated:
-publish only to trusted networks, not the public Internet.
+legacy-public views: host clients use their configured system resolver, while
+project containers use CoreDNS's gateway-network address rather than host
+loopback. SSH/direct clients do not require remote port 53.
+Public project controls remain unauthenticated: publish only to trusted
+networks, not the public Internet.
 
 ### Container Runtime: Docker or Podman
 
@@ -403,11 +561,13 @@ at the Podman API socket through `DOCKER_HOST`. The user running portmap must
 already have permission to access that socket, just as with Docker. Generated
 project overrides need Compose `!reset` support.
 
-HTTP 80 is owned by the restricted systemd ingress, not a rootless host-port
-mapping. The host DNS listener uses `169.254.254.53:1053`; managed containers
-query CoreDNS on the shared bridge at port 53. No low-port sysctl, binary
-capability, sudoers, or linger change is needed. Podman's actual user-namespace
-mode is read from its native API rather than assumed from Docker compatibility.
+Rootful runtimes can publish the requested low ports on behalf of an ordinary
+user. Rootless status alone says nothing about whether a requested low port
+will work: the runtime's actual bind result decides. There is no automatic
+systemd fallback or policy change. Managed containers query CoreDNS on the
+shared bridge at port 53; its host publication is a separate role. Podman's
+actual user-namespace mode is read from its native API rather than assumed
+from Docker compatibility.
 
 New Portmap bridge networks are dual-stack. Existing networks are preserved,
 not silently recreated or reconfigured. IPv6 direct access requires an
@@ -426,7 +586,7 @@ is required. Historical runtime comparison evidence is in
 Install the same `portmap` command on the computer running your browser:
 
 ```bash
-# Configure split DNS and keep the private 127.0.0.1:80 entry ready.
+# Initialize system DNS access and the private 127.0.0.1:80 entry.
 portmap setup
 
 # Inspect configured SSH aliases or probe one explicit address.
@@ -468,11 +628,18 @@ catalog control actions preserve the remote Host-routing path.
 
 ### Split DNS and State
 
-`portmap setup` creates an owned dummy interface on Linux and routes only
-`~portmap` to local CoreDNS at `169.254.254.53:1053`. Direct records use remote
-IP addresses; SSH and local records use loopback. Unconnected zones return
-NXDOMAIN. Physical-interface DNS and `/etc/resolv.conf` are not rewritten.
-Do not combine this setup with the former per-interface Web DNS commands.
+The default Linux resolver integration is the takeover described in
+[Portable Startup](#portable-startup): `/etc/resolv.conf` is rewritten to use
+CoreDNS at `127.0.0.1:53`, ordinary queries are forwarded to the captured
+original upstreams with search domains and options preserved, and `.portmap`
+zones are answered locally. Direct records use remote IP addresses; SSH and
+local records use loopback. Unconnected zones return NXDOMAIN. The advanced
+`--resolver resolved` adapter instead creates an owned dummy interface and
+routes only `~portmap` to CoreDNS at `169.254.254.53:1053` without rewriting
+`/etc/resolv.conf`; it still requires systemd-resolved, iproute2, an
+application resolver path through resolved, and permission to create that
+interface. Do not combine either mode with the former per-interface Web DNS
+commands.
 
 The unified state root defaults to
 `${XDG_STATE_HOME:-$HOME/.local/state}/portmap`; access state is in `client/`
@@ -484,12 +651,13 @@ prevent cleanup from signaling unrelated processes or removing foreign units.
 ```bash
 # Stop local publishing first, if enabled; remote connections survive down.
 portmap down
-# Remove the access resolver, owned workers and remote connections.
+# Restore host DNS and disconnect remotes; retain any remaining project dependencies.
 portmap teardown
 ```
 
-Teardown refuses while the local publishing role is active. Disconnecting a
-remote does not stop its containers. Use `--no-sudo` on setup, teardown,
+Teardown can run while publishing remains active: it preserves the shared
+data plane needed by that role and by running/stopped project containers.
+Disconnecting a remote does not stop its containers. Use `--no-sudo` on setup, teardown,
 connect, disconnect, up, down, or agent start when privilege elevation must
 not be invoked; operations that need an administrative change fail explicitly
 instead. This includes the login-session escape above: with `--no-sudo` a
@@ -819,3 +987,46 @@ That integration test starts a temporary Traefik gateway and both worktree
 instances, then verifies actual HTTP, TCP, UDP, and range UDP responses with
 Python clients. The generated `test_repo/` directory is ignored by git and can
 be deleted at any time; the test will recreate it.
+
+### Nested Workspace Portability
+
+The opt-in nested test uses a **dedicated verification VM**, not a production
+workspace. Run it as an ordinary operator with working rootless Podman,
+subuid/subgid mappings, user namespaces, `/dev/fuse`, `/dev/net/tun`, a private
+`XDG_RUNTIME_DIR`, and pasta or slirp4netns. The VM also needs OpenSSH, the
+Docker CLI and Compose plugin, image/package download access, and a reachable
+non-loopback original DNS server. These are fixture prerequisites, not
+additional Portmap dependencies.
+
+```bash
+PORTMAP_RUN_NESTED_INTEGRATION=1 PORTMAP_NESTED_OPERATOR="$USER" \
+  uv run --with pytest pytest -m integration tests/test_integration_nested_workspace.py -q
+```
+
+The fixture creates its own outer rootless store, network, and labeled
+workspace/peer/DNS containers. Each workspace runs its **own real inner
+rootless Podman API** on a writable workspace bind; no host engine socket is
+mounted. PID 1 is tini, systemd/resolved are absent, and ordinary and sudo
+processes both lack `CAP_NET_ADMIN`. Ordinary sessions explicitly drop inherited
+and ambient capabilities; sudo is still bounded by the same recorded profile.
+The namespace-local low-port policy, proc view and FUSE/TUN devices reproduce
+the observed workspace constraints;
+the VM's low-port policy, forwarding, DNS, and subid configuration are not
+relaxed. It never uses `--privileged`.
+
+The current Linux/amd64 fixture keeps Ubuntu 24.04, Podman 4.9 and crun,
+but installs SHA256-pinned official Netavark/Aardvark 1.9 helpers in the
+disposable image to include that upstream fix. Receipts record the selected
+network helper versions and paths; this is not the unchanged stock 1.4 stack.
+
+Acceptance exercises plain `run`/`setup`, system `.portmap` and ordinary DNS
+on port 53, private/public HTTP on port 80, container access, real SSH
+connections, foreground shutdown/restart, teardown with live consumers, and
+workspace recreation with a fresh resolver and engine graph. JSON receipts
+remain under a unique `portmap-nested-pytest-*` directory in the operator's
+home. Cleanup uses recorded IDs and ownership labels, not prune or name-prefix
+sweeps. The driver module also exposes bounded `baseline`, `prepare`,
+`exercise`, `cleanup`, and `status` commands for diagnosing a failed run.
+
+This is source-mode acceptance in a controlled environment. It does not
+establish acceptance of a published package or an actual Coder deployment.

@@ -372,3 +372,76 @@ def test_ipv6_forward_refusals_surface_without_rereading_config(owned_tunnel, ss
     remote_address = packet.read(remote_size).decode()
     remote_port = struct.unpack(">I", packet.read(4))[0]
     assert (local_address, local_port, remote_address, remote_port) == ("::1", 12345, "2001:db8::1", 8080)
+
+
+def _register_tracked(descriptor, child):
+    controlpath = descriptor["controlpath"]
+    client_tunnel._CHILDREN[controlpath] = child
+    client_tunnel._TRACKED_TUNNELS[controlpath] = dict(descriptor)
+    return controlpath
+
+
+def _forget_tracked(controlpath):
+    client_tunnel._CHILDREN.pop(controlpath, None)
+    client_tunnel._TRACKED_TUNNELS.pop(controlpath, None)
+
+
+def test_stop_tracked_tunnels_stops_and_reaps_only_registered_masters(owned_tunnel, ssh_binary):
+    descriptor, listener = owned_tunnel
+    listener.listen(4)
+    child = subprocess.Popen([
+        sys.executable, "-c",
+        "import pathlib,sys,time\npath=pathlib.Path(sys.argv[1])\nwhile path.exists(): time.sleep(0.01)",
+        descriptor["controlpath"],
+    ])
+    controlpath = _register_tracked(descriptor, child)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            exit_reply = executor.submit(_reply_to_mux, listener, remove_on_exit=controlpath)
+            assert client_tunnel.stop_tracked_tunnels() == []
+            assert struct.unpack(">I", exit_reply.result(timeout=5)[:4])[0] == 0x10000005
+        assert child.poll() is not None
+        assert not Path(controlpath).parent.exists()
+        assert controlpath not in client_tunnel._TRACKED_TUNNELS
+        assert controlpath not in client_tunnel._CHILDREN
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        _forget_tracked(controlpath)
+
+
+def test_stop_tracked_tunnels_leaves_unregistered_masters_alone(owned_tunnel, ssh_binary):
+    descriptor, listener = owned_tunnel
+    listener.listen(4)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        check = executor.submit(_reply_to_mux, listener)
+        assert client_tunnel.tunnel_alive(descriptor)
+        assert struct.unpack(">I", check.result(timeout=5)[:4])[0] == 0x10000004
+    assert client_tunnel.stop_tracked_tunnels() == []
+    assert Path(descriptor["controlpath"]).exists()
+
+
+def test_stop_tracked_tunnels_reports_and_terminates_an_unresponsive_master(owned_tunnel, ssh_binary):
+    descriptor, listener = owned_tunnel
+    listener.listen(4)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"]
+    )
+    controlpath = _register_tracked(descriptor, child)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            refused = executor.submit(_reply_to_mux, listener, error="master refused exit")
+            failures = client_tunnel.stop_tracked_tunnels()
+            assert refused.result(timeout=5) is not None
+        assert len(failures) == 1
+        assert "configured-alias" in failures[0]
+        assert child.poll() is not None
+        # stop_tunnel retains an unresponsive master's runtime for a later retry.
+        assert Path(controlpath).parent.exists()
+        assert controlpath not in client_tunnel._TRACKED_TUNNELS
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        _forget_tracked(controlpath)

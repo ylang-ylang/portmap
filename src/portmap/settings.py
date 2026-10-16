@@ -43,6 +43,8 @@ class PortmapSettings:
     agent_runtime_dir: Path
     runtime: str
     runtime_socket: str
+    resolver_backend: str = "auto"
+    ingress_backend: str = "auto"
 
     @property
     def docker_host(self) -> str:
@@ -92,6 +94,8 @@ class PortmapSettings:
             "PORTMAP_DNS_DOMAIN": self.dns_domain,
             "PORTMAP_DNS_TARGET_IP": self.host_ip,
             "PORTMAP_DNS_FORWARD": self.dns_forward,
+            "PORTMAP_RESOLVER_BACKEND": self.resolver_backend,
+            "PORTMAP_INGRESS_BACKEND": self.ingress_backend,
             "PORTMAP_GATEWAY_NETWORK": self.gateway_network,
             "PORTMAP_STATE_DIR": str(self.state_dir),
             "PORTMAP_AGENT_RUNTIME_HOST_DIR": str(self.agent_runtime_dir),
@@ -116,8 +120,19 @@ def load_portmap_settings(
     state = table(config, "state")
     agent = table(config, "agent")
     runtime_config = table(config, "runtime")
+    access = table(config, "access")
 
     runtime, runtime_socket = resolve_runtime(env, runtime_config)
+    resolver_backend = (
+        string_env(env, "PORTMAP_RESOLVER_BACKEND") or string_value(access, "resolver", "auto")
+    ).strip().lower()
+    if resolver_backend not in {"auto", "resolved", "forward", "external"}:
+        raise PortmapError("access resolver must be auto, resolved, forward or external")
+    ingress_backend = (
+        string_env(env, "PORTMAP_INGRESS_BACKEND") or string_value(access, "ingress", "auto")
+    ).strip().lower()
+    if ingress_backend not in {"auto", "container", "systemd"}:
+        raise PortmapError("access ingress must be auto, container or systemd")
 
     host_ip = string_env(env, "PORTMAP_HOST_IP") or string_env(env, "PORTMAP_DNS_TARGET_IP") or detect_host_ip()
     state_dir = expand_path(
@@ -155,6 +170,8 @@ def load_portmap_settings(
         agent_runtime_dir=agent_runtime_dir,
         runtime=runtime,
         runtime_socket=runtime_socket,
+        resolver_backend=resolver_backend,
+        ingress_backend=ingress_backend,
     )
 
 

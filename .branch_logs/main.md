@@ -72,3 +72,13 @@
 - Validate the compiled UI with recorded API data in Chromium, including the
   local-only `本机` badge and keyboard/remote navigation. Keep the final notebook
   badge/manifest synchronization pending its network recovery.
+
+- Release `V0.14` (`portmap 0.14.0`) with portable container HTTP, resolver-file
+  DNS, explicit foreground/background startup and safe standard-entry runtime
+  compatibility. Docker or Podman remains required; host capabilities and
+  low-port policy are never silently changed.
+- Preserve private/public isolation, project DNS consumers and SSH recovery.
+  Eliminate Brew-only Compose wiring and deployment-only runtime repair.
+- Independent source regression: 842 passed with 2 integration cases deselected;
+  tap regression: 9 passed. Frozen Linux amd64 archive SHA256:
+  `42d41062f8e42d42e60da26a4e3f68f962f56ffaeca31eaad6a125d2a00398dd`.

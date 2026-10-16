@@ -22,13 +22,14 @@ from typing import Any
 
 from . import __version__
 from .agent_client import AgentUnavailable, agent_health
-from .client_runtime import client_state_dir, ensure_persistent_scope, frozen, process_identity, worker_environment
+from .client_runtime import client_state_dir, ensure_persistent_scope, foreground_lifetime, frozen, process_identity, worker_environment
 from .errors import PortmapError
-from .settings import PortmapSettings
+from .settings import PortmapSettings, pythonpath_dir
 
 
 AGENT_CONTAINER_SOCKET = "/run/portmap/agent.sock"
-AGENT_PROTOCOL = 2
+# Protocol includes independently managed host and container DNS roles.
+AGENT_PROTOCOL = 4
 
 
 @dataclass(frozen=True)
@@ -56,10 +57,14 @@ class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStre
 class AgentHandler(BaseHTTPRequestHandler):
     server_version = "portmap-agent/0.1"
 
+    def served_access_state_dir(self) -> Path:
+        # A spawned worker pins its served directory through its environment.
+        return client_state_dir()
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in {"/healthz", "/readyz"}:
-            self.write_json({"ok": True, "message": "agent ready", "protocol": AGENT_PROTOCOL, "version": __version__, "pid": os.getpid(), "access_state_dir": str(client_state_dir())})
+            self.write_json({"ok": True, "message": "agent ready", "protocol": AGENT_PROTOCOL, "version": __version__, "pid": os.getpid(), "access_state_dir": str(self.served_access_state_dir())})
             return
         if parsed.path == "/worktrees":
             try:
@@ -95,7 +100,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             self.write_json({"error": "check must be exactly 1"}, status=400)
             return
         try:
-            self.write_json(connection_targets(client_state_dir(), check=check))
+            self.write_json(connection_targets(self.served_access_state_dir(), check=check))
         except PortmapError as exc:
             self.write_json({"error": str(exc)}, status=400)
         except Exception:  # pragma: no cover - unexpected host state.
@@ -110,7 +115,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         try:
             # Web-originated control never uses interactive sudo.
-            self.write_json(mutate_connection_target(client_state_dir(), payload, use_sudo=False))
+            self.write_json(mutate_connection_target(self.served_access_state_dir(), payload, use_sudo=False))
         except PortmapError as exc:
             self.write_json({"error": str(exc)}, status=400)
         except Exception:  # pragma: no cover - unexpected host state.
@@ -176,7 +181,7 @@ def _private_agent_directory(path: Path) -> None:
     metadata = path.lstat()
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
         raise PortmapError(f"agent directory is not owned and protected: {path}")
-    if stat.S_IMODE(metadata.st_mode) != 0o700:
+    if metadata.st_mode & 0o777 != 0o700:
         if any(item.name not in {"agent.pid", "agent.sock", "agent.lock", "agent-owner.json"} for item in path.iterdir()):
             raise PortmapError(f"agent runtime must be a dedicated private directory: {path}")
         path.chmod(0o700)
@@ -262,7 +267,8 @@ def _signal_owned_agent(settings: PortmapSettings, pid: int) -> None:
             os.close(descriptor)
 
 
-def run_agent_server(socket_path: Path, *, pid_file: Path | None = None) -> None:
+def _bind_agent_server(socket_path: Path, pid_file: Path | None = None) -> ThreadingUnixHTTPServer:
+    """Bind the owned agent socket and record process ownership; never serve."""
     resolved_socket = socket_path.expanduser().resolve()
     _private_agent_directory(resolved_socket.parent)
     if resolved_socket.exists() or resolved_socket.is_symlink():
@@ -283,15 +289,28 @@ def run_agent_server(socket_path: Path, *, pid_file: Path | None = None) -> None
         record = {"version": 1, "uid": uid, "pid": os.getpid(), "start_time": started, "command": command, "socket": str(resolved_socket)}
         _atomic_agent_file(resolved_socket.parent / "agent-owner.json", json.dumps(record))
         _atomic_agent_file(pid_file, f"{os.getpid()}\n")
+        server.pid_file = pid_file
+    return server
+
+
+def _retire_agent_server(server: ThreadingUnixHTTPServer) -> None:
+    """Close a bound server and remove only the metadata it owns."""
+    server.server_close()
+    resolved_socket = Path(str(server.server_address))
+    pid_file = getattr(server, "pid_file", None)
+    if pid_file is None or read_pid(pid_file) == os.getpid():
+        resolved_socket.unlink(missing_ok=True)
+        if pid_file is not None:
+            pid_file.unlink(missing_ok=True)
+            (resolved_socket.parent / "agent-owner.json").unlink(missing_ok=True)
+
+
+def run_agent_server(socket_path: Path, *, pid_file: Path | None = None) -> None:
+    server = _bind_agent_server(socket_path, pid_file)
     try:
         server.serve_forever()
     finally:
-        server.server_close()
-        if pid_file is None or read_pid(pid_file) == os.getpid():
-            resolved_socket.unlink(missing_ok=True)
-            if pid_file is not None:
-                pid_file.unlink(missing_ok=True)
-                (resolved_socket.parent / "agent-owner.json").unlink(missing_ok=True)
+        _retire_agent_server(server)
 
 
 def agent_status(settings: PortmapSettings) -> AgentProcessStatus:
@@ -323,6 +342,37 @@ def agent_status(settings: PortmapSettings) -> AgentProcessStatus:
     )
 
 
+def _agent_worker_environment(settings: PortmapSettings, access: Path) -> dict[str, str]:
+    """Environment shared by background and foreground agent workers.
+
+    ``worker_environment`` passes the caller's own environment through, so a
+    worker keeps the caller's SSH agent socket, SSH config and HOME.
+    """
+    env = worker_environment()
+    env.update(settings.gateway_env())
+    env["PORTMAP_ROOT"] = str(settings.root)
+    env["PORTMAP_AGENT_SOCKET"] = str(settings.agent_socket)
+    env["PORTMAP_CLIENT_STATE_DIR"] = str(access)
+    if not frozen():
+        env["PYTHONPATH"] = os.pathsep.join(
+            entry for entry in (str(pythonpath_dir()), env.get("PYTHONPATH", "")) if entry
+        )
+    return env
+
+
+def _agent_serve_command(settings: PortmapSettings, *, foreground: bool = False) -> list[str]:
+    """Spawn argv for an agent worker through the module or frozen CLI."""
+    command = (
+        [sys.executable, "agent", "serve"]
+        if frozen()
+        else [sys.executable, "-m", "portmap.agent", "serve"]
+    )
+    command += ["--socket", str(settings.agent_socket), "--pid-file", str(settings.agent_pid_file)]
+    if foreground:
+        command.append("--foreground-lifetime")
+    return command
+
+
 def ensure_agent_started(settings: PortmapSettings, *, use_sudo: bool = True, access_state_dir: Path | None = None) -> AgentProcessStatus:
     with _agent_lock(settings):
         return _start_agent(settings, use_sudo=use_sudo, access_state_dir=access_state_dir)
@@ -351,17 +401,8 @@ def _start_agent(settings: PortmapSettings, *, use_sudo: bool, access_state_dir:
     log_file = settings.agent_log_file
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    env = worker_environment()
-    env.update(settings.gateway_env())
-    env["PORTMAP_ROOT"] = str(settings.root)
-    env["PORTMAP_AGENT_SOCKET"] = str(settings.agent_socket)
-    env["PORTMAP_CLIENT_STATE_DIR"] = str(access)
-    command = (
-        [sys.executable, "agent", "serve"]
-        if frozen()
-        else [sys.executable, "-m", "portmap.agent", "serve"]
-    )
-    command += ["--socket", str(settings.agent_socket), "--pid-file", str(settings.agent_pid_file)]
+    env = _agent_worker_environment(settings, access)
+    command = _agent_serve_command(settings)
     with log_file.open("ab") as log:
         process = subprocess.Popen(
             command,
@@ -390,6 +431,205 @@ def _start_agent(settings: PortmapSettings, *, use_sudo: bool, access_state_dir:
         pid=process.pid,
         message=last_message or f"agent failed to start; see {log_file}",
     )
+
+
+# Bounded escalation for stopping one owned foreground worker group.
+FOREGROUND_START_TIMEOUT = 5.0
+FOREGROUND_STOP_GRACE = 5.0
+FOREGROUND_KILL_WAIT = 10.0
+
+
+@dataclass
+class ForegroundAgent:
+    """One owned foreground agent worker supervised by this runner process.
+
+    The worker serves the agent controls in its own process group inside the
+    runner's session. ``stop()`` terminates that group with a bounded
+    SIGTERM/SIGKILL escalation, reaps the leader and only then removes the
+    metadata the worker owns, so a hung request, compose call or SSH
+    descendant can neither outlive a normal shutdown nor mutate state after
+    the runner's final route cleanup. If the runner itself is killed without
+    notice, the worker stays in the runner's session and cgroup: whatever
+    supervisor policy took the runner takes the worker with it, and an
+    unattended worker is either reused as the healthy running agent by the
+    next start or stopped through the same ownership rules as any agent.
+    """
+
+    settings: PortmapSettings
+    process: subprocess.Popen
+    log_file: Path
+
+    def stop(self) -> None:
+        if self.process.returncode is not None:
+            # A previous stop already reaped the leader and cleaned up;
+            # signalling again could reach a reused process group id.
+            return
+        with _agent_lock(self.settings):
+            _stop_foreground_worker(self.settings, self.process)
+
+
+def _spawn_foreground_worker(settings: PortmapSettings, access: Path) -> tuple[subprocess.Popen, Path]:
+    """Spawn the owned foreground worker with its own process group."""
+    _private_agent_directory(settings.agent_runtime_dir)
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    log_file = settings.agent_log_file
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    env = _agent_worker_environment(settings, access)
+    command = _agent_serve_command(settings, foreground=True)
+    with log_file.open("ab") as log:
+        # Its own process group, but the caller's session and cgroup: the
+        # runner alone supervises the worker, and terminal signals or a
+        # supervisor acting on the runner still reach the whole tree.
+        process = subprocess.Popen(
+            command,
+            cwd=settings.state_dir,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            process_group=0,
+            start_new_session=False,
+        )
+    return process, log_file
+
+
+def start_foreground_agent(
+    settings: PortmapSettings, *, access_state_dir: Path | None = None,
+) -> ForegroundAgent | None:
+    """Start the owned foreground agent worker, or reuse the running agent.
+
+    Returns None when a healthy agent already serves this client state
+    directory; that reused agent is never stopped or replaced by the caller.
+    A worker whose protocol or version no longer matches is retired under
+    the same lock and ownership rules as a background restart before this
+    process spawns its own owned worker. The caller must ``stop()`` the
+    returned worker before exiting: the runner owns the worker, its process
+    group and the socket/PID metadata, and no foreground worker ever escapes
+    into a background lifetime.
+    """
+    access = (access_state_dir or settings.client_state_dir).resolve()
+    with _agent_lock(settings):
+        current = agent_status(settings)
+        if current.running:
+            try:
+                health = agent_health(socket_path=settings.agent_socket)
+            except RuntimeError:
+                # It died between the status probe and here; spawn fresh.
+                health = {}
+            if health.get("protocol") == AGENT_PROTOCOL and health.get("version") == __version__:
+                if health.get("access_state_dir") != str(access):
+                    raise PortmapError(
+                        "this agent socket serves a different client state directory; "
+                        "configure a separate agent runtime directory"
+                    )
+                if current.pid is None or health.get("pid") != current.pid or _owned_agent_identity(settings, current.pid) is None:
+                    raise PortmapError("agent health does not match the owned process identity")
+                return None
+            stopped = _stop_agent(settings)
+            if stopped.running:
+                raise PortmapError(stopped.message)
+        process, log_file = _spawn_foreground_worker(settings, access)
+        try:
+            _await_foreground_worker(settings, process, access)
+        except BaseException:
+            # Startup failed and no readiness was claimed: the owned child,
+            # its whole group and its files must not partially survive.
+            try:
+                _stop_foreground_worker(settings, process)
+            except Exception:  # pragma: no cover - never mask the startup failure
+                pass
+            raise
+        return ForegroundAgent(settings=settings, process=process, log_file=log_file)
+
+
+def _await_foreground_worker(settings: PortmapSettings, process: subprocess.Popen, access: Path) -> None:
+    """Claim readiness only for the healthy owned worker process itself."""
+    log_file = settings.agent_log_file
+    last_message = "agent worker did not become healthy"
+    deadline = time.monotonic() + FOREGROUND_START_TIMEOUT
+    while True:
+        try:
+            health = agent_health(socket_path=settings.agent_socket, timeout=0.5)
+        except RuntimeError as exc:
+            health = {}
+            last_message = str(exc)
+        if health.get("ok") and (
+            health.get("protocol") == AGENT_PROTOCOL
+            and health.get("version") == __version__
+            and health.get("access_state_dir") == str(access)
+            and health.get("pid") == process.pid
+            and read_pid(settings.agent_pid_file) == process.pid
+            and _owned_agent_identity(settings, process.pid) is not None
+        ):
+            return
+        if health.get("ok"):
+            last_message = "agent worker is not the healthy owned worker of this runner"
+        # Never poll()/wait() here: an unreaped leader keeps its process
+        # group owned by this runner until the stop sequence signals it.
+        if process_identity(process.pid) is None:
+            raise PortmapError(f"foreground agent worker exited during startup; see {log_file}")
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    raise PortmapError(f"{last_message}; see {log_file}")
+
+
+def _signal_owned_group(pgid: int, number: int) -> None:
+    """Signal exactly one owned worker group; a gone group is already stopped."""
+    try:
+        os.killpg(pgid, number)
+    except ProcessLookupError:
+        pass
+    except PermissionError as exc:
+        raise PortmapError(f"cannot signal the owned agent worker group: {exc}") from exc
+
+
+def _live_owned_group_members(pgid: int) -> int | None:
+    """Live (non-zombie) member count of one group; None when unknowable."""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return None
+    live = 0
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                fields = handle.read().rsplit(b")", 1)[1].split()
+        except OSError:
+            continue
+        if len(fields) > 2 and fields[2] == b"%d" % pgid and fields[0] != b"Z":
+            live += 1
+    return live
+
+
+def _stop_foreground_worker(settings: PortmapSettings, process: subprocess.Popen) -> None:
+    """Terminate the owned worker group with bounded grace, then clean up.
+
+    The leader stays unreaped until after the final group SIGKILL: an
+    unreaped leader (alive or zombie) keeps the group id impossible to
+    reuse, so every group signal provably reaches only this runner's own
+    workers even while hung descendants still occupy the group.
+    """
+    pgid = process.pid  # process_group=0 made the worker its own group leader
+    _signal_owned_group(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + FOREGROUND_STOP_GRACE
+    while time.monotonic() < deadline:
+        members = _live_owned_group_members(pgid)
+        if members == 0:
+            break
+        if members is None and process_identity(pgid) is None:
+            # Without /proc the leader is the best available wind-down proxy.
+            break
+        time.sleep(0.05)
+    # Anything still in the owned group - a hung request, a compose call, an
+    # SSH descendant - dies here, before the leader is reaped.
+    _signal_owned_group(pgid, signal.SIGKILL)
+    try:
+        process.wait(timeout=FOREGROUND_KILL_WAIT)
+    except subprocess.TimeoutExpired as exc:  # pragma: no cover - SIGKILL is final on POSIX
+        raise PortmapError("foreground agent worker did not die after SIGKILL") from exc
+    cleanup_agent_files(settings, pgid)
 
 
 def stop_agent(settings: PortmapSettings) -> AgentProcessStatus:
@@ -474,12 +714,19 @@ def build_parser() -> argparse.ArgumentParser:
     serve = subparsers.add_parser("serve", help="serve the portmap host agent")
     serve.add_argument("--socket", type=Path, required=True)
     serve.add_argument("--pid-file", type=Path)
+    serve.add_argument("--foreground-lifetime", action="store_true", help=argparse.SUPPRESS)
     serve.set_defaults(func=cmd_serve)
     return parser
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    run_agent_server(args.socket, pid_file=args.pid_file)
+    if args.foreground_lifetime:
+        # Supervised foreground-runner worker: serving stays inside one
+        # explicit foreground lifetime and never adopts a manager scope.
+        with foreground_lifetime():
+            run_agent_server(args.socket, pid_file=args.pid_file)
+    else:
+        run_agent_server(args.socket, pid_file=args.pid_file)
     return 0
 
 

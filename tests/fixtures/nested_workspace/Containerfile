@@ -1,0 +1,81 @@
+# Nested-workspace fixture image.
+#
+# A generic OCI workspace that reproduces the observed remote-workspace
+# profile the portable runtime targets: Ubuntu 24.04, a generic PID 1
+# (tini, not systemd), an ordinary uid 1000 user whose sudo cannot exceed
+# the container's capability bounding set, and a rootless inner Podman
+# 4.9.x with kernel overlay storage and unmodified distro network helpers.
+# Portmap's standard startup must perform any required compatibility work;
+# pre-patching this image would hide missing installation behavior.
+# No systemd, resolvectl or host engine socket exists inside.
+#
+# The outer operator stages its verified Docker CLI and Compose plugin.
+FROM ubuntu:24.04
+
+COPY docker-cli /usr/bin/docker
+COPY docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+
+# The existing source-checkout broker launcher uses uv; packaged Portmap
+# does not. Keep this fixture-only tool version fixed and use system Python.
+COPY --from=ghcr.io/astral-sh/uv:0.8.15 /uv /usr/local/bin/uv
+ENV UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy
+
+# Podman 4.9.3/crun 1.14.x are the Ubuntu 24.04 (noble) archive versions,
+# matching the observed target. fuse-overlayfs is deliberately absent: the
+# target uses kernel overlay, and an accidental driver fallback must fail
+# loudly instead of silently switching implementations.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      'podman=4.9.3*' crun netavark aardvark-dns slirp4netns uidmap iptables \
+      python3 tini git sudo util-linux openssh-client openssh-server ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    chmod 0755 /usr/bin/docker /usr/local/libexec/docker/cli-plugins/docker-compose && \
+    ln -s /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+
+# Inner engine keeps the target's disabled cgroups, cgroupfs manager,
+# file event log, crun and kernel overlay without a mount program.
+# Keep distro network helpers: compatibility belongs to product startup.
+RUN mkdir -p /etc/containers/containers.conf.d /etc/containers/storage.conf.d && \
+    rm -f /usr/share/containers/containers.conf /usr/share/containers/storage.conf \
+          /etc/containers/containers.conf /etc/containers/storage.conf \
+          /etc/containers/containers.conf.d/*.conf /etc/containers/storage.conf.d/*.conf && \
+    printf '%s\n' \
+      '[containers]' \
+      'cgroups = "disabled"' \
+      'log_driver = "k8s-file"' \
+      '' \
+      '[engine]' \
+      'cgroup_manager = "cgroupfs"' \
+      'events_logger = "file"' \
+      'runtime = "crun"' \
+      'compose_providers = ["/usr/local/bin/docker-compose"]' \
+      > /etc/containers/containers.conf && \
+    printf '%s\n' \
+      '[storage]' \
+      'driver = "overlay"' \
+      > /etc/containers/storage.conf
+
+# Ordinary workspace user: uid/gid 1000 with the target's split subid
+# ranges (own ids and outer uid 0 excluded on purpose) and passwordless
+# sudo inside this disposable fixture container only. The container's
+# capability bounding set, not sudoers, is what bounds root here.
+RUN if id -u 1000 >/dev/null 2>&1; then \
+        EXISTING_USER="$(id -nu 1000)"; \
+        EXISTING_GROUP="$(id -ng 1000)"; \
+        usermod -l workspace-user -d /home/workspace-user -m "$EXISTING_USER" && \
+        groupmod -n workspace-user "$EXISTING_GROUP"; \
+    else \
+        useradd -m -u 1000 -U -s /bin/bash workspace-user; \
+    fi && \
+    usermod -p "$(python3 -c 'import crypt, secrets; print(crypt.crypt(secrets.token_hex(32), crypt.mksalt(crypt.METHOD_SHA512)))')" workspace-user && \
+    sed -i '/^workspace-user:/d; /^ubuntu:/d' /etc/subuid /etc/subgid && \
+    printf 'workspace-user:1:999\nworkspace-user:1001:64535\n' >> /etc/subuid && \
+    printf 'workspace-user:1:999\nworkspace-user:1001:64535\n' >> /etc/subgid && \
+    printf 'workspace-user ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/workspace-user && \
+    chmod 0440 /etc/sudoers.d/workspace-user && \
+    install -d -m 0700 -o workspace-user -g workspace-user \
+      /tmp/podman-run-1000 /home/workspace-user/.ssh
+
+# The fixture's own scratch workspace and receipts are mounted at runtime.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from .client_dns import DNS_ADDRESS, render_corefile
+from .client_dns import render_corefile
 from .client_runtime import frozen
 from .container_runtime import ContainerRuntime, OWNER_LABEL, STATE_LABEL, UID_LABEL
 from .errors import PortmapError
@@ -37,6 +37,12 @@ def resource_labels(state: Mapping[str, Any]) -> dict[str, str]:
     return {OWNER_LABEL: state["owner"], STATE_LABEL: state["state_dir"], UID_LABEL: str(state["uid"]), "portmap.gateway": "true"}
 
 
+def _network_mac(owner: str, role: str) -> str:
+    address = bytearray(hashlib.sha256(f"{owner}:{role}".encode()).digest()[:6])
+    address[0] = (address[0] & 0xfc) | 0x02
+    return address.hex(":")
+
+
 def static_config(state: dict[str, Any]) -> dict[str, Any]:
     return {
         "global": {"checkNewVersion": False, "sendAnonymousUsage": False},
@@ -51,8 +57,12 @@ def static_config(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def compose_config(state: dict[str, Any], runtime: ContainerRuntime) -> dict[str, Any]:
+def compose_config(
+    state: dict[str, Any], runtime: ContainerRuntime, *,
+    mac_addresses: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     directory = Path(state["instance_dir"])
+    mac_addresses = mac_addresses or {}
     labels = resource_labels(state)
     network = state["network"]["name"]
     common: dict[str, Any] = {
@@ -61,7 +71,25 @@ def compose_config(state: dict[str, Any], runtime: ContainerRuntime) -> dict[str
     }
     config_mount = {"type": "bind", "source": str(directory / "config"), "target": "/config", "read_only": True}
     socket_mount = {"type": "bind", "source": runtime.socket_path, "target": "/var/run/docker.sock", "read_only": True}
-    services = {role: {**common, "image": image, "container_name": state["names"][role], "networks": {"gateway": {"ipv4_address": state["addresses"][role]}}} for role, image in IMAGES.items()}
+    services = {
+        role: {
+            **common, "image": image, "container_name": state["names"][role],
+            # Fixed IPs also need stable link identities after replacement;
+            # otherwise peers can keep sending to the previous container's MAC.
+            "networks": {"gateway": {
+                "ipv4_address": state["addresses"][role],
+            }},
+        }
+        for role, image in IMAGES.items()
+    }
+    for role, service in services.items():
+        mac = mac_addresses.get(role) or _network_mac(state["owner"], role)
+        # Every owned service has exactly one network. Older Docker APIs
+        # express that endpoint MAC on the container; API 1.44+ uses the network.
+        if runtime.supports_network_mac_address:
+            service["networks"]["gateway"]["mac_address"] = mac
+        else:
+            service["mac_address"] = mac
     services["gateway"].update({
         "command": ["--configFile=/config/traefik.yaml"], "cap_add": ["NET_BIND_SERVICE"],
         "volumes": [config_mount, socket_mount],
@@ -69,7 +97,10 @@ def compose_config(state: dict[str, Any], runtime: ContainerRuntime) -> dict[str
     })
     services["dns"].update({
         "command": ["-conf", "/config/Corefile"], "cap_add": ["NET_BIND_SERVICE"], "volumes": [config_mount],
-        "ports": [f"{DNS_ADDRESS}:{state['dns_port']}:1053/udp", f"{DNS_ADDRESS}:{state['dns_port']}:1053/tcp"],
+        "ports": [
+            {"host_ip": state["resolver"]["address"], "published": str(state["dns_port"]), "target": 1053, "protocol": protocol}
+            for protocol in ("udp", "tcp")
+        ] if state["resolver"] is not None else [],
     })
     public_dns = state.get("public_dns")
     if public_dns and public_dns.get("publish"):
@@ -79,19 +110,27 @@ def compose_config(state: dict[str, Any], runtime: ContainerRuntime) -> dict[str
             raise PortmapError("invalid recorded public DNS port")
         for protocol in ("udp", "tcp"):
             services["dns"]["ports"].append({"target": 1054, "published": str(published["port"]), "host_ip": str(address), "protocol": protocol})
+    socket_identity = Path(state["socket_dir"]).stat()
     services["relay"].update({
         "user": runtime.file_user, "command": ["haproxy", "-W", "-db", "-f", "/config/relay.cfg"],
+        "environment": {"PORTMAP_SOCKET_GENERATION": f"{socket_identity.st_dev}:{socket_identity.st_ino}"},
         "volumes": [config_mount, {"type": "bind", "source": state["socket_dir"], "target": "/run/portmap-ssh", "read_only": True}],
     })
     catalog_environment = {
         "PORTMAP_CATALOG_LISTEN_HOST": "0.0.0.0", "PORTMAP_CATALOG_LISTEN_PORT": "8081",
         "PORTMAP_CATALOG_PUBLIC_LISTEN_PORT": "8082", "PORTMAP_ACCESS_CONFIG": "/config/catalog-access.json",
         "PORTMAP_HTTP_PORT": str(state["http_port"]), "PORTMAP_DNS_DOMAIN": state["domain"],
-        "PORTMAP_DNS_SERVER": DNS_ADDRESS, "PORTMAP_DOCKER_SOCKET": "/var/run/docker.sock",
+        "PORTMAP_DOCKER_SOCKET": "/var/run/docker.sock",
+        "PORTMAP_HOST_DNS_ENABLED": "1" if state["host_dns_enabled"] else "0",
         "PORTMAP_AGENT_SOCKET": "/run/portmap/agent.sock", "PORTMAP_STATE_DIR": "/state",
         "PORTMAP_DOWNLOAD_DIR": "/downloads",
         "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/state",
     }
+    if state["host_dns_enabled"]:
+        catalog_environment["PORTMAP_DNS_SERVER"] = state["resolver"]["address"]
+        catalog_environment["PORTMAP_DNS_PORT"] = str(state["dns_port"])
+    if state.get("http_address"):
+        catalog_environment["PORTMAP_HTTP_ADDRESS"] = state["http_address"]
     catalog_volumes = [config_mount, socket_mount,
         {"type": "bind", "source": str(directory / "catalog"), "target": "/state"},
         {"type": "bind", "source": state["download_cache_dir"], "target": "/downloads"},
@@ -111,7 +150,11 @@ def compose_config(state: dict[str, Any], runtime: ContainerRuntime) -> dict[str
         catalog_volumes.append({"type": "bind", "source": str(source), "target": "/workspace/pythonpath", "read_only": True})
     services["catalog"].update({"command": catalog_command, "user": runtime.file_user, "environment": catalog_environment, "volumes": catalog_volumes, "tmpfs": ["/tmp"]})
     if not runtime.rootless:
-        services["catalog"]["group_add"] = [str(Path(runtime.socket_path).stat().st_gid)]
+        socket_gid = str(Path(runtime.socket_path).stat().st_gid)
+        # A rootful API socket can be owned by a non-root proxy user. With
+        # DAC capabilities dropped, the gateway needs its socket group too.
+        services["gateway"]["group_add"] = [socket_gid]
+        services["catalog"]["group_add"] = [socket_gid]
     return {"name": state["project"], "services": services, "networks": {"gateway": {"name": network, "external": True}}}
 
 
@@ -175,7 +218,17 @@ def access_snapshot(state: dict[str, Any], profiles: Mapping[str, dict[str, Any]
         elif available:
             row["backend_url"] = f"http://{state['addresses']['relay']}:{state['relay_ports'][domain]}"
         machines[domain] = row
-    return {"version": 1, "owner": state["owner"], "dns": {"address": DNS_ADDRESS, "port": state["dns_port"]}, "local": {"domain": state["domain"], "http_port": state["http_port"], "enabled": local is not None}, "machines": machines}
+    return {
+        "version": 1, "owner": state["owner"],
+        "dns": {
+            "host_enabled": state["host_dns_enabled"],
+            "address": state["resolver"]["address"] if state["host_dns_enabled"] else None,
+            "port": state["dns_port"] if state["host_dns_enabled"] else None,
+            "container_address": state["addresses"]["dns"], "marker": state["dns_marker"],
+        },
+        "local": {"domain": state["domain"], "http_port": state["http_port"], "enabled": local is not None},
+        "machines": machines,
+    }
 
 
 def dns_config(state: dict[str, Any], profiles: Mapping[str, dict[str, Any]]) -> tuple[str, str]:
@@ -189,9 +242,17 @@ def dns_config(state: dict[str, Any], profiles: Mapping[str, dict[str, Any]]) ->
             host[domain] = "127.0.0.1"
             containers[domain] = state["addresses"]["gateway"]
     public = state.get("public_dns")
-    revision = hashlib.sha256(json_bytes({"host": host, "containers": containers, "forward": state["dns_forward"], "public": public})).hexdigest()[:24]
+    plan = state["resolver"]
+    host_forward = plan["forwarders"] if plan and plan["backend"] == "forward" else None
+    revision = hashlib.sha256(json_bytes({
+        "host": host, "containers": containers, "forward": state["dns_forward"],
+        "host_forward": host_forward, "container_upstreams": state["container_upstreams"], "public": public,
+    })).hexdigest()[:24]
     marker = f"{state['owner']}:{revision}"
-    return marker, render_corefile(host, containers, marker, forward=state["dns_forward"], public=public)
+    return marker, render_corefile(
+        host, containers, marker, forward=state["dns_forward"], public=public, host_forward=host_forward,
+        container_forward=state["container_upstreams"] if state["dns_forward"] == "/etc/resolv.conf" and state["container_upstreams"] else None,
+    )
 
 
 def routes_config(state: dict[str, Any], snapshot: dict[str, Any]) -> tuple[str, dict[str, Any]]:
