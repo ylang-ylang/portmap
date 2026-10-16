@@ -18,7 +18,6 @@ import ipaddress
 import json
 import os
 import socket
-import stat
 import sys
 import tempfile
 import time
@@ -55,6 +54,7 @@ from .infrastructure import (
     sync_infrastructure,
 )
 from .errors import PortmapError
+from .permissions import ensure_private_directory
 from .settings import PortmapSettings, load_portmap_settings
 
 
@@ -64,11 +64,10 @@ class SSHSelectionRequired(PortmapError):
 
 @contextmanager
 def client_lock(state_dir: Path) -> Iterator[None]:
-    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = state_dir.lstat()
-    # Inherited setgid affects group inheritance, not directory access.
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o700:
-        raise PortmapError(f"client state must be an owned private directory with mode 0700: {state_dir}")
+    ensure_private_directory(
+        state_dir,
+        message=f"client state must be an owned private directory with mode 0700: {state_dir}",
+    )
     with (state_dir / "client.lock").open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:

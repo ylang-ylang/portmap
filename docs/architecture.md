@@ -298,6 +298,19 @@ state directories still require the current owner and mode 0700 permission
 bits; inherited setgid does not grant group access and is not mistaken for
 an unsafe directory.
 
+Restoring a persistent home volume can relax those bits again (directories
+to 2770/2775, records to 0660) while the private home itself keeps blocking
+every other user. `portmap.permissions` centralizes the recovery every gate
+shares: an `O_NOFOLLOW` descriptor walk proves no symlink participates and
+that one owned ancestor still denies group and other access, and only then
+the verified descriptor is tightened back to 0700/0600 -- setgid preserved
+where the kernel allows it, content untouched, nothing recursed. File
+descriptors must match the leaf reached through the verified parent and have
+only one hard link. Paths without a private ancestor, foreign-owned hops,
+symlinks and stripped owner bits remain refused. Persisted agent metadata
+uses the same proof; its old readable metadata-only runtime compatibility
+cannot authorize recovery of writable files from an untrusted shared path.
+
 
 ## Fixed Model
 

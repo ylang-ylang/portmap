@@ -137,3 +137,6 @@
 - Unify Compose client discovery, preserve cold-restored socket binds, and remove
   deployment-only preparation. Independent regression: 842 source cases passed,
   2 integration cases deselected; 9 tap cases passed.
+- Integrate V0.15 cold-remount recovery of owned state beneath a private
+  ancestor, with descriptor identity and fail-closed foreign/shared checks.
+  Preserve state contents and connections; 870 non-integration tests passed.

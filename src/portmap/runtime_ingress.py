@@ -31,6 +31,7 @@ from urllib.parse import quote
 
 from .container_runtime import ContainerRuntime
 from .errors import PortAllocationError, PortmapError
+from .permissions import ensure_private_file
 from .infrastructure_config import IMAGES
 from .ingress import _bind_address, _clear_state, _load_state, _role, _save_state
 
@@ -215,7 +216,7 @@ def _write_config(path: Path, content: str) -> str:
         if info.st_uid != os.getuid():
             raise PortmapError(f"refusing to replace {path}: owned by uid {info.st_uid}, not this user")
         if stat.S_IMODE(info.st_mode) & 0o022:
-            raise PortmapError(f"refusing to replace {path}: group- or world-writable")
+            ensure_private_file(path, message=f"refusing to replace {path}: group- or world-writable", strip=0o022)
     data = content.encode("utf-8")
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
     try:

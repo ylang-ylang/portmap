@@ -24,6 +24,7 @@ from . import __version__
 from .agent_client import AgentUnavailable, agent_health
 from .client_runtime import client_state_dir, ensure_persistent_scope, foreground_lifetime, frozen, process_identity, worker_environment
 from .errors import PortmapError
+from .permissions import ensure_private_directory, ensure_private_file, tighten_private_descriptor
 from .settings import PortmapSettings, pythonpath_dir
 
 
@@ -179,12 +180,20 @@ def compose_up_worktree(worktree: str) -> dict[str, Any]:
 def _private_agent_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     metadata = path.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
         raise PortmapError(f"agent directory is not owned and protected: {path}")
     if metadata.st_mode & 0o777 != 0o700:
-        if any(item.name not in {"agent.pid", "agent.sock", "agent.lock", "agent-owner.json"} for item in path.iterdir()):
-            raise PortmapError(f"agent runtime must be a dedicated private directory: {path}")
-        path.chmod(0o700)
+        for item in path.iterdir():
+            record = item.lstat()
+            if (item.name not in {"agent.pid", "agent.sock", "agent.lock", "agent-owner.json"}
+                    or record.st_uid != os.getuid() or stat.S_ISLNK(record.st_mode)
+                    or (not metadata.st_mode & 0o022
+                        and stat.S_ISREG(record.st_mode) and record.st_mode & 0o022)):
+                raise PortmapError(f"agent runtime must be a dedicated private directory: {path}")
+        if metadata.st_mode & 0o022:
+            ensure_private_directory(path, message=f"agent directory is not owned and protected: {path}")
+        else:
+            path.chmod(0o700)
 
 
 @contextmanager
@@ -229,6 +238,7 @@ def _owned_agent_identity(settings: PortmapSettings, pid: int):
     path = settings.agent_runtime_dir / "agent-owner.json"
     try:
         with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "r") as handle:
+            tighten_private_descriptor(path, handle.fileno(), message="agent ownership record is not private")
             metadata = os.fstat(handle.fileno())
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
                 raise PortmapError("agent ownership record is not private")
@@ -692,6 +702,7 @@ def cleanup_agent_files(settings: PortmapSettings, pid: int) -> None:
 
 def read_pid(path: Path) -> int | None:
     try:
+        ensure_private_file(path, message="agent PID file is not owned and protected", strip=0o022)
         metadata = path.lstat()
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
             raise PortmapError("agent PID file is not owned and protected")

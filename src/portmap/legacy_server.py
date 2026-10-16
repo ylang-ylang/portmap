@@ -35,6 +35,7 @@ from typing import Any, Mapping
 from .container_runtime import ContainerRuntime
 from .errors import PortmapError
 from .ingress import ingress_status
+from .permissions import ensure_private_file
 from .settings import PortmapSettings
 
 LEGACY_VERSION = 1
@@ -60,6 +61,8 @@ def _safe_record(path: Path) -> bytes:
         raise
     except OSError as exc:
         raise PortmapError(f"cannot inspect legacy server state {path}: {exc}") from exc
+    ensure_private_file(path, message=f"unsafe legacy server state file: {path}")
+    metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
         raise PortmapError(f"unsafe legacy server state file: {path}")
     try:

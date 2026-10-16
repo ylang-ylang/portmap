@@ -16,7 +16,6 @@ import fcntl
 import json
 import os
 import signal
-import stat
 import sys
 import tempfile
 import threading
@@ -29,7 +28,7 @@ from .client import retire_stopped_transports, setup_client
 from .client_runtime import foreground_lifetime, process_identity
 from .client_tunnel import stop_tracked_tunnels
 from .errors import PortmapError
-from .settings import PortmapSettings
+from .permissions import ensure_private_directory
 
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 _RUNNER_LOCK = "runner.lock"
@@ -54,10 +53,10 @@ def runner_owner_path(state_dir: Path) -> Path:
 
 
 def _private_state_directory(state_dir: Path) -> None:
-    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = state_dir.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o700:
-        raise PortmapError(f"client state must be an owned private directory with mode 0700: {state_dir}")
+    ensure_private_directory(
+        state_dir,
+        message=f"client state must be an owned private directory with mode 0700: {state_dir}",
+    )
 
 
 def _active_runner(state_dir: Path) -> dict[str, Any] | None:

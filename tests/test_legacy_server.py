@@ -1,8 +1,10 @@
 """Behavioral tests for the legacy server capture/cutover/retire machinery."""
 import json
 import os
+import shutil
 import socket
 import struct
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -199,12 +201,22 @@ def test_load_legacy_record_rejects_invalid_ownership(tmp_path, mutate):
         legacy_server.load_legacy_record(settings)
 
 
-def test_load_legacy_record_rejects_world_writable_state(tmp_path):
-    settings = make_settings(tmp_path)
-    path = save_legacy_record(settings, legacy_record(settings, tmp_path, tmp_path / "client"))
-    path.chmod(0o644)
-    with pytest.raises(PortmapError, match="unsafe legacy server state file"):
-        legacy_server.load_legacy_record(settings)
+def test_load_legacy_record_rejects_world_writable_state_without_private_ancestor(tmp_path):
+    # A relaxed record mode is only recoverable under a provably private
+    # owned ancestor; a shared root keeps the unsafe-state refusal.
+    shared = Path(tempfile.mkdtemp(prefix="portmap-shared-", dir="/tmp"))
+    shared.chmod(0o755)
+    try:
+        settings = make_settings(shared)
+        record = legacy_record(settings, tmp_path, tmp_path / "client")
+        path = save_legacy_record(settings, record)
+        settings.state_dir.chmod(0o755)
+        path.parent.chmod(0o755)
+        path.chmod(0o666)
+        with pytest.raises(PortmapError, match="unsafe legacy server state file"):
+            legacy_server.load_legacy_record(settings)
+    finally:
+        shutil.rmtree(shared)
 
 
 # --- capture -----------------------------------------------------------------------------
