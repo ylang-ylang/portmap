@@ -140,3 +140,8 @@
 - Integrate V0.15 cold-remount recovery of owned state beneath a private
   ancestor, with descriptor identity and fail-closed foreign/shared checks.
   Preserve state contents and connections; 870 non-integration tests passed.
+- Integrate `feat/catalog-auto-refresh`: visible-only automatic catalog updates,
+  foreground refresh, explicit error Retry, and hostname-only machine tabs.
+  Hot-update mj's JS/CSS without service restarts; real browser before/after
+  verifies polling, hidden-tab pause, foreground recovery, retained selection,
+  compact tabs and Settings details. All three existing connections remain reachable.

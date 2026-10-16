@@ -952,7 +952,6 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
       <div className="machine-nav-scroll" role="tablist" aria-label="Machines and settings">
         {machines.map((machine, index) => {
           const isSelected = !settingsSelected && machine.id === selectedId;
-          const isLocal = machine.via === "local";
           return (
             <button
               key={machine.id}
@@ -963,6 +962,7 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
               aria-controls="page-panel-catalog"
               tabIndex={isSelected ? 0 : -1}
               type="button"
+              title={!machine.available ? "Machine is offline" : undefined}
               className={[
                 "machine-tab",
                 isSelected ? "machine-tab-active" : "",
@@ -972,20 +972,6 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
               onKeyDown={(e) => handleTabKeyDown(e, index)}
             >
               <span className="machine-tab-name">{machine.label || machine.domain || machine.id}</span>
-              {isLocal && (
-                <span className="machine-via-badge">本机</span>
-              )}
-              {!isLocal && machine.via && (
-                <span className={`machine-via-badge machine-via-${machine.via}`}>
-                  {machine.via}
-                </span>
-              )}
-              {!isLocal && machine.target && (
-                <span className="machine-tab-target">{machine.target}</span>
-              )}
-              {!machine.available && (
-                <span className="machine-unavail-badge">offline</span>
-              )}
             </button>
           );
         })}
@@ -1730,21 +1716,56 @@ function CatalogApp() {
     }
   }
 
-  // Explicit refresh: preserves the user's current machine selection.
-  // If /api/machines never loaded (initial failure), retry the full initial load;
-  // the useEffect on selectedMachineId will trigger catalog fetch once it resolves.
-  async function handleRefresh() {
-    if (machines === null) {
-      await loadMachines();
-    } else {
-      await loadMachines({ keepSelection: true });
-      await reloadCatalog();
+  // Poll only while the catalog is visible. Schedule after completion so slow
+  // remote catalogs never accumulate requests; focus/visibility events coalesce.
+  useEffect(() => {
+    if (activePage !== "catalog" || catalogLoading) return;
+    let stopped = false;
+    let running = false;
+    let timer;
+
+    function schedule() {
+      clearTimeout(timer);
+      if (!stopped && document.visibilityState === "visible") {
+        timer = setTimeout(refresh, 15000);
+      }
     }
-  }
+
+    async function refresh() {
+      clearTimeout(timer);
+      if (stopped || running || document.visibilityState !== "visible") return;
+      running = true;
+      try {
+        if (selectedMachineId === null) await loadMachines();
+        else await reloadCatalog();
+      } finally {
+        running = false;
+        schedule();
+      }
+    }
+
+    function visibilityChanged() {
+      if (document.visibilityState === "visible") void refresh();
+      else clearTimeout(timer);
+    }
+
+    schedule();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", visibilityChanged);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", visibilityChanged);
+    };
+  }, [activePage, selectedMachineId, catalogLoading]);
 
   function handleSelectMachine(id) {
     setActivePage("catalog");
-    if (id === selectedMachineId) return;
+    if (id === selectedMachineId) {
+      if (!catalogLoading) void reloadCatalog();
+      return;
+    }
     setSelectedMachineId(id);
   }
 
@@ -1867,7 +1888,10 @@ function CatalogApp() {
   } else if (catalogError) {
     catalogContent = (
       <section className="catalog-tree" data-catalog-tree>
-        <div className="empty load-error">{catalogError}</div>
+        <div className="empty load-error">
+          {catalogError}{" "}
+          <button className="action-button" type="button" onClick={() => reloadCatalog()}>Retry</button>
+        </div>
       </section>
     );
   } else {
@@ -1879,20 +1903,7 @@ function CatalogApp() {
       <header className="app-header">
         <div className="title-row">
           <h1>portmap catalog</h1>
-          {activePage === "catalog" && (
-            <>
-              <AccessStatus catalog={catalog} />
-              <button
-                className="action-button"
-                type="button"
-                title="Refresh machines and catalog"
-                onClick={handleRefresh}
-              >
-                <RefreshCw className="button-icon" aria-hidden="true" />
-                Refresh
-              </button>
-            </>
-          )}
+          {activePage === "catalog" && <AccessStatus catalog={catalog} />}
         </div>
         <CatalogTabs
           machines={machines || []}
@@ -1912,7 +1923,10 @@ function CatalogApp() {
         tabIndex={0}
       >
         {machinesError && machines !== null && (
-          <p className="meta machine-nav-error">{machinesError}</p>
+          <p className="meta machine-nav-error">
+            {machinesError}{" "}
+            <button className="action-button" type="button" onClick={() => loadMachines({ keepSelection: true })}>Retry</button>
+          </p>
         )}
         <ActionMessage message={actionMessage} />
         <ActionLog entries={actionLog} />
