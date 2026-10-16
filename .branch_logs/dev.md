@@ -148,3 +148,8 @@
 - Retain SSH/direct badges beside compact machine hostnames per user clarification,
   while keeping full connection addresses hidden. Real mj browser confirms two SSH
   badges, one DIRECT badge, no local badge/address rows, and no top-level Refresh.
+- Integrate `feat/web-managed-updates` for V0.16: Settings version/build identity,
+  authenticated target-owned updates, durable per-machine/batch jobs and manager-last
+  ordering; preserve DNS, roles and connections during explicit restart recovery.
+- Independent non-integration regression: 988 passed, 2 deselected. Real isolated
+  rootless Podman deployment serves the candidate API and existing demo correctly.

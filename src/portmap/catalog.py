@@ -23,7 +23,20 @@ from .agent_client import (
     agent_compose_up_worktree,
     agent_connection_targets,
     agent_mutate_connection,
+    agent_update_agent_dispatch,
+    agent_update_credentials,
+    agent_update_job,
+    agent_update_start,
+    agent_update_status,
+    agent_update_token,
+    agent_update_version,
     agent_worktrees,
+)
+from .update_control import (
+    NONCE_HEADER,
+    RESPONSE_SIGNATURE_HEADER,
+    SIGNATURE_HEADER,
+    TIMESTAMP_HEADER,
 )
 from .broker import ENDPOINT_CONFIG, ensure_generated_override
 from .catalog_access import (
@@ -1168,6 +1181,16 @@ def first_form_value(form: dict[str, list[str]], name: str) -> str:
 ACTION_PATHS = ("/actions/compose-up", "/actions/compose-down", "/actions/compose-restart")
 CONNECTION_CONTROL_PATH = "/api/connections"
 CONNECTION_JSON_MAX_BYTES = 16384
+UPDATES_API_PATH = "/api/updates"
+UPDATES_JOBS_PREFIX = "/api/updates/jobs/"
+UPDATES_TOKEN_PATH = "/api/updates/token"
+UPDATES_CREDENTIALS_PATH = "/api/updates/credentials"
+UPDATE_AGENT_PREFIX = "/api/update-agent/"
+UPDATE_AGENT_PAIR_PATH = "/api/update-agent/pair"
+VERSION_API_PATH = "/api/version"
+UPDATES_JSON_MAX_BYTES = 16384
+UPDATE_AGENT_MAX_BYTES = 16384
+UPDATE_JOB_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 REMOTE_PROBE_TIMEOUT = 5.0
 REMOTE_ACTION_TIMEOUT = 30.0
 REMOTE_ACTION_MAX_BYTES = 262144
@@ -1287,6 +1310,26 @@ class CatalogHandler(StaticHandler):
                 self.write_not_found(send_body=True)
                 return
             self.handle_connections_post()
+            return
+        if parsed.path in {UPDATES_TOKEN_PATH, UPDATES_CREDENTIALS_PATH}:
+            # Capability reveal and pairing are the most sensitive update
+            # actions; they never exist on the public listener.
+            if not self.private_scope:
+                self.write_not_found(send_body=True)
+                return
+            if parsed.path == UPDATES_TOKEN_PATH:
+                self.handle_updates_token_post()
+            else:
+                self.handle_updates_credentials_post()
+            return
+        if parsed.path == UPDATES_API_PATH:
+            if not self.private_scope:
+                self.write_not_found(send_body=True)
+                return
+            self.handle_updates_post()
+            return
+        if parsed.path.startswith(UPDATE_AGENT_PREFIX):
+            self.handle_update_agent_post(self.path)
             return
         if parsed.path not in ACTION_PATHS:
             self.send_response(404)
@@ -1433,6 +1476,213 @@ class CatalogHandler(StaticHandler):
             return
         self.write_json(result, status=status, send_body=True)
 
+    def handle_updates_get(self, *, send_body: bool) -> None:
+        if self._fail_closed_snapshot(send_body=send_body) is None:
+            return
+        check = _single_check_flag(urllib.parse.urlparse(self.path).query)
+        if check is None:
+            self.write_json({"error": "check must be exactly 1"}, status=400, send_body=send_body)
+            return
+        try:
+            payload = agent_update_status(check=check)
+        except AgentUnavailable:
+            self.write_json(
+                {"error": "host agent unavailable; update control requires the portmap agent"},
+                status=502,
+                send_body=send_body,
+            )
+            return
+        except AgentRequestError as exc:
+            self.write_json({"error": str(exc)}, status=self._agent_error_status(exc.status), send_body=send_body)
+            return
+        self.write_json(payload, send_body=send_body)
+
+    def handle_updates_job(self, batch_id: str, *, send_body: bool) -> None:
+        try:
+            status, body = agent_update_job(batch_id)
+        except AgentUnavailable:
+            self.write_json(
+                {"error": "host agent unavailable; update control requires the portmap agent"},
+                status=502,
+                send_body=send_body,
+            )
+            return
+        except AgentRequestError as exc:
+            self.write_json({"error": str(exc)}, status=self._agent_error_status(exc.status), send_body=send_body)
+            return
+        self.write_json(body, status=status, send_body=send_body)
+
+    def handle_updates_post(self) -> None:
+        if self._fail_closed_snapshot(send_body=True) is None:
+            return
+        if not self._same_origin():
+            self.write_json({"error": "update control requires a same-origin request"}, status=403, send_body=True)
+            return
+        try:
+            payload = self._read_updates_json_body()
+        except RequestBodyError as exc:
+            self.write_json({"error": exc.message}, status=exc.status, send_body=True)
+            return
+        try:
+            status, body = agent_update_start(payload)
+        except AgentUnavailable:
+            self.write_json(
+                {"error": "host agent unavailable; update control requires the portmap agent"},
+                status=502,
+                send_body=True,
+            )
+            return
+        except AgentRequestError as exc:
+            self.write_json({"error": str(exc)}, status=self._agent_error_status(exc.status), send_body=True)
+            return
+        self.write_json(body, status=status, send_body=True)
+
+    def handle_updates_token_post(self) -> None:
+        if not self._same_origin():
+            self.write_json({"error": "capability reveal requires a same-origin request"}, status=403, send_body=True)
+            return
+        self._relay_updates_json(agent_update_token)
+
+    def handle_updates_credentials_post(self) -> None:
+        if not self._same_origin():
+            self.write_json({"error": "capability pairing requires a same-origin request"}, status=403, send_body=True)
+            return
+        self._relay_updates_json(agent_update_credentials)
+
+    def _relay_updates_json(self, forward: Any) -> None:
+        try:
+            payload = self._read_updates_json_body()
+        except RequestBodyError as exc:
+            self.write_json({"error": exc.message}, status=exc.status, send_body=True)
+            return
+        try:
+            status, body = forward(payload)
+        except AgentUnavailable:
+            self.write_json(
+                {"error": "host agent unavailable; update control requires the portmap agent"},
+                status=502,
+                send_body=True,
+            )
+            return
+        except AgentRequestError as exc:
+            self.write_json({"error": str(exc)}, status=self._agent_error_status(exc.status), send_body=True)
+            return
+        self.write_json(body, status=status, send_body=True)
+
+    def _read_updates_json_body(self) -> dict[str, Any]:
+        raw_length = self.headers.get("content-length")
+        if raw_length is None:
+            raise RequestBodyError(400, "update control requires a JSON request body with a content length")
+        try:
+            length = int(raw_length)
+        except ValueError:
+            raise RequestBodyError(400, "invalid content length") from None
+        if length <= 0:
+            raise RequestBodyError(400, "update control requires a JSON request body")
+        if length > UPDATES_JSON_MAX_BYTES:
+            raise RequestBodyError(413, "update control request body is too large")
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeError, ValueError) as exc:
+            raise RequestBodyError(400, "update control request body must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RequestBodyError(400, "update control request body must be a JSON object")
+        return payload
+
+    def handle_version(self, *, send_body: bool) -> None:
+        try:
+            payload = agent_update_version()
+        except (AgentUnavailable, AgentRequestError, RuntimeError):
+            payload = {"version": __version__, "build_id": None, "update_api": True}
+        payload["catalog_version"] = __version__
+        self.write_json(payload, send_body=send_body)
+
+    def handle_update_agent_get(self, path: str, *, send_body: bool) -> None:
+        self._relay_update_agent("GET", path, b"", send_body=send_body)
+
+    def handle_update_agent_post(self, path: str) -> None:
+        parsed = urllib.parse.urlparse(path)
+        if parsed.path == UPDATE_AGENT_PAIR_PATH:
+            if not self.private_scope or not self._same_origin():
+                self.write_json(
+                    {"error": "capability pairing requires a same-origin private request"},
+                    status=403, send_body=True,
+                )
+                return
+            if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                self.write_json(
+                    {"error": "capability pairing requires application/json"},
+                    status=415, send_body=True,
+                )
+                return
+        try:
+            body = self._read_raw_body(UPDATE_AGENT_MAX_BYTES)
+        except RequestBodyError as exc:
+            self.write_json({"error": exc.message}, status=exc.status, send_body=True)
+            return
+        self._relay_update_agent("POST", path, body, send_body=True)
+
+    def _read_raw_body(self, max_bytes: int) -> bytes:
+        raw_length = self.headers.get("content-length")
+        if raw_length is None:
+            raise RequestBodyError(400, "update-agent request requires a content length")
+        try:
+            length = int(raw_length)
+        except ValueError:
+            raise RequestBodyError(400, "invalid content length") from None
+        if length < 0:
+            raise RequestBodyError(400, "invalid content length")
+        if length > max_bytes:
+            raise RequestBodyError(413, "update-agent request body is too large")
+        if length == 0:
+            return b""
+        body = self.rfile.read(length)
+        if len(body) != length:
+            raise RequestBodyError(400, "incomplete update-agent request body")
+        return body
+
+    def _relay_update_agent(self, method: str, path: str, body: bytes, *, send_body: bool) -> None:
+        try:
+            text = body.decode("utf-8")
+        except UnicodeError:
+            self.write_json({"error": "update-agent request body must be UTF-8"}, status=400, send_body=send_body)
+            return
+        payload = {
+            "method": method,
+            "path": path,
+            "body": text,
+            "scope": "private" if self.private_scope else "public",
+            "signature": self.headers.get(SIGNATURE_HEADER),
+            "timestamp": self.headers.get(TIMESTAMP_HEADER),
+            "nonce": self.headers.get(NONCE_HEADER),
+        }
+        try:
+            status, envelope = agent_update_agent_dispatch(payload)
+        except AgentUnavailable:
+            self.write_json(
+                {"error": "update agent unavailable on this machine"},
+                status=502,
+                send_body=send_body,
+            )
+            return
+        except AgentRequestError as exc:
+            self.write_json({"error": str(exc)}, status=self._agent_error_status(exc.status), send_body=send_body)
+            return
+        if status >= 400 or not isinstance(envelope.get("body"), str):
+            self.write_json({"error": "update agent dispatch failed"}, status=502, send_body=send_body)
+            return
+        response_body = envelope["body"].encode("utf-8")
+        headers = envelope.get("headers") if isinstance(envelope.get("headers"), dict) else {}
+        self.send_response(int(envelope.get("status") or 200))
+        self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("content-length", str(len(response_body)))
+        for key, value in headers.items():
+            if isinstance(key, str) and isinstance(value, str):
+                self.send_header(key, value)
+        self.end_headers()
+        if send_body:
+            self.wfile.write(response_body)
+
     def _same_origin(self) -> bool:
         """Browsers send Origin on same-origin JSON mutations; all else is foreign."""
         origins = self.headers.get_all("Origin", [])
@@ -1513,6 +1763,36 @@ class CatalogHandler(StaticHandler):
                 self.write_not_found(send_body=send_body)
                 return
             self.handle_connections_get(send_body=send_body)
+            return
+
+        if parsed.path == VERSION_API_PATH:
+            # Minimal running identity on both scopes; never management
+            # state, jobs, or secrets.
+            self.handle_version(send_body=send_body)
+            return
+
+        if parsed.path.startswith(UPDATE_AGENT_PREFIX):
+            # Authenticated remote update operations; the agent verifies the
+            # signature so the capability never has to exist here.
+            self.handle_update_agent_get(self.path, send_body=send_body)
+            return
+
+        if parsed.path == UPDATES_API_PATH:
+            if not self.private_scope:
+                self.write_not_found(send_body=send_body)
+                return
+            self.handle_updates_get(send_body=send_body)
+            return
+
+        if parsed.path.startswith(UPDATES_JOBS_PREFIX):
+            if not self.private_scope:
+                self.write_not_found(send_body=send_body)
+                return
+            batch_id = parsed.path[len(UPDATES_JOBS_PREFIX):]
+            if UPDATE_JOB_ID_RE.fullmatch(batch_id) is None:
+                self.write_not_found(send_body=send_body)
+                return
+            self.handle_updates_job(batch_id, send_body=send_body)
             return
 
         if parsed.path in {"/", "/index.html"}:
