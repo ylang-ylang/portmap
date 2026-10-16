@@ -26,6 +26,7 @@ from typing import Any
 
 from .client_runtime import ensure_persistent_scope, native_environment, process_identity
 from .errors import PortmapError
+from .permissions import ensure_private_directory, ensure_private_file, tighten_private_descriptor
 
 _ADDRESS = "127.0.0.1"
 _INGRESS_NAME = "private"
@@ -40,12 +41,16 @@ _WORKER_FLAGS = ("--state-dir", "--port", "--owner")
 
 
 def _private_dir(path: Path) -> None:
-    info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise PortmapError(f"legacy gateway state directory is not private or owned by this user: {path}")
+    ensure_private_directory(
+        path,
+        message=f"legacy gateway state directory is not private or owned by this user: {path}",
+        create=False,
+        exact=False,
+    )
 
 
 def _private_file(fd: int, path: Path) -> None:
+    tighten_private_descriptor(path, fd, message=f"legacy gateway state file is not private or owned by this user: {path}")
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise PortmapError(f"legacy gateway state file is not private or owned by this user: {path}")
@@ -70,7 +75,7 @@ def _safe_descriptor_file(path: Path) -> None:
     if info.st_uid != os.getuid():
         raise PortmapError(f"legacy client DNS state {path} is owned by uid {info.st_uid}, not this user")
     if info.st_mode & 0o022:
-        raise PortmapError(f"legacy client DNS state {path} is group- or world-writable")
+        ensure_private_file(path, message=f"legacy client DNS state {path} is group- or world-writable", strip=0o022)
 
 
 # --- process identity ---------------------------------------------------------------

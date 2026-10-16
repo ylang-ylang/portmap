@@ -26,6 +26,7 @@ from .container_runtime import ContainerRuntime, container_address
 from .downloads import download_cache_dir
 from .errors import PortmapError
 from .ingress import ensure_ingress, ingress_status, stop_ingress
+from .permissions import ensure_private_directory, ensure_private_file
 from .infrastructure_config import HEALTH_HOST, IMAGES, access_snapshot, compose_config, dns_config, json_bytes, relay_config, relay_ports, resource_labels, routes_config, static_config
 from .legacy_native import capture_native_workers, release_native_http, restore_native_http, retire_native_workers
 from .runtime_compat import prepare_runtime
@@ -36,10 +37,10 @@ _MAX_JSON = 4 * 1024 * 1024
 
 
 def _private_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = path.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o700:
-        raise PortmapError(f"infrastructure directory is not private and owned by this user: {path}")
+    ensure_private_directory(
+        path,
+        message=f"infrastructure directory is not private and owned by this user: {path}",
+    )
 
 
 def _atomic(path: Path, content: bytes, *, mode: int = 0o600) -> None:
@@ -71,6 +72,8 @@ def load_infrastructure(state_dir: Path) -> dict[str, Any] | None:
         metadata = path.lstat()
     except FileNotFoundError:
         return None
+    ensure_private_file(path, message="unsafe infrastructure ownership record")
+    metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
         raise PortmapError("unsafe infrastructure ownership record")
     try:

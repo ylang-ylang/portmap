@@ -82,3 +82,11 @@
 - Independent source regression: 842 passed with 2 integration cases deselected;
   tap regression: 9 passed. Frozen Linux amd64 archive SHA256:
   `42d41062f8e42d42e60da26a4e3f68f962f56ffaeca31eaad6a125d2a00398dd`.
+- Release `V0.15` (`portmap 0.15.0`) to recover persistent state whose group
+  permissions were reset on volume remount, only within an already-private
+  owned scope. Keep foreign/shared paths refused and preserve state contents.
+- Cover persisted agent, client/server and ingress records; reject symlinks,
+  mismatched descriptors, hard-link aliases and parent-traversal proofs.
+  Independent regression: 870 passed, 2 integration cases deselected.
+- Frozen archive SHA256:
+  `41dd2d75fc86f66b72021c68bc7b1c684a8181d0427cd23d1920c6a4a58c5fdd`.

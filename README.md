@@ -365,6 +365,12 @@ environment first. An existing supervisor or container entrypoint can instead
 own `portmap run`; Portmap does not install a particular init system. Normal
 use needs no `--resolver` or `--ingress` selection.
 
+If restoring a persistent volume adds group permissions to Portmap state,
+standard startup can tighten its own directories and records again only when
+an already-private, user-owned ancestor still protects them. Contents and saved
+connections are retained. Shared or foreign-owned paths, symlinks and uncertain
+ownership remain errors; Portmap does not recursively change a home or project.
+
 New HTTP entries are published by Docker or Podman at the exact requested
 address and port: private access defaults to `127.0.0.1:80`; public access
 requires an explicitly configured non-loopback address. Rootless runtimes are

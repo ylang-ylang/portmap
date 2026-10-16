@@ -52,6 +52,7 @@ from typing import Any, Mapping, Sequence
 
 from .client_runtime import native_environment
 from .errors import PortAllocationError, PortmapError
+from .permissions import tighten_private_descriptor
 
 INGRESS_ROLES = ("private", "public")
 INGRESS_BACKENDS = ("auto", "container", "systemd")
@@ -595,6 +596,10 @@ def _load_state(state_dir: Path, role: str) -> dict[str, Any] | None:
     try:
         with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "r", encoding="utf-8") as handle:
             metadata = os.fstat(handle.fileno())
+            if (stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid()
+                    and stat.S_IMODE(metadata.st_mode) & 0o077):
+                tighten_private_descriptor(path, handle.fileno(), message=f"ingress ownership record is not private: {path}")
+                metadata = os.fstat(handle.fileno())
             if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
                     or stat.S_IMODE(metadata.st_mode) & 0o077):
                 raise PortmapError(f"ingress ownership record is not private: {path}")

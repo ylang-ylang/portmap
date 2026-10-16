@@ -25,6 +25,7 @@ from typing import Any
 
 from . import client
 from .errors import PortmapError
+from .permissions import ensure_private_file
 
 TARGETS_FILE_NAME = "connection-targets.json"
 DOCUMENT_VERSION = 1
@@ -50,7 +51,9 @@ def _serialized_mutation(function):
                 return function(state_dir, *args, **kwargs)
             with client.client_lock(state_dir):
                 pass  # Validate/create the private directory before opening its lock.
-            fd = os.open(state_dir / "connection-operations.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            lock_path = state_dir / "connection-operations.lock"
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            ensure_private_file(lock_path, message="connection operation lock is not private and owned", force=0o600)
             with os.fdopen(fd, "a+") as handle:
                 metadata = os.fstat(handle.fileno())
                 if metadata.st_uid != os.getuid() or not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
