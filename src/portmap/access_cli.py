@@ -4,22 +4,51 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .client import SSHSelectionRequired, discover, setup_client, teardown_client
 from .connection_config import managed_connect, managed_connections, managed_disconnect
-from .settings import load_portmap_settings
+from .settings import PortmapSettings, load_portmap_settings
 from .errors import PortmapError
+
+
+RESOLVER_BACKENDS = ("auto", "resolved", "forward", "external")
+INGRESS_BACKENDS = ("auto", "container", "systemd")
+RESOLVER_HELP = "advanced override; new Linux auto forwards through the original DNS, preserving supported owned integrations"
+INGRESS_HELP = "advanced override; new auto uses container publishing, preserving owned legacy entries"
+
+def selected_settings(args: argparse.Namespace) -> PortmapSettings:
+    """Apply explicitly supplied --resolver/--ingress to the loaded settings."""
+    replacements: dict[str, str] = {}
+    if getattr(args, "resolver", None):
+        replacements["resolver_backend"] = args.resolver
+    if getattr(args, "ingress", None):
+        replacements["ingress_backend"] = args.ingress
+    settings = load_portmap_settings()
+    return replace(settings, **replacements) if replacements else settings
 
 
 def register_commands(subparsers: argparse._SubParsersAction) -> None:
     setup = subparsers.add_parser("setup", help="start Docker/Podman infrastructure, isolated split DNS and the shared loopback HTTP entry")
     setup.add_argument("--no-sudo", action="store_true")
     setup.add_argument("--http-port", type=int, help="explicit shared loopback HTTP port; defaults to 80, including direct-only access")
+    setup.add_argument("--resolver", choices=RESOLVER_BACKENDS, help=RESOLVER_HELP)
+    setup.add_argument("--ingress", choices=INGRESS_BACKENDS, help=INGRESS_HELP)
     setup.set_defaults(func=cmd_setup)
 
-    teardown = subparsers.add_parser("teardown", help="disconnect remote access and remove portmap's DNS and local HTTP entry")
+    run = subparsers.add_parser(
+        "run",
+        help="run infrastructure, saved connections and agent controls in the foreground",
+    )
+    run.add_argument("--no-sudo", action="store_true", help="do not request sudo for DNS configuration or legacy integration")
+    run.add_argument("--http-port", type=int, help="explicit shared loopback HTTP port; defaults to 80, including direct-only access")
+    run.add_argument("--resolver", choices=RESOLVER_BACKENDS, help=RESOLVER_HELP)
+    run.add_argument("--ingress", choices=INGRESS_BACKENDS, help=INGRESS_HELP)
+    run.set_defaults(func=cmd_run)
+
+    teardown = subparsers.add_parser("teardown", help="disconnect remote access and restore host DNS, retaining shared project dependencies")
     teardown.add_argument("--no-sudo", action="store_true")
     teardown.set_defaults(func=cmd_teardown)
 
@@ -32,7 +61,7 @@ def register_commands(subparsers: argparse._SubParsersAction) -> None:
     connect = subparsers.add_parser("connect", help="connect directly by IP or through an SSH port forward")
     connect.add_argument("target", nargs="?", help="IP/URL, configured SSH alias, or explicit SSH target")
     connect.add_argument("--via", choices=("auto", "direct", "ssh"), default="auto")
-    connect.add_argument("--ssh-target", help="explicit SSH fallback, including full .coder aliases")
+    connect.add_argument("--ssh-target", help="explicit SSH target or configured alias")
     connect.add_argument("--ssh-config", type=Path)
     connect.add_argument("--remote-port", type=int, help="SSH bootstrap port for a non-default remote gateway")
     connect.add_argument("--tcp", action="store_true", help="also forward catalogued raw TCP ports (not UDP/ranges)")
@@ -54,9 +83,15 @@ def register_commands(subparsers: argparse._SubParsersAction) -> None:
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
-    settings = load_portmap_settings()
+    settings = selected_settings(args)
     print_json(setup_client(settings.client_state_dir, settings=settings, use_sudo=not args.no_sudo, http_port=args.http_port))
     return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    from .lifecycle import run_foreground
+
+    return run_foreground(selected_settings(args), use_sudo=not args.no_sudo, http_port=args.http_port)
 
 
 def cmd_teardown(args: argparse.Namespace) -> int:

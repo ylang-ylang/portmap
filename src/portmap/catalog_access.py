@@ -61,6 +61,7 @@ class MachineAccess:
             "domain": self.domain,
             "via": self.via,
             "target": self.target,
+            "address": self.address,
             "tcp_address": self.tcp_address,
             "tcp_ports": list(self.tcp_ports),
         }
@@ -73,6 +74,12 @@ class AccessSnapshot:
     dns_port: int | None
     local: LocalAccess
     machines: dict[str, MachineAccess]
+    # Appended (defaulted) DNS contract fields: a legacy snapshot without
+    # host DNS state reads as host-enabled with no container probe metadata,
+    # and positional callers keep working.
+    dns_host_enabled: bool = True
+    dns_container_address: str | None = None
+    dns_marker: str | None = None
 
 
 def load_access_snapshot(environ: dict[str, str] | None = None) -> AccessSnapshot:
@@ -110,11 +117,27 @@ def parse_access_snapshot(document: Any) -> AccessSnapshot:
     dns = document.get("dns")
     dns_address: str | None = None
     dns_port: int | None = None
+    dns_host_enabled = True
+    dns_container_address: str | None = None
+    dns_marker: str | None = None
     if dns is not None:
         if not isinstance(dns, dict):
             raise PortmapError("access snapshot dns must be an object")
-        dns_address = _ip_address(dns.get("address"))
-        dns_port = _snapshot_port(dns.get("port"))
+        host_enabled = dns.get("host_enabled", True)
+        if type(host_enabled) is not bool:
+            raise PortmapError("access snapshot dns host_enabled must be a boolean")
+        dns_host_enabled = host_enabled
+        # Host-enabled snapshots must carry the published host endpoint;
+        # a disabled one must omit it so a stale endpoint is never read.
+        dns_address = _optional_ip_address(dns.get("address"))
+        dns_port = _optional_snapshot_port(dns.get("port"))
+        if dns_host_enabled:
+            if dns_address is None or dns_port is None:
+                raise PortmapError("access snapshot dns requires address and port while host DNS is enabled")
+        elif dns_address is not None or dns_port is not None:
+            raise PortmapError("access snapshot dns must omit the host endpoint while host DNS is disabled")
+        dns_container_address = _optional_ip_address(dns.get("container_address"))
+        dns_marker = _optional_text(dns.get("marker"))
 
     local_document = document.get("local")
     if local_document is None:
@@ -150,6 +173,9 @@ def parse_access_snapshot(document: Any) -> AccessSnapshot:
         dns_port=dns_port,
         local=local,
         machines=machines,
+        dns_host_enabled=dns_host_enabled,
+        dns_container_address=dns_container_address,
+        dns_marker=dns_marker,
     )
 
 
@@ -323,3 +349,15 @@ def _snapshot_port(value: Any) -> int:
     if type(value) is not int or not 1 <= value <= 65535:
         raise PortmapError("access snapshot ports must be integers from 1 to 65535")
     return value
+
+
+def _optional_ip_address(value: Any) -> str | None:
+    if value is None:
+        return None
+    return _ip_address(value)
+
+
+def _optional_snapshot_port(value: Any) -> int | None:
+    if value is None:
+        return None
+    return _snapshot_port(value)

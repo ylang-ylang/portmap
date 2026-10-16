@@ -185,3 +185,15 @@ def test_persistent_scope_adoption_wait_is_bounded(monkeypatch):
     )
     with pytest.raises(PortmapError, match="did not enter transient scope"):
         client_runtime.ensure_persistent_scope(use_sudo=True)
+
+
+def test_foreground_lifetime_suppresses_scope_escape_and_restores_it(monkeypatch):
+    reset_scope_state(monkeypatch)
+    monkeypatch.setattr(client_runtime.sys, "platform", "linux")
+    monkeypatch.setattr(client_runtime, "_cgroup_paths", lambda: [SESSION])
+    monkeypatch.setattr(client_runtime.os, "geteuid", lambda: 1000)
+    forbid_busctl(monkeypatch)
+    with client_runtime.foreground_lifetime():
+        assert client_runtime.ensure_persistent_scope(use_sudo=False) == ""
+    with pytest.raises(PortmapError, match="--no-sudo"):
+        client_runtime.ensure_persistent_scope(use_sudo=False)

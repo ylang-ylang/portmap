@@ -186,6 +186,10 @@ def fake_systemd(tmp_path, monkeypatch):
 
 
 def ensure_private(tmp_path, *, port=None, target_port=18080, **kwargs):
+    # These adapter tests pin the known legacy systemd context explicitly;
+    # auto selection defaults to the container backend and is covered in
+    # tests/test_runtime_ingress.py.
+    kwargs.setdefault("backend", "systemd")
     return ingress.ensure_ingress(
         tmp_path,
         name="private",
@@ -248,7 +252,9 @@ def test_ensure_rejects_invalid_parameters(tmp_path, fake_systemd, kwargs):
 def test_ensure_requires_linux_systemd_and_systemctl(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     with pytest.raises(PortmapError, match="unsupported on darwin"):
-        ingress.ensure_ingress(tmp_path, name="private", bind_address="127.0.0.1", port=80, target_port=18080)
+        ingress.ensure_ingress(
+            tmp_path, name="private", bind_address="127.0.0.1", port=80, target_port=18080, backend="systemd"
+        )
 
     monkeypatch.undo()
     unit_dir = tmp_path / "units"
@@ -256,14 +262,18 @@ def test_ensure_requires_linux_systemd_and_systemctl(tmp_path, monkeypatch):
     monkeypatch.setattr(ingress, "UNIT_DIR", unit_dir)
     monkeypatch.setattr(ingress, "SYSTEMD_RUN_DIR", tmp_path / "absent")
     with pytest.raises(PortmapError, match="systemd is not managing this system"):
-        ingress.ensure_ingress(tmp_path, name="private", bind_address="127.0.0.1", port=80, target_port=18080)
+        ingress.ensure_ingress(
+            tmp_path, name="private", bind_address="127.0.0.1", port=80, target_port=18080, backend="systemd"
+        )
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     monkeypatch.setattr(ingress, "SYSTEMD_RUN_DIR", run_dir)
     monkeypatch.setattr(ingress.shutil, "which", lambda name: None)
     with pytest.raises(PortmapError, match="systemctl was not found"):
-        ingress.ensure_ingress(tmp_path, name="private", bind_address="127.0.0.1", port=80, target_port=18080)
+        ingress.ensure_ingress(
+            tmp_path, name="private", bind_address="127.0.0.1", port=80, target_port=18080, backend="systemd"
+        )
 
 
 def test_missing_or_unsafe_proxyd_is_an_actionable_error(tmp_path, fake_systemd, monkeypatch):

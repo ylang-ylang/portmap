@@ -1052,10 +1052,11 @@ function DownloadPanel({ catalog }) {
   const downloadOrigin = new URL(window.location.origin);
   // A fresh machine cannot resolve .portmap before it has installed the client.
   const needsBootstrapAddress = downloadOrigin.hostname.endsWith(".portmap");
-  if (needsBootstrapAddress && catalog?.dns_server) {
-    downloadOrigin.hostname = catalog.dns_server;
+  if (needsBootstrapAddress && catalog?.http_address) {
+    const address = catalog.http_address;
+    downloadOrigin.hostname = address.includes(":") ? `[${address}]` : address;
   }
-  const origin = needsBootstrapAddress && !catalog?.dns_server ? "" : downloadOrigin.origin;
+  const origin = needsBootstrapAddress && !catalog?.http_address ? "" : downloadOrigin.origin;
   const installCmd = origin
     ? `curl -fsSL ${shellSingleQuote(`${origin}/install.sh`)} | sh -s -- ${shellSingleQuote(origin)}`
     : "";
@@ -1087,7 +1088,8 @@ function DownloadPanel({ catalog }) {
                   <p>
                     Install the standalone <code>portmap</code> command — detects OS/arch,
                     verifies the archive, installs <code>~/.local/share/portmap/&lt;version&gt;</code> and
-                    links <code>~/.local/bin/portmap</code>. No sudo, no Python, no Docker needed.
+                    links <code>~/.local/bin/portmap</code>. Installing the command needs no sudo or Python;
+                    running it requires Docker or Podman.
                   </p>
                   {installCmd && <CopyButton targetId="portmap-install-cmd" />}
                 </div>
@@ -1122,7 +1124,7 @@ function DownloadPanel({ catalog }) {
           )}
           <div className="quick-command">
             <div className="quick-setup-actions">
-              <p>Homebrew installs the command and initializes access in one step. An existing Docker or Podman API must be available.</p>
+              <p>Homebrew installs the command. With a usable user service manager it also initializes access; otherwise it reports that automatic setup was not run. Docker or Podman is required.</p>
               <CopyButton targetId="portmap-brew-install" />
             </div>
             <pre><code id="portmap-brew-install">brew install ylang-ylang/tap/portmap</code></pre>
@@ -1133,24 +1135,35 @@ function DownloadPanel({ catalog }) {
             <pre><code id="portmap-brew-upgrade">brew upgrade ylang-ylang/tap/portmap</code></pre>
           </div>
           <div className="quick-command">
-            <p>The standalone installer needs <code>portmap setup</code> once; Homebrew runs it automatically. Then add a remote machine if needed:</p>
+            <p>Start with <code>portmap run</code> in the foreground, or <code>portmap setup</code> for background operation. Then add a remote machine if needed:</p>
             <pre><code>{`portmap connect <IP-or-SSH-target>\nportmap status --check`}</code></pre>
             <p>
               Setup uses your existing container runtime, preferring Docker when both
               Docker and Podman are available. It reports an unavailable API instead of
               installing or starting an engine. DNS and the local ingress gateway run
               in containers; no native CoreDNS or Traefik is installed on the host.
-              Setup keeps <code>127.0.0.1:80</code> reserved and configures
-              split DNS, even with no active connections. Direct access goes straight to the
-              remote IP; SSH and local projects share the private ingress. Setup does not
-              start your business projects or expose an entry to the LAN.
+              Local DNS normally listens on <code>127.0.0.1:53</code>, and the private HTTP entry
+              uses <code>127.0.0.1:80</code>. Ordinary DNS queries retain the original upstreams.
+              Direct access goes to the remote IP; SSH and local projects share the private ingress.
+              Setup does not start business projects or expose an entry to the LAN.
+            </p>
+            <div className="quick-setup-actions">
+              <p>No systemd is required. Start the foreground runner:</p>
+              <CopyButton targetId="portmap-run-foreground" />
+            </div>
+            <pre><code id="portmap-run-foreground">portmap run</code></pre>
+            <p>
+              Initialization explains changes to the current system resolver file and requests sudo
+              when needed. Shared workspace resolver files may affect other containers sharing them.
+              Unavailable ports or unsupported local DNS proxy policies are reported, not silently bypassed.
             </p>
             <p>
-              To also publish this computer's projects, run <code>portmap up</code>.
-              Remote-only access works without <code>portmap up</code>. DNS integration and
-              restricted port-80 ingress request sudo when needed. Disconnecting a remote
-              keeps the local entry; <code>portmap teardown</code>{" "}
-              releases it after local publishing has been stopped.
+              To publish projects for remote HTTP or SSH access, <code>portmap up</code> does not
+              require host DNS takeover or publicly exposed DNS. Access to remote machines does not
+              require <code>portmap up</code>. Stopping the foreground runner preserves shared containers
+              and saved connections. <code>portmap teardown</code> restores owned host DNS and removes
+              remote connections; shared infrastructure remains while local publishing or project
+              containers still need it.
             </p>
           </div>
         </div>

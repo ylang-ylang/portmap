@@ -4,6 +4,7 @@ from . import __version__
 
 import datetime as dt
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -14,7 +15,7 @@ import time
 import urllib.parse
 from http.server import ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 from .agent_client import (
     AgentRequestError,
@@ -35,6 +36,7 @@ from .catalog_access import (
     machine_descriptor,
     machines_payload,
 )
+from .client_dns import probe_marker
 from .client_discovery import probe_gateway
 from .client_runtime import native_environment
 from .client_view import project_catalog, request_host
@@ -103,7 +105,62 @@ def select_dns_server(bind_ip: str, target_ip: str) -> str:
     return target_ip.strip() or bind_ip.strip() or "127.0.0.1"
 
 
-DNS_SERVER = os.environ.get("PORTMAP_DNS_SERVER") or select_dns_server(DNS_BIND, DNS_TARGET_IP)
+HOST_DNS_ENV = "PORTMAP_HOST_DNS_ENABLED"
+HTTP_ADDRESS_ENV = "PORTMAP_HTTP_ADDRESS"
+
+
+def host_dns_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether the controller publishes host DNS for this catalog.
+
+    Absent keeps the legacy default (enabled); the controller's explicit
+    ``PORTMAP_HOST_DNS_ENABLED=0`` marks a server-only publication. Any
+    value other than ``1`` fails closed to disabled.
+    """
+
+    env = os.environ if environ is None else environ
+    return env.get(HOST_DNS_ENV, "1") == "1"
+
+
+def advertised_dns_server(environ: Mapping[str, str] | None = None) -> str | None:
+    """The host DNS listener this catalog may advertise, if any.
+
+    Disabled host DNS must not fall back to DNS_BIND/DNS_TARGET_IP and
+    advertise a server that nobody publishes.
+    """
+
+    env = os.environ if environ is None else environ
+    if not host_dns_enabled(env):
+        return None
+    explicit = env.get("PORTMAP_DNS_SERVER")
+    if explicit:
+        return explicit
+    return select_dns_server(
+        env.get("PORTMAP_DNS_BIND", DNS_BIND), env.get("PORTMAP_DNS_TARGET_IP", DNS_TARGET_IP)
+    )
+
+
+def advertised_http_address(environ: Mapping[str, str] | None = None) -> str | None:
+    """The published entry address for HTTP bootstrap, when configured.
+
+    This is the honest address of the entry the catalog is served through;
+    clients must never reuse the DNS server address as an HTTP address.
+    Omitted when the controller does not record one.
+    """
+
+    env = os.environ if environ is None else environ
+    address = (env.get(HTTP_ADDRESS_ENV) or "").strip()
+    if not address:
+        return None
+    try:
+        return str(ipaddress.ip_address(address))
+    except ValueError:
+        pass
+    if len(address) <= 253 and all(
+        re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+        for label in address.split(".")
+    ):
+        return address
+    raise PortmapError(f"{HTTP_ADDRESS_ENV} must be an IP address or DNS name")
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -168,15 +225,21 @@ def collect_catalog() -> dict[str, Any]:
             item.get("container") or "",
         )
     )
-    return {
+    catalog = {
         "generated_at": generated_at,
         "http_port": HTTP_PORT,
         "dns_domain": DNS_DOMAIN,
-        "dns_server": DNS_SERVER,
         "agent": agent,
         "services": services,
         "worktrees": worktrees,
     }
+    dns_server = advertised_dns_server()
+    if dns_server is not None:
+        catalog["dns_server"] = dns_server
+    http_address = advertised_http_address()
+    if http_address is not None:
+        catalog["http_address"] = http_address
+    return catalog
 
 
 def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: list[dict[str, Any]]) -> None:
@@ -1109,6 +1172,10 @@ REMOTE_PROBE_TIMEOUT = 5.0
 REMOTE_ACTION_TIMEOUT = 30.0
 REMOTE_ACTION_MAX_BYTES = 262144
 MAX_FORM_BYTES = 8192
+# The readiness gate probes the container-scope DNS listener inside the
+# bridge network; no host DNS port is published or probed for health.
+READY_DNS_PORT = 53
+READY_DNS_TIMEOUT = 0.4
 
 
 class MachineRequestError(Exception):
@@ -1178,6 +1245,18 @@ def forward_remote_action(machine: MachineAccess, action_path: str, body: bytes)
     if not isinstance(payload, dict):
         raise RemoteActionError("remote action returned an unexpected body")
     return response.status, payload
+
+
+def dns_marker_verified(snapshot: AccessSnapshot) -> bool:
+    """Whether the snapshot's DNS container answers with its own marker.
+
+    Readiness is proven over the wire at the container-scope listener; a
+    missing container address or marker is never accepted as verified.
+    """
+
+    if snapshot.dns_container_address is None or snapshot.dns_marker is None:
+        return False
+    return probe_marker(snapshot.dns_container_address, READY_DNS_PORT, timeout=READY_DNS_TIMEOUT) == snapshot.dns_marker
 
 
 class CatalogServer(ThreadingHTTPServer):
@@ -1404,15 +1483,21 @@ class CatalogHandler(StaticHandler):
         if parsed.path in {"/healthz", "/readyz"}:
             if self.private_scope:
                 # Controller readiness only: the private scope cannot claim
-                # ready without a valid snapshot and owner; the public scope
-                # keeps ordinary liveness and never exposes private config.
+                # ready without a valid snapshot, an owner, and the container
+                # DNS actually serving the snapshot's ownership marker. The
+                # public scope keeps ordinary liveness and never exposes
+                # private config or readiness data.
                 try:
                     snapshot = load_access_snapshot()
-                    owner = snapshot.owner
                 except PortmapError:
-                    owner = None
-                if owner:
-                    self.write_json({"ok": True, "owner": owner}, send_body=send_body)
+                    snapshot = None
+                if snapshot is not None and snapshot.owner and dns_marker_verified(snapshot):
+                    # The reported marker lets the controller compare the
+                    # served revision against its own desired revision.
+                    self.write_json(
+                        {"ok": True, "owner": snapshot.owner, "dns_marker": snapshot.dns_marker},
+                        send_body=send_body,
+                    )
                 else:
                     self.write_json({"ok": False}, status=503, send_body=send_body)
             else:

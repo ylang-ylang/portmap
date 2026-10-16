@@ -123,6 +123,68 @@ def ssh_transport(monkeypatch, *, fail_start_for=(), domain="remote.portmap"):
 def faithful_probe(monkeypatch, domain="remote.portmap"):
     monkeypatch.setattr(client, "probe_gateway", lambda target, **kwargs: gateway(domain=kwargs.get("expected_domain") or domain))
 
+
+@pytest.mark.parametrize("parent_mode", [0o700, 0o2700])
+def test_private_client_state_preserves_group_inheritance(tmp_path, parent_mode):
+    parent = tmp_path / "shared-volume"
+    parent.mkdir()
+    parent.chmod(parent_mode)
+    directory = parent / "client"
+    profile = direct_profile()
+    with client.client_lock(directory):
+        client._save(directory, {profile["domain"]: profile})
+    assert client._load(directory)[profile["domain"]] == profile
+    assert directory.stat().st_mode & 0o777 == 0o700
+    assert directory.stat().st_mode & 0o2000 == parent_mode & 0o2000
+
+
+@pytest.mark.parametrize("mode", [0o750, 0o770, 0o2750])
+def test_group_access_to_client_state_remains_forbidden(tmp_path, mode):
+    directory = tmp_path / "client"
+    directory.mkdir()
+    directory.chmod(mode)
+    saved = directory / "connections.json"
+    saved.write_text("existing private data\n")
+    with pytest.raises(PortmapError, match="owned private directory"):
+        with client.client_lock(directory):
+            pytest.fail("group-readable state must not be opened")
+    assert saved.read_text() == "existing private data\n"
+    assert directory.stat().st_mode & 0o7777 == mode
+    assert not (directory / "client.lock").exists()
+
+
+def test_foreground_exit_retires_dead_transport_without_forgetting_identity(tmp_path, monkeypatch):
+    infra = Infrastructure(monkeypatch, running=True, http_port=80)
+    dead = {
+        "domain": "dead.portmap", "via": "ssh", "target": "configured-dead",
+        "ssh_target": "configured-dead", "remote_http_port": 8080, "http_port": 80,
+        "tcp_address": "127.77.1.2", "tcp_ports": [18123], "include_tcp": True,
+        "http_socket": "/tmp/dead.sock",
+        "tunnel": {"target": "configured-dead", "config_file": str(tmp_path / "custom-ssh.conf")},
+    }
+    live = {
+        **dead, "domain": "live.portmap", "target": "configured-live",
+        "ssh_target": "configured-live", "http_socket": "/tmp/live.sock",
+        "tunnel": {"target": "configured-live", "config_file": None},
+    }
+    direct = direct_profile()
+    with client.client_lock(tmp_path):
+        client._save(tmp_path, {"dead.portmap": dead, "live.portmap": live, direct["domain"]: direct})
+    monkeypatch.setattr(client, "tunnel_alive", lambda tunnel, **kwargs: tunnel["target"] == "configured-live")
+
+    assert client.retire_stopped_transports(tmp_path, use_sudo=False) == []
+    saved = client._load(tmp_path)
+    dormant = saved["dead.portmap"]
+    assert "tunnel" not in dormant and "http_socket" not in dormant
+    assert dormant["ssh_target"] == "configured-dead"
+    assert dormant["ssh_config"] == str(tmp_path / "custom-ssh.conf")
+    assert dormant["remote_http_port"] == 8080
+    assert dormant["tcp_ports"] == [18123]
+    assert dormant["include_tcp"] is True
+    assert saved["live.portmap"] == live
+    assert saved[direct["domain"]] == direct
+    assert infra.stopped == []
+
 # Direct connections
 
 
@@ -338,12 +400,16 @@ def test_connect_refuses_domain_owned_by_local_role(tmp_path: Path, monkeypatch)
     assert infra.synced[-1][1] is not None
 
 
-def test_teardown_refuses_while_local_role_is_active(tmp_path: Path, monkeypatch):
-    infra = Infrastructure(monkeypatch)
+def test_teardown_keeps_the_local_role_but_removes_remote_connections(tmp_path: Path, monkeypatch):
+    Infrastructure(monkeypatch)
     client.set_local_server(tmp_path, {"domain": "local.portmap"})
-    with pytest.raises(PortmapError, match="local publishing is active; run portmap down before teardown"):
-        client.teardown_client(tmp_path)
-    assert infra.stopped == []
+    local = client._load_local(tmp_path)
+    client._save(tmp_path, {"remote.portmap": direct_profile()})
+
+    client.teardown_client(tmp_path)
+
+    assert client._load_local(tmp_path) == local
+    assert client._load(tmp_path) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +636,7 @@ class LiveLegacyTransport(Infrastructure):
             # Exercise the real cutover proof, not an unconditional successful
             # sync mock: the socket alone cannot satisfy the new public route.
             infrastructure._verify_host_view(
-                {"domain": "local.portmap", "http_port": self.http_port}, views,
+                {"domain": "local.portmap", "http_port": self.http_port, "host_dns_enabled": True}, views,
             )
         except BaseException:
             self.published = previous
@@ -795,7 +861,7 @@ def test_pending_legacy_route_cannot_pass_readiness_as_an_unavailable_profile(mo
     monkeypatch.setattr(infrastructure, "verify_resolution", lambda *args: None)
     with pytest.raises(PortmapError, match="legacy SSH replacement for tun.portmap is not available"):
         infrastructure._verify_host_view(
-            {"domain": "local.portmap", "http_port": 18081},
+            {"domain": "local.portmap", "http_port": 18081, "host_dns_enabled": True},
             {"tun.portmap": {"via": "ssh", "available": False, "legacy_http_forward": {}}},
         )
 
@@ -808,7 +874,7 @@ def test_already_migrated_offline_ssh_does_not_gain_a_new_readiness_requirement(
 
     monkeypatch.setattr(infrastructure, "probe_gateway", must_not_probe)
     infrastructure._verify_host_view(
-        {"domain": "local.portmap", "http_port": 18081},
+        {"domain": "local.portmap", "http_port": 18081, "host_dns_enabled": True},
         {"modern.portmap": {"via": "ssh", "available": False, "http_socket": "/tmp/existing.sock"}},
     )
 

@@ -13,6 +13,7 @@ import shutil
 import socket
 import subprocess
 from dataclasses import dataclass
+from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
@@ -25,6 +26,39 @@ OWNER_LABEL = "portmap.infrastructure.owner"
 STATE_LABEL = "portmap.infrastructure.state"
 UID_LABEL = "portmap.infrastructure.uid"
 
+
+@lru_cache(maxsize=1)
+def compose_entrypoint() -> tuple[str, ...]:
+    """Select the Docker Compose CLI once per process.
+
+    The ``docker compose`` plugin is preferred when it is usable. Hosts whose
+    package manager installs the standalone ``docker-compose`` client without
+    wiring ``~/.docker/cli-plugins`` (a plain Homebrew install without the
+    setup helper, for example) get that client instead -- no user-level docker
+    configuration is ever written here. The selection is made from version
+    probes only: a selected command that later fails on real compose work
+    raises exactly that failure and is never retried on the other command.
+    """
+    environment = native_environment()
+    if shutil.which("docker") is not None:
+        probe = subprocess.run(
+            ["docker", "compose", "version", "--short"],
+            capture_output=True, text=True, env=environment, check=False,
+        )
+        if probe.returncode == 0:
+            return ("docker", "compose")
+    standalone = shutil.which("docker-compose")
+    if standalone is not None:
+        probe = subprocess.run(
+            [standalone, "version", "--short"],
+            capture_output=True, text=True, env=environment, check=False,
+        )
+        if probe.returncode == 0:
+            return (standalone,)
+    raise PortmapError(
+        "portmap setup requires a usable Docker Compose CLI: neither the "
+        "`docker compose` plugin nor a standalone docker-compose client is available"
+    )
 
 class _UnixConnection(http.client.HTTPConnection):
     def __init__(self, path: str, timeout: float) -> None:
@@ -81,6 +115,15 @@ class ContainerRuntime:
         # Docker/rootful Podman instead need that UID explicitly for private
         # host sockets and files. Neither case runs a host worker as root.
         return "0:0" if self.rootless else f"{os.getuid()}:{os.getgid()}"
+
+    @cached_property
+    def supports_network_mac_address(self) -> bool:
+        version = self.request("GET", "/version")
+        value = version.get("ApiVersion") if isinstance(version, dict) else None
+        parts = value.split(".") if isinstance(value, str) else []
+        if len(parts) != 2 or not all(part.isdecimal() for part in parts):
+            raise PortmapError("the container runtime did not report a valid Docker API version")
+        return tuple(map(int, parts)) >= (1, 44)
 
     def request(self, method: str, path: str, payload: Any = None, *, statuses: tuple[int, ...] = (200,), timeout: float = 15) -> Any:
         connection = _UnixConnection(self.socket_path, timeout)
@@ -198,13 +241,12 @@ class ContainerRuntime:
         return True
 
     def compose(self, path: Path, arguments: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
-        if shutil.which("docker") is None:
-            raise PortmapError("portmap setup requires the Docker Compose CLI with the configured Docker or Podman runtime")
+        entrypoint = compose_entrypoint()
         environment = native_environment()
         environment.pop("DOCKER_CONTEXT", None)
         environment.update({"DOCKER_HOST": f"unix://{self.socket_path}", "PORTMAP_BROKER_BYPASS": "1"})
         try:
-            result = subprocess.run(["docker", "compose", "-f", str(path), *arguments], env=environment, text=True, stdout=subprocess.PIPE if capture else None, stderr=subprocess.PIPE if capture else None, check=False)
+            result = subprocess.run([*entrypoint, "-f", str(path), *arguments], env=environment, text=True, stdout=subprocess.PIPE if capture else None, stderr=subprocess.PIPE if capture else None, check=False)
         except OSError as exc:
             raise PortmapError(f"cannot run Docker Compose for {self.backend}: {exc}") from exc
         if result.returncode:

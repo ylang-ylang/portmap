@@ -1,17 +1,37 @@
-"""Root-owned systemd socket ingress forwarding to an unprivileged loopback backend.
+"""Host ingress publication with two selectable implementations.
 
-Each ingress is a pair of deterministic system units derived from the calling
-user's uid, the portmap state directory, and the role name (``private`` or
-``public``): a ``.socket`` unit that owns the bind address (so privileged
-ports bind without giving the portmap process capabilities or a root client)
-and a ``systemd-socket-proxyd`` ``.service`` that runs unprivileged, with no
+``systemd`` (the original, now legacy backend) installs a pair of
+deterministic system units derived from the calling user's uid, the portmap
+state directory, and the role name (``private`` or ``public``): a ``.socket``
+unit that owns the bind address (so privileged ports bind without giving the
+portmap process capabilities or a root client) and a
+``systemd-socket-proxyd`` ``.service`` that runs unprivileged, with no
 capabilities, in the host network namespace, forwarding every accepted
-connection to the container-published loopback port ``127.0.0.1:<target_port>``.
+connection to the container-published loopback port
+``127.0.0.1:<target_port>``. Unit files are root-owned with fixed content
+carrying a portmap ownership marker; they are never enabled at boot and are
+only removed after the marker and file ownership have been re-validated.
+Sudo is used solely for exact unit installation/removal and systemctl
+control commands; status is read-only.
 
-Unit files are root-owned with fixed content carrying a portmap ownership
-marker; they are never enabled at boot and are only removed after the marker
-and file ownership have been re-validated. Sudo is used solely for exact unit
-installation/removal and systemctl control commands; status is read-only.
+``container`` (see :mod:`portmap.runtime_ingress`) instead runs one
+independently owned HAProxy container per role, published by the container
+engine on the exact ``<bind-address>:<port>`` and forwarding over the gateway
+bridge network, with no host privilege at all. It is the default for every
+new publication: the choice does not depend on rootless engines, privileged
+ports, sudo, systemd, or host low-port sysctls, and the engine's own
+create/start/publish result is the authoritative error.
+
+Selection is recorded per role in the state directory: an existing record
+without a ``backend`` field means the systemd implementation, and every
+status/stop operation dispatches through that record so mixed installations
+stay consistent. ``auto`` reuses such an owned record — and any backend
+explicitly recorded in the infrastructure state — instead of moving an
+existing installation to another implementation. The systemd backend remains
+available for explicit advanced selection and for recovering or migrating
+units portmap already owns, but it is never an automatic fallback: when the
+shared container infrastructure state is missing, ingress reports a setup
+error instead of installing units.
 """
 from __future__ import annotations
 
@@ -28,12 +48,13 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .client_runtime import native_environment
 from .errors import PortAllocationError, PortmapError
 
 INGRESS_ROLES = ("private", "public")
+INGRESS_BACKENDS = ("auto", "container", "systemd")
 PRIVATE_BIND_ADDRESS = "127.0.0.1"
 TARGET_ADDRESS = "127.0.0.1"
 
@@ -570,10 +591,21 @@ def _save_state(state_dir: Path, role: str, payload: dict[str, Any]) -> None:
 
 
 def _load_state(state_dir: Path, role: str) -> dict[str, Any] | None:
+    path = _state_file(state_dir, role)
     try:
-        return json.loads(_state_file(state_dir, role).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "r", encoding="utf-8") as handle:
+            metadata = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) & 0o077):
+                raise PortmapError(f"ingress ownership record is not private: {path}")
+            record = json.load(handle)
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError) as exc:
+        raise PortmapError(f"cannot read ingress ownership record {path}: {exc}") from exc
+    if not isinstance(record, dict) or record.get("backend") not in (None, "systemd", "container"):
+        raise PortmapError(f"invalid ingress ownership record: {path}")
+    return record
 
 
 def _clear_state(state_dir: Path, role: str) -> None:
@@ -591,18 +623,139 @@ def ensure_ingress(
     port: int,
     target_port: int,
     use_sudo: bool = True,
+    backend: str = "auto",
+    infrastructure: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Install (or update) the ingress units and leave the socket bound and verified.
+    """Install (or update) the selected ingress and leave it bound and verified.
 
-    Idempotent: when the exact units are installed and active, no privileged
-    command runs. Any failure inside a change transaction restores the previous
-    owned units or removes freshly installed ones before raising.
+    ``backend`` selects the implementation: ``container`` publishes an owned
+    HAProxy container on the exact bind address through the container engine
+    without any host privilege, ``systemd`` installs the root-owned socket
+    units, and ``auto`` follows the recorded selection — first a backend
+    explicitly recorded in the infrastructure state, then this role's saved
+    owned record (a legacy record without a ``backend`` field means systemd)
+    — and otherwise selects the container backend regardless of the port,
+    rootless engines, sudo, or systemd availability. Real create/start/bind
+    errors are authoritative: portmap never falls back to another backend or
+    port, and a missing shared container infrastructure state is reported as
+    a setup error instead of installing units.
+
+    Idempotent for the active backend: when the exact resource is installed
+    and running, no privileged command or engine mutation runs. Any failure
+    inside a change transaction restores the previous owned ingress or
+    removes freshly created resources before raising.
     """
-    _require_systemd()
     role = _role(name)
     bind = _bind_address(role, bind_address)
     port = _port(port, f"{role} ingress bind port")
     target_port = _port(target_port, "ingress target port")
+    if backend not in INGRESS_BACKENDS:
+        raise PortmapError(f"ingress backend must be one of {list(INGRESS_BACKENDS)}, got {backend!r}")
+    state_dir = Path(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    chosen, infrastructure_state = _select_backend(
+        state_dir, role, requested=backend, infrastructure=infrastructure
+    )
+    record = _load_state(state_dir, role)
+    saved_backend = None if record is None else ("container" if record.get("backend") == "container" else "systemd")
+    previous = None
+    if saved_backend is not None and saved_backend != chosen:
+        # An explicit switch of implementations must first release the port
+        # through the backend that currently owns it; never the other way.
+        previous = (saved_backend, record.get("bind_address"), record.get("port"), record.get("target_port"))
+        _stop_dispatched(state_dir, role, saved_backend, use_sudo=use_sudo)
+    try:
+        if chosen == "container":
+            from . import runtime_ingress
+
+            status = runtime_ingress.ensure_ingress_container(
+                state_dir, name=role, bind_address=bind, port=port, target_port=target_port,
+                infrastructure=infrastructure_state,
+            )
+        else:
+            status = _ensure_systemd(state_dir, role=role, bind=bind, port=port, target_port=target_port, use_sudo=use_sudo)
+    except BaseException as exc:
+        if previous is not None and all(previous[1:]):
+            try:
+                _ensure_previous(state_dir, role, previous, use_sudo=use_sudo)
+            except Exception as restore:
+                raise PortmapError(f"{exc}; restoring the previous ingress failed: {restore}") from exc
+        raise
+    status["backend"] = chosen
+    return status
+
+
+def _select_backend(
+    state_dir: Path,
+    role: str,
+    *,
+    requested: str,
+    infrastructure: Mapping[str, Any] | None,
+) -> tuple[str, Mapping[str, Any] | None]:
+    """Resolve the implementation for this call, reusing owned state first."""
+    if requested in ("container", "systemd"):
+        state = infrastructure
+        if state is None and requested == "container":
+            from . import runtime_ingress
+
+            state = runtime_ingress.load_infrastructure_state(state_dir)
+        return requested, state
+    from . import runtime_ingress
+
+    state = infrastructure if infrastructure is not None else runtime_ingress.load_infrastructure_state(state_dir)
+    recorded = state.get("ingress_backend") if isinstance(state, Mapping) else None
+    if recorded in ("container", "systemd"):
+        return recorded, state
+    record = _load_state(state_dir, role)
+    if record is not None:
+        # The backend that owns this role's published port keeps owning it;
+        # legacy records without a "backend" field are systemd installations.
+        return ("container" if record.get("backend") == "container" else "systemd"), state
+    # Every new publication goes through the container engine on the exact
+    # requested address and port. Rootless engines, privileged ports, sudo,
+    # systemd availability, and host low-port sysctls never steer the
+    # choice: the engine's own create/start/publish failure — or, when the
+    # shared infrastructure state is missing, its setup error — is
+    # authoritative and never falls back to installing units.
+    return "container", state
+
+
+def _stop_dispatched(state_dir: Path, role: str, backend: str, *, use_sudo: bool) -> None:
+    if backend == "container":
+        from . import runtime_ingress
+
+        runtime_ingress.stop_ingress_container(state_dir, name=role)
+    else:
+        _stop_systemd(state_dir, role=role, use_sudo=use_sudo)
+
+
+def _ensure_previous(state_dir: Path, role: str, previous: tuple[str | int | None, ...], *, use_sudo: bool) -> None:
+    backend, bind, port, target_port = previous
+    if backend == "container":
+        from . import runtime_ingress
+
+        runtime_ingress.ensure_ingress_container(
+            state_dir, name=role, bind_address=str(bind), port=int(port), target_port=int(target_port)
+        )
+    else:
+        _ensure_systemd(
+            state_dir, role=role, bind=_bind_address(role, str(bind)),
+            port=_port(port, "ingress bind port"), target_port=_port(target_port, "ingress target port"),
+            use_sudo=use_sudo,
+        )
+
+
+def _ensure_systemd(
+    state_dir: Path,
+    *,
+    role: str,
+    bind: str,
+    port: int,
+    target_port: int,
+    use_sudo: bool,
+) -> dict[str, Any]:
+    """Install (or update) the ingress units and leave the socket bound and verified."""
+    _require_systemd()
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     proxyd = discover_proxyd()
@@ -686,16 +839,27 @@ def ensure_ingress(
         if notes:
             raise PortmapError(f"{exc}; ingress rollback also failed: {'; '.join(notes)}") from exc
         raise
-    status = ingress_status(state_dir, name=role)
+    status = _systemd_status(state_dir, role)
     status["changed"] = changed or mutated
     return status
 
 
 def ingress_status(state_dir: Path, *, name: str) -> dict[str, Any]:
-    """Read-only report of the ingress for this state directory and role."""
+    """Read-only report of the ingress recorded for this state directory and role."""
     role = _role(name)
+    record = _load_state(Path(state_dir), role)
+    if record is not None and record.get("backend") == "container":
+        from . import runtime_ingress
+
+        return runtime_ingress.ingress_status_container(state_dir, name=role)
+    return _systemd_status(state_dir, role)
+
+
+def _systemd_status(state_dir: Path, role: str) -> dict[str, Any]:
+    """Read-only report of the systemd socket ingress for this role."""
     status: dict[str, Any] = {
         "name": role,
+        "backend": "systemd",
         "socket_unit": None,
         "service_unit": None,
         "installed": False,
@@ -751,8 +915,18 @@ def ingress_status(state_dir: Path, *, name: str) -> dict[str, Any]:
 
 
 def stop_ingress(state_dir: Path, *, name: str, use_sudo: bool = True) -> dict[str, Any]:
-    """Stop and remove only ingress units validated as owned by this state directory."""
+    """Stop and remove the ingress recorded as owned by this state directory."""
     role = _role(name)
+    record = _load_state(Path(state_dir), role)
+    if record is not None and record.get("backend") == "container":
+        from . import runtime_ingress
+
+        return runtime_ingress.stop_ingress_container(state_dir, name=role)
+    return _stop_systemd(state_dir, role=role, use_sudo=use_sudo)
+
+
+def _stop_systemd(state_dir: Path, role: str, *, use_sudo: bool) -> dict[str, Any]:
+    """Stop and remove only ingress units validated as owned by this state directory."""
     if not sys.platform.startswith("linux"):
         raise PortmapError(f"systemd ingress is unsupported on {sys.platform}; it requires a Linux host running systemd")
     state_dir = Path(state_dir)

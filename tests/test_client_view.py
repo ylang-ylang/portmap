@@ -230,6 +230,45 @@ def test_projection_uses_controller_dns_when_provided() -> None:
     assert result["dns_port"] == 1053
 
 
+
+def test_projection_omits_dns_metadata_when_the_controller_has_none() -> None:
+    result = project_catalog(remote_catalog([]), connection_profile(via="ssh"), 18080)
+
+    # A controller with no host DNS endpoint advertises none; the remote's
+    # own DNS listener is not carried into the projected view either.
+    assert "dns_server" not in result
+    assert "dns_port" not in result
+
+
+def test_direct_projection_advertises_the_verified_address_only() -> None:
+    source = remote_catalog([])
+    source["http_address"] = "198.51.100.7"
+
+    result = project_catalog(source, connection_profile(via="direct", address="192.0.2.10"), 8080)
+
+    assert result["http_address"] == "192.0.2.10"
+
+
+def test_ssh_projection_drops_the_remote_http_address() -> None:
+    source = remote_catalog([])
+    source["http_address"] = "198.51.100.7"
+
+    result = project_catalog(source, connection_profile(via="ssh"), 18080)
+
+    # SSH views are reached through the local listener under a virtual Host;
+    # a physical remote address must not rewrite the browser origin.
+    assert "http_address" not in result
+
+
+def test_direct_projection_without_a_verified_address_omits_http_address() -> None:
+    source = remote_catalog([])
+    source["http_address"] = "198.51.100.7"
+
+    result = project_catalog(source, connection_profile(via="direct", address=None), 8080)
+
+    assert "http_address" not in result
+
+
 def test_request_host_accepts_authority_forms_only() -> None:
     assert request_host("server.portmap") == "server.portmap"
     assert request_host("Server.Portmap:8080") == "server.portmap"

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .client_runtime import native_environment
+from .container_runtime import compose_entrypoint
 from .errors import ComposeError
 from .model import ComposeConfig, ComposePort, ComposeService
 from .settings import load_portmap_settings
@@ -28,8 +29,7 @@ def load_compose_config(
 
 def render_compose_json(compose_file: Path, project_directory: Path) -> dict[str, Any]:
     cmd = [
-        "docker",
-        "compose",
+        *compose_entrypoint(),
         "-f",
         str(compose_file),
         "config",

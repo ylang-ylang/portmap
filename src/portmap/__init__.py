@@ -2,9 +2,9 @@
 
 from importlib import import_module
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
-# The Python API stays lazy; remote-only access needs no container runtime.
+# Keep generator helpers lazy until requested.
 _EXPORTS = {
     "EndpointDeclaration": ".model",
     "EndpointKind": ".model",
