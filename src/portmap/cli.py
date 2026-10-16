@@ -225,6 +225,26 @@ def build_parser() -> argparse.ArgumentParser:
     endpoints.add_argument("instance")
     endpoints.set_defaults(func=cmd_endpoints)
 
+    # Internal update machinery: hidden like `_serve-catalog` (the leading
+    # underscore keeps both out of the public command list). The worker is
+    # spawned from the durable code snapshot; the recovery entry is executed
+    # from a freshly installed binary to re-mount new code into the existing
+    # roles before the update can be called successful.
+    update_worker = subparsers.add_parser("_update-worker", help=argparse.SUPPRESS)
+    update_worker.add_argument("--kind", choices=("local", "batch"), required=True)
+    update_worker.add_argument("--identifier", required=True)
+    update_worker.add_argument("--state-dir", type=Path, required=True)
+    update_worker.set_defaults(func=cmd_update_worker)
+
+    update_recover = subparsers.add_parser("_update-recover", help=argparse.SUPPRESS)
+    update_recover.add_argument("--state-dir", type=Path, required=True)
+    update_recover.add_argument("--target-version", required=True)
+    update_recover.add_argument("--result-file", type=Path, required=True)
+    update_recover.add_argument("--connections-snapshot", type=Path)
+    update_recover.add_argument("--expect-agent", action="store_true")
+    update_recover.add_argument("--use-sudo", action="store_true")
+    update_recover.set_defaults(func=cmd_update_recover)
+
     register_commands(subparsers)
     subparsers._choices_actions = [
         action for action in subparsers._choices_actions if not action.dest.startswith("_")
@@ -366,6 +386,27 @@ def cmd_agent_status(args: argparse.Namespace) -> int:
     status = get_agent_status(load_portmap_settings(environ=os.environ))
     print_json(status.as_dict())
     return 0 if status.running else 1
+
+
+def cmd_update_worker(args: argparse.Namespace) -> int:
+    from .update_worker import main as update_worker_main
+
+    return update_worker_main(
+        ["--kind", args.kind, "--identifier", args.identifier, "--state-dir", str(args.state_dir)]
+    )
+
+
+def cmd_update_recover(args: argparse.Namespace) -> int:
+    from .updates import run_recovery
+
+    return run_recovery(
+        state_dir=args.state_dir,
+        target_version=args.target_version,
+        result_file=args.result_file,
+        connections_snapshot=args.connections_snapshot,
+        expect_agent=args.expect_agent,
+        use_sudo=args.use_sudo,
+    )
 
 
 def cmd_dns_set(args: argparse.Namespace) -> int:

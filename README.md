@@ -241,6 +241,43 @@ in the private portal it also contains **Connections**. Service empty states
 stay inside machine tabs. Machine tabs show the hostname and an SSH/direct badge
 for remote connections; full addresses remain in **Settings → Connections**.
 
+### Web-managed updates
+
+The private portal's **Settings → Updates** lists this machine and its saved
+connections, including running version, installed version, build fingerprint,
+installation method and update readiness. **Check updates** checks the trusted
+Portmap release source. Update one eligible machine or use **Update all eligible**;
+the machine serving the portal runs last, so restarting it does not interrupt
+the other targets.
+
+Each target executes its own fixed updater through an authenticated HTTP API.
+SSH connections carry that API through Portmap's owned SSH forward; they do not
+execute remote installation scripts. Direct connections require the target's
+management token: reveal it in that target's own private Settings page, then
+authorize the saved connection on the manager. Tokens grant update permission;
+keep them private. Public portals cannot reveal tokens or manage connections
+and batches. Public update-agent requests require signed authorization, and
+their responses are authenticated.
+
+Updates persist target jobs and batch progress before launching detached,
+private code snapshots. Closing the page does not cancel an update; reopening
+Settings follows the saved job. A target failure is reported independently
+without stopping other machines. Recovery preserves configured server/client
+roles, DNS integration and saved connections, then checks the new agent and
+catalog versions before reporting success. Installing an already-running
+version is rejected; an installed newer version can be activated without
+reinstalling it.
+
+Supported installations are official Homebrew installations and owned
+standalone bundles. Source checkouts, insufficient permissions and unsupported
+platforms are reported rather than invoking arbitrary commands or silently
+changing installation methods. Homebrew updates use the installation's bound
+Brew executable and skip its automatic post-install setup; existing Portmap
+roles are restored explicitly instead. A legacy installation without the
+update API needs one ordinary, on-machine upgrade to 0.16 or newer first.
+
+### Installation
+
 ```bash
 SERVER=http://192.0.2.10
 curl -fsSL "$SERVER/install.sh" | sh -s -- "$SERVER"

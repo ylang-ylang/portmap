@@ -67,6 +67,15 @@ class AgentHandler(BaseHTTPRequestHandler):
         if parsed.path in {"/healthz", "/readyz"}:
             self.write_json({"ok": True, "message": "agent ready", "protocol": AGENT_PROTOCOL, "version": __version__, "pid": os.getpid(), "access_state_dir": str(self.served_access_state_dir())})
             return
+        if parsed.path == "/version":
+            self.handle_update_version()
+            return
+        if parsed.path == "/updates/status":
+            self.handle_updates_status(parsed.query)
+            return
+        if parsed.path.startswith("/updates/jobs/"):
+            self.handle_updates_job(parsed.path[len("/updates/jobs/"):])
+            return
         if parsed.path == "/worktrees":
             try:
                 self.write_json(collect_agent_worktrees())
@@ -82,6 +91,21 @@ class AgentHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/access/connections":
             self.handle_access_connections_post()
+            return
+        if parsed.path == "/updates/start":
+            self.handle_updates_start()
+            return
+        if parsed.path == "/updates/token":
+            self.handle_updates_token()
+            return
+        if parsed.path == "/updates/credentials":
+            self.handle_updates_credentials()
+            return
+        if parsed.path == "/updates/local/start":
+            self.handle_updates_local_start()
+            return
+        if parsed.path == "/update-agent":
+            self.handle_update_agent_dispatch()
             return
         if parsed.path == "/compose-up":
             payload = self.read_json()
@@ -121,6 +145,162 @@ class AgentHandler(BaseHTTPRequestHandler):
             self.write_json({"error": str(exc)}, status=400)
         except Exception:  # pragma: no cover - unexpected host state.
             self.write_json({"error": "failed to update the connection list"}, status=500)
+
+    def handle_update_version(self) -> None:
+        from .update_control import version_info
+
+        self.write_json(version_info(state_dir=self.served_access_state_dir()))
+
+    def handle_updates_status(self, query: str) -> None:
+        from .update_control import updates_status
+
+        check = _single_check_flag(query)
+        if check is None:
+            self.write_json({"error": "check must be exactly 1"}, status=400)
+            return
+        try:
+            self.write_json(updates_status(state_dir=self.served_access_state_dir(), check=check))
+        except PortmapError as exc:
+            self.write_json({"error": str(exc)}, status=400)
+        except Exception:  # pragma: no cover - unexpected host state.
+            self.write_json({"error": "failed to read the update status"}, status=500)
+
+    def handle_updates_job(self, batch_id: str) -> None:
+        from .update_control import get_batch
+
+        if not batch_id or len(batch_id) > 128:
+            self.write_json({"error": "unknown update batch"}, status=404)
+            return
+        try:
+            batch = get_batch(batch_id, state_dir=self.served_access_state_dir())
+        except PortmapError:
+            self.write_json({"error": "unknown update batch"}, status=404)
+            return
+        if batch is None:
+            self.write_json({"error": "unknown update batch"}, status=404)
+            return
+        self.write_json({"job": batch})
+
+    def handle_updates_start(self) -> None:
+        from .update_control import BatchConflictError, start_batch
+
+        try:
+            payload = self.read_json()
+        except ValueError:
+            self.write_json({"error": "request body must be a JSON object"}, status=400)
+            return
+        try:
+            batch = start_batch(payload, state_dir=self.served_access_state_dir())
+        except BatchConflictError as exc:
+            # One active batch per manager; the live job travels with the
+            # conflict so the UI keeps displaying it instead of duplicating.
+            self.write_json({"error": str(exc), "job": exc.batch}, status=409)
+            return
+        except PortmapError as exc:
+            self.write_json({"error": str(exc)}, status=400)
+            return
+        except Exception:  # pragma: no cover - unexpected host state.
+            self.write_json({"error": "failed to start the update batch"}, status=500)
+            return
+        self.write_json({"job": batch}, status=202)
+
+    def handle_updates_local_start(self) -> None:
+        """Start the local update from the real installed agent process."""
+        from .update_control import engine_error_status, start_local_job
+
+        try:
+            payload = self.read_json()
+        except ValueError:
+            self.write_json({"error": "request body must be a JSON object"}, status=400)
+            return
+        try:
+            result = start_local_job(payload, state_dir=self.served_access_state_dir())
+        except PortmapError as exc:
+            self.write_json({"error": str(exc)}, status=engine_error_status(exc, 409))
+            return
+        except Exception:  # pragma: no cover - unexpected host state.
+            self.write_json({"error": "failed to start the local update"}, status=500)
+            return
+        self.write_json(result, status=202)
+
+    def handle_updates_token(self) -> None:
+        from .update_control import reveal_local_capability
+
+        try:
+            payload = self.read_json()
+        except ValueError:
+            self.write_json({"error": "request body must be a JSON object"}, status=400)
+            return
+        try:
+            self.write_json(reveal_local_capability(payload, state_dir=self.served_access_state_dir()))
+        except PortmapError as exc:
+            self.write_json({"error": str(exc)}, status=400)
+        except Exception:  # pragma: no cover - unexpected host state.
+            self.write_json({"error": "failed to reveal the update capability"}, status=500)
+
+    def handle_updates_credentials(self) -> None:
+        from .update_control import store_remote_credential
+
+        try:
+            payload = self.read_json()
+        except ValueError:
+            self.write_json({"error": "request body must be a JSON object"}, status=400)
+            return
+        try:
+            self.write_json(store_remote_credential(payload, state_dir=self.served_access_state_dir()))
+        except PortmapError as exc:
+            self.write_json({"error": str(exc)}, status=400)
+        except Exception:  # pragma: no cover - unexpected host state.
+            self.write_json({"error": "failed to store the update capability"}, status=500)
+
+    def handle_update_agent_dispatch(self) -> None:
+        """Verify and run one remote ``/api/update-agent`` request.
+
+        The catalog relays the request verbatim (method, exact path, body,
+        listener scope and authentication headers); the capability never
+        leaves this host, so signature verification happens here.
+        """
+        from .update_control import handle_remote_request
+
+        try:
+            payload = self.read_json()
+        except ValueError:
+            self.write_json({"error": "request body must be a JSON object"}, status=400)
+            return
+        method = payload.get("method")
+        path = payload.get("path")
+        scope = payload.get("scope")
+        body = payload.get("body", "")
+        signature = payload.get("signature")
+        timestamp = payload.get("timestamp")
+        nonce = payload.get("nonce")
+        if method not in ("GET", "POST") or scope not in ("private", "public"):
+            self.write_json({"error": "malformed update-agent dispatch"}, status=400)
+            return
+        if not isinstance(path, str) or not path.startswith("/api/update-agent/") or len(path) > 512:
+            self.write_json({"error": "malformed update-agent dispatch"}, status=400)
+            return
+        if not isinstance(body, str) or len(body) > 65536:
+            self.write_json({"error": "malformed update-agent dispatch"}, status=400)
+            return
+        if any(value is not None and not isinstance(value, str) for value in (signature, timestamp, nonce)):
+            self.write_json({"error": "malformed update-agent dispatch"}, status=400)
+            return
+        try:
+            status, response_body, headers = handle_remote_request(
+                method=method,
+                path=path,
+                body=body.encode("utf-8"),
+                scope=scope,
+                signature=signature,
+                timestamp=timestamp,
+                nonce=nonce,
+                state_dir=self.served_access_state_dir(),
+            )
+        except Exception:  # pragma: no cover - unexpected host state.
+            self.write_json({"error": "update-agent dispatch failed"}, status=500)
+            return
+        self.write_json({"status": status, "body": response_body.decode("utf-8"), "headers": headers})
 
     def read_json(self) -> dict[str, Any]:
         length = min(int(self.headers.get("content-length", "0") or "0"), 65536)

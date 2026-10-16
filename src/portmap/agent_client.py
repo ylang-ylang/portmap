@@ -4,6 +4,7 @@ import http.client
 import json
 import os
 import socket
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -164,3 +165,89 @@ def agent_mutate_connection(payload: dict[str, Any], *, socket_path: Path | None
     if status >= 400 and "error" not in body:
         return status, {"error": f"agent returned HTTP {status}"}
     return status, body
+
+
+UPDATE_STATUS_LIST_TIMEOUT = 60.0
+UPDATE_STATUS_CHECK_TIMEOUT = 120.0
+UPDATE_START_TIMEOUT = 30.0
+UPDATE_JOB_TIMEOUT = 30.0
+UPDATE_TOKEN_TIMEOUT = 60.0
+UPDATE_CREDENTIALS_TIMEOUT = 30.0
+UPDATE_VERSION_TIMEOUT = 10.0
+UPDATE_AGENT_DISPATCH_TIMEOUT = 30.0
+
+
+def agent_update_version(*, socket_path: Path | None = None) -> dict[str, Any]:
+    """Minimal local version/build identity from the host agent."""
+    status, body = request_json_status("GET", "/version", socket_path=socket_path, timeout=UPDATE_VERSION_TIMEOUT)
+    if status >= 400:
+        raise AgentRequestError(status, str(body.get("error") or f"agent returned HTTP {status}"))
+    return body
+
+
+def agent_update_status(*, check: bool = False, socket_path: Path | None = None) -> dict[str, Any]:
+    """The update machines list and recent batches from the host agent."""
+    path = "/updates/status?check=1" if check else "/updates/status"
+    status, body = request_json_status(
+        "GET",
+        path,
+        socket_path=socket_path,
+        timeout=UPDATE_STATUS_CHECK_TIMEOUT if check else UPDATE_STATUS_LIST_TIMEOUT,
+    )
+    if status >= 400:
+        raise AgentRequestError(status, str(body.get("error") or f"agent returned HTTP {status}"))
+    return body
+
+
+def agent_update_start(payload: dict[str, Any], *, socket_path: Path | None = None) -> tuple[int, dict[str, Any]]:
+    """Start one durable update batch; returns the agent's status and body."""
+    return request_json_status(
+        "POST",
+        "/updates/start",
+        socket_path=socket_path,
+        payload=payload,
+        timeout=UPDATE_START_TIMEOUT,
+    )
+
+
+def agent_update_job(batch_id: str, *, socket_path: Path | None = None) -> tuple[int, dict[str, Any]]:
+    """One durable update batch; returns the agent's status and body."""
+    return request_json_status(
+        "GET",
+        f"/updates/jobs/{urllib.parse.quote(batch_id, safe='')}",
+        socket_path=socket_path,
+        timeout=UPDATE_JOB_TIMEOUT,
+    )
+
+
+def agent_update_token(payload: dict[str, Any], *, socket_path: Path | None = None) -> tuple[int, dict[str, Any]]:
+    """Reveal (and optionally tunnel-deliver) the local capability."""
+    return request_json_status(
+        "POST",
+        "/updates/token",
+        socket_path=socket_path,
+        payload=payload,
+        timeout=UPDATE_TOKEN_TIMEOUT,
+    )
+
+
+def agent_update_credentials(payload: dict[str, Any], *, socket_path: Path | None = None) -> tuple[int, dict[str, Any]]:
+    """Verify and store one remote machine capability."""
+    return request_json_status(
+        "POST",
+        "/updates/credentials",
+        socket_path=socket_path,
+        payload=payload,
+        timeout=UPDATE_CREDENTIALS_TIMEOUT,
+    )
+
+
+def agent_update_agent_dispatch(payload: dict[str, Any], *, socket_path: Path | None = None) -> tuple[int, dict[str, Any]]:
+    """Forward one remote ``/api/update-agent`` request for verification."""
+    return request_json_status(
+        "POST",
+        "/update-agent",
+        socket_path=socket_path,
+        payload=payload,
+        timeout=UPDATE_AGENT_DISPATCH_TIMEOUT,
+    )
