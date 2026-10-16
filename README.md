@@ -238,7 +238,8 @@ Neither publishes projects nor enables boot services automatically.
 Open a trusted server's catalog and select **Settings → Download portmap**,
 or run its installer below. **Settings** is the last tab after the machines;
 in the private portal it also contains **Connections**. Service empty states
-stay inside machine tabs. The portal's own machine carries a small **本机** badge.
+stay inside machine tabs. Machine tabs show only the hostname; connection
+addresses and direct/SSH transport details remain in **Settings → Connections**.
 
 ```bash
 SERVER=http://192.0.2.10
@@ -765,6 +766,12 @@ remotes. Each selection reads that machine's actual projects, branches,
 status, and endpoints; project actions target the selected machine rather
 than silently falling back to local. The existing project/worktree UI is
 shared across local, direct, and SSH views.
+
+While the catalog is visible, it reloads after each 15-second idle interval
+and when the browser window regains focus or the tab becomes visible. Hidden
+tabs pause polling. Updates preserve the selected machine; requests that fail
+offer **Retry** rather than requiring a persistent Refresh button. This updates
+the displayed data, not the underlying SSH connection or remote services.
 
 The private connection list accepts a host/IP/URL or SSH alias, with direct
 or SSH mode. Add, edit, connect, disconnect, delete, and check use the same

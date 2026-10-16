@@ -981,27 +981,6 @@ pre {
   border-color: #d8b4fe;
 }
 
-.machine-tab-target {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  color: #52606d;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.machine-unavail-badge {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  padding: 1px 5px;
-  border: 1px solid #dc2626;
-  background: #fee2e2;
-  color: #991b1b;
-  border-radius: 3px;
-  flex-shrink: 0;
-}
-
 .machine-nav-error {
   color: #9f1d16;
   font-size: 13px;
@@ -1444,10 +1423,6 @@ pre {
     font-size: 12px;
   }
 
-  .machine-tab-target {
-    display: none;
-  }
-
   .conn-row {
     flex-direction: column;
     align-items: flex-start;
@@ -1768,16 +1743,6 @@ pre {
     background: #3b1a5f;
     color: #d8b4fe;
     border-color: #7c3aed;
-  }
-
-  .machine-tab-target {
-    color: #a7b2bf;
-  }
-
-  .machine-unavail-badge {
-    background: #3b1717;
-    color: #fca5a5;
-    border-color: #b42318;
   }
 
   .machine-nav-error {
