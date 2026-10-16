@@ -132,3 +132,8 @@
 - Confirm the final compiled UI in a read-only recorded-data Chromium preview,
   including the local-only `本机` badge, retained drafts and keyboard/remote
   navigation; keep that evidence separate from blocked native notebook checks.
+- Integrate `feat/portable-runtime` for V0.14: runtime-published HTTP, safe
+  resolver-file DNS, foreground ownership and standard-entry Podman compatibility.
+- Unify Compose client discovery, preserve cold-restored socket binds, and remove
+  deployment-only preparation. Independent regression: 842 source cases passed,
+  2 integration cases deselected; 9 tap cases passed.
