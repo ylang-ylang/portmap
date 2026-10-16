@@ -145,3 +145,6 @@
   Hot-update mj's JS/CSS without service restarts; real browser before/after
   verifies polling, hidden-tab pause, foreground recovery, retained selection,
   compact tabs and Settings details. All three existing connections remain reachable.
+- Retain SSH/direct badges beside compact machine hostnames per user clarification,
+  while keeping full connection addresses hidden. Real mj browser confirms two SSH
+  badges, one DIRECT badge, no local badge/address rows, and no top-level Refresh.

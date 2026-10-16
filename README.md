@@ -238,8 +238,8 @@ Neither publishes projects nor enables boot services automatically.
 Open a trusted server's catalog and select **Settings → Download portmap**,
 or run its installer below. **Settings** is the last tab after the machines;
 in the private portal it also contains **Connections**. Service empty states
-stay inside machine tabs. Machine tabs show only the hostname; connection
-addresses and direct/SSH transport details remain in **Settings → Connections**.
+stay inside machine tabs. Machine tabs show the hostname and an SSH/direct badge
+for remote connections; full addresses remain in **Settings → Connections**.
 
 ```bash
 SERVER=http://192.0.2.10

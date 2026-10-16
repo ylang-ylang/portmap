@@ -972,6 +972,11 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
               onKeyDown={(e) => handleTabKeyDown(e, index)}
             >
               <span className="machine-tab-name">{machine.label || machine.domain || machine.id}</span>
+              {(machine.via === "ssh" || machine.via === "direct") && (
+                <span className={`machine-via-badge machine-via-${machine.via}`}>
+                  {machine.via}
+                </span>
+              )}
             </button>
           );
         })}
