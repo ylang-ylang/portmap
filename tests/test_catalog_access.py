@@ -5,6 +5,8 @@ import pytest
 
 from portmap.catalog_access import (
     LOCAL_MACHINE_ID,
+    AccessSnapshot,
+    LocalAccess,
     host_selected_machine_id,
     load_access_snapshot,
     local_descriptor,
@@ -66,6 +68,11 @@ def test_parse_access_snapshot_accepts_contract_shape() -> None:
     assert snapshot.owner == "opaque-owner-token"
     assert snapshot.dns_address == "169.254.254.53"
     assert snapshot.dns_port == 1053
+    # A legacy dns object without host state defaults to host-enabled with
+    # no container probe metadata.
+    assert snapshot.dns_host_enabled is True
+    assert snapshot.dns_container_address is None
+    assert snapshot.dns_marker is None
     assert snapshot.local.domain == "laptop.portmap"
     assert snapshot.local.enabled is False
     assert list(snapshot.machines) == ["server.portmap", "box.portmap"]
@@ -73,6 +80,7 @@ def test_parse_access_snapshot_accepts_contract_shape() -> None:
     direct = snapshot.machines["server.portmap"]
     assert (direct.via, direct.target, direct.available) == ("direct", "192.0.2.10", True)
     assert direct.backend_url == "http://192.0.2.10:80"
+    assert direct.profile()["address"] == "192.0.2.10"
 
     ssh = snapshot.machines["box.portmap"]
     assert (ssh.via, ssh.available) == ("ssh", False)
@@ -81,9 +89,61 @@ def test_parse_access_snapshot_accepts_contract_shape() -> None:
         "domain": "box.portmap",
         "via": "ssh",
         "target": "deploy@box",
+        "address": None,
         "tcp_address": "127.77.0.2",
         "tcp_ports": [18000, 18001],
     }
+
+
+def test_parse_access_snapshot_accepts_server_only_dns() -> None:
+    snapshot = parse_access_snapshot(
+        contract_document(
+            dns={
+                "host_enabled": False,
+                "address": None,
+                "port": None,
+                "container_address": "172.20.0.53",
+                "marker": "opaque-owner-token:abc123",
+            }
+        )
+    )
+
+    assert snapshot.dns_host_enabled is False
+    assert snapshot.dns_address is None
+    assert snapshot.dns_port is None
+    assert snapshot.dns_container_address == "172.20.0.53"
+    assert snapshot.dns_marker == "opaque-owner-token:abc123"
+
+
+def test_parse_access_snapshot_accepts_enabled_host_dns_with_container_metadata() -> None:
+    snapshot = parse_access_snapshot(
+        contract_document(
+            dns={
+                "host_enabled": True,
+                "address": "169.254.254.53",
+                "port": 1053,
+                "container_address": "172.20.0.53",
+                "marker": "opaque-owner-token:abc123",
+            }
+        )
+    )
+
+    assert snapshot.dns_host_enabled is True
+    assert snapshot.dns_address == "169.254.254.53"
+    assert snapshot.dns_port == 1053
+    assert snapshot.dns_container_address == "172.20.0.53"
+    assert snapshot.dns_marker == "opaque-owner-token:abc123"
+
+
+def test_access_snapshot_keeps_positional_construction_working() -> None:
+    snapshot = AccessSnapshot(
+        "opaque-owner-token", "169.254.254.53", 1053, LocalAccess(None, None, False), {}
+    )
+
+    assert snapshot.owner == "opaque-owner-token"
+    assert snapshot.dns_host_enabled is True
+    assert snapshot.dns_container_address is None
+    assert snapshot.dns_marker is None
 
 
 def test_load_access_snapshot_reads_environment_path(tmp_path: Path, monkeypatch) -> None:
@@ -128,6 +188,29 @@ def test_invalid_snapshot_content_fails_closed(tmp_path: Path, monkeypatch) -> N
         contract_document(owner=""),
         contract_document(dns={"address": "not-an-ip", "port": 1053}),
         contract_document(dns={"address": "169.254.254.53", "port": "53"}),
+        contract_document(dns={"host_enabled": "yes", "address": "169.254.254.53", "port": 1053}),
+        contract_document(dns={"host_enabled": True, "address": "169.254.254.53"}),
+        contract_document(dns={"host_enabled": True, "port": 1053}),
+        contract_document(dns={"host_enabled": False, "address": "169.254.254.53", "port": None}),
+        contract_document(dns={"host_enabled": False, "address": None, "port": 1053}),
+        contract_document(
+            dns={
+                "host_enabled": False,
+                "address": None,
+                "port": None,
+                "container_address": "not-an-ip",
+                "marker": "opaque-owner-token:abc123",
+            }
+        ),
+        contract_document(
+            dns={
+                "host_enabled": False,
+                "address": None,
+                "port": None,
+                "container_address": "172.20.0.53",
+                "marker": "",
+            }
+        ),
         contract_document(local={"domain": "laptop.portmap", "http_port": 80, "enabled": "yes"}),
         contract_document(machines={"server.portmap": {"domain": "other.portmap", "via": "direct", "http_port": 80, "backend_url": "http://192.0.2.10:80", "available": True}}),
         contract_document(machines={"server.portmap": contract_document()["machines"]["server.portmap"] | {"via": "vpn"}}),

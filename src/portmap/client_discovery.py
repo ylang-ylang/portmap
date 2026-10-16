@@ -61,6 +61,28 @@ def _port(value: object, *, field: str) -> int:
     return value
 
 
+def _ip(value: object, *, field: str) -> str:
+    if not isinstance(value, str):
+        raise PortmapError(f"{field} must be an IP address")
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError as exc:
+        raise PortmapError(f"{field} must be an IP address") from exc
+
+
+def _hostname(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or value != value.strip() or not value:
+        raise PortmapError(f"{field} must be an IP address or DNS name")
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        pass
+    if len(value) <= 253 and all(_DNS_LABEL.fullmatch(label) for label in value.split(".")):
+        return value
+    raise PortmapError(f"{field} must be an IP address or DNS name")
+
+
+
 def _domain(value: object, *, field: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise PortmapError(f"{field} must be a DNS domain, not a URL or address")
@@ -152,6 +174,15 @@ def _catalog(payload: bytes, expected_domain: str | None) -> tuple[dict, str, in
         raise PortmapError("/registry.json must return a portmap catalog object")
     domain = _domain(catalog.get("dns_domain"), field="catalog dns_domain")
     http_port = _port(catalog.get("http_port"), field="catalog http_port")
+    # DNS endpoint metadata is optional: a server-only publication serves
+    # HTTP without publishing any DNS endpoint. Any value that is present
+    # is still validated; the remote DNS listener itself is never probed.
+    if catalog.get("dns_server") is not None:
+        _ip(catalog["dns_server"], field="catalog dns_server")
+    if catalog.get("dns_port") is not None:
+        _port(catalog["dns_port"], field="catalog dns_port")
+    if catalog.get("http_address") is not None:
+        _hostname(catalog["http_address"], field="catalog http_address")
     services = catalog.get("services")
     if not isinstance(services, list) or any(not isinstance(service, dict) for service in services):
         raise PortmapError("/registry.json must contain a services array of objects")

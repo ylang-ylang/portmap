@@ -1,6 +1,8 @@
 import http.client
 import json
 import os
+import socket
+import struct
 import subprocess
 import threading
 from contextlib import contextmanager
@@ -23,6 +25,7 @@ from portmap.catalog import (
     parse_host_rule,
     select_dns_server,
 )
+from portmap.errors import PortmapError
 from portmap.web_static import read_static_asset
 
 
@@ -107,11 +110,11 @@ def local_catalog(monkeypatch):
 
 @pytest.fixture
 def access_config(tmp_path, monkeypatch):
-    def configure(machines=None, *, local=None, owner="catalog-owner") -> Path:
+    def configure(machines=None, *, local=None, owner="catalog-owner", dns=None) -> Path:
         document = {
             "version": 1,
             "owner": owner,
-            "dns": {"address": "169.254.254.53", "port": 1053},
+            "dns": dns if dns is not None else {"address": "169.254.254.53", "port": 1053},
             "local": local if local is not None else {"domain": "laptop.portmap", "http_port": 80, "enabled": False},
             "machines": machines if machines is not None else {},
         }
@@ -122,6 +125,59 @@ def access_config(tmp_path, monkeypatch):
         return path
 
     return configure
+
+
+def container_dns(marker: str, *, host_enabled: bool = False, address: str = "127.0.0.1") -> dict:
+    """A controller snapshot dns object with real container probe metadata."""
+    return {
+        "host_enabled": host_enabled,
+        "address": "169.254.254.53" if host_enabled else None,
+        "port": 1053 if host_enabled else None,
+        "container_address": address,
+        "marker": marker,
+    }
+
+
+class MarkerDns:
+    """A real UDP listener answering marker TXT queries like the container DNS."""
+
+    def __init__(self, marker: str) -> None:
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("127.0.0.1", 0))
+        self.marker = marker
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                packet, peer = self.socket.recvfrom(4096)
+            except OSError:
+                return
+            ident = struct.unpack_from("!H", packet)[0]
+            answer = packet[12:] + b"\xc0\x0c" + struct.pack(
+                "!HHIH", 16, 1, 0, len(self.marker) + 1
+            ) + bytes([len(self.marker)]) + self.marker.encode()
+            self.socket.sendto(struct.pack("!6H", ident, 0x8000, 1, 1, 0, 0) + answer, peer)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.socket.close()
+
+    @property
+    def port(self) -> int:
+        return self.socket.getsockname()[1]
+
+
+def closed_udp_port() -> int:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
 
 
 class RemoteGatewayHandler(BaseHTTPRequestHandler):
@@ -160,7 +216,15 @@ class RemoteGatewayHandler(BaseHTTPRequestHandler):
 class RemoteGateway(ThreadingHTTPServer):
     """The remote side of one saved machine: registry and action routes."""
 
-    def __init__(self, domain: str, *, via: str = "direct", http_port: int = 8080) -> None:
+    def __init__(
+        self,
+        domain: str,
+        *,
+        via: str = "direct",
+        http_port: int = 8080,
+        dns_server: str | None = "172.19.0.2",
+        http_address: str | None = None,
+    ) -> None:
         self.domain = domain
         self.via = via
         self.http_port = http_port
@@ -170,7 +234,6 @@ class RemoteGateway(ThreadingHTTPServer):
         self.registry = {
             "generated_at": GENERATED_AT,
             "dns_domain": domain,
-            "dns_server": "172.19.0.2",
             "http_port": http_port,
             "services": [
                 {
@@ -190,6 +253,10 @@ class RemoteGateway(ThreadingHTTPServer):
                 }
             ],
         }
+        if dns_server is not None:
+            self.registry["dns_server"] = dns_server
+        if http_address is not None:
+            self.registry["http_address"] = http_address
         super().__init__(("127.0.0.1", 0), RemoteGatewayHandler)
 
     def machine(self, **changes) -> dict:
@@ -472,6 +539,44 @@ def test_select_dns_server_prefers_external_bind_ip() -> None:
     assert select_dns_server(external_bind, external_target) == external_bind
     assert select_dns_server("0.0.0.0", external_target) == external_target
     assert select_dns_server("127.0.0.1", external_target) == external_target
+
+
+def test_collect_catalog_omits_host_dns_when_the_controller_disables_it(local_catalog, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_HOST_DNS_ENABLED", "0")
+    monkeypatch.setenv("PORTMAP_DNS_SERVER", "169.254.254.53")
+    monkeypatch.setenv("PORTMAP_DNS_BIND", "192.0.2.7")
+    monkeypatch.setenv("PORTMAP_DNS_TARGET_IP", "192.0.2.8")
+
+    catalog = collect_catalog()
+
+    # Disabled host DNS must not fall back to DNS_BIND/DNS_TARGET_IP and
+    # advertise a DNS endpoint that nobody publishes.
+    assert "dns_server" not in catalog
+    assert catalog["dns_domain"]
+
+
+def test_collect_catalog_advertises_the_host_dns_endpoint_when_enabled(local_catalog, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_HOST_DNS_ENABLED", "1")
+    monkeypatch.setenv("PORTMAP_DNS_SERVER", "169.254.254.53")
+
+    catalog = collect_catalog()
+
+    assert catalog["dns_server"] == "169.254.254.53"
+
+
+def test_collect_catalog_publishes_the_configured_http_address(local_catalog, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_HTTP_ADDRESS", "127.0.0.1")
+
+    catalog = collect_catalog()
+
+    assert catalog["http_address"] == "127.0.0.1"
+
+
+def test_collect_catalog_rejects_an_unusable_http_address(local_catalog, monkeypatch) -> None:
+    monkeypatch.setenv("PORTMAP_HTTP_ADDRESS", "http://127.0.0.1:8080/")
+
+    with pytest.raises(PortmapError):
+        collect_catalog()
 
 
 def test_collect_catalog_uses_agent_worktrees_to_enrich_running_services(monkeypatch) -> None:
@@ -1278,6 +1383,49 @@ def test_registry_fetches_and_projects_direct_machine(local_catalog, access_conf
     assert b"127.0.0.1" not in body
 
 
+
+def test_registry_serves_a_remote_machine_without_any_dns_endpoint(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap", http_port=8080, dns_server=None, http_address="198.51.100.7")) as remote:
+        access_config({"server.portmap": remote.machine()}, dns=container_dns("catalog-owner:ready1"))
+
+        status, _, body = request_catalog("/registry.json?machine=server.portmap")
+
+    payload = json.loads(body)
+    assert status == 200
+    # A server-only publication serves HTTP with no DNS endpoint at all: the
+    # remote advertised none and the controller has no host DNS to project.
+    assert "dns_server" not in payload
+    assert "dns_port" not in payload
+    assert "http_address" not in payload
+    assert payload["services"][0]["endpoints"][0]["transport_supported"] is True
+
+
+def test_registry_direct_projection_advertises_the_verified_machine_address(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("server.portmap", http_port=8080, http_address="198.51.100.7")) as remote:
+        access_config({"server.portmap": remote.machine(address="192.0.2.10")})
+
+        status, _, body = request_catalog("/registry.json?machine=server.portmap")
+
+    payload = json.loads(body)
+    assert status == 200
+    # Direct clients may use the controller-verified machine address; the
+    # remote's own unverified advertisement is replaced by it.
+    assert payload["http_address"] == "192.0.2.10"
+
+
+def test_registry_ssh_projection_keeps_the_virtual_host_origin(local_catalog, access_config) -> None:
+    with serving(RemoteGateway("box.portmap", via="ssh", http_port=8080, http_address="198.51.100.7")) as box:
+        access_config({"box.portmap": box.machine()})
+
+        status, _, body = request_catalog("/registry.json?machine=box.portmap")
+
+    payload = json.loads(body)
+    assert status == 200
+    # SSH views are served through the local listener under a virtual Host;
+    # a physical remote address would not be reachable and is not advertised.
+    assert "http_address" not in payload
+
+
 def test_registry_projects_ssh_machine_onto_shared_listener(local_catalog, access_config) -> None:
     with serving(RemoteGateway("box.portmap", via="ssh", http_port=8080)) as box:
         access_config({"box.portmap": box.machine()})
@@ -1489,14 +1637,79 @@ def test_catalog_compose_up_without_agent_has_no_in_container_fallback(monkeypat
     assert "agent unavailable" in payload["message"]
 
 
-def test_healthz_private_reports_controller_owner(local_catalog, access_config) -> None:
-    access_config()
+@pytest.mark.parametrize("host_enabled", [False, True])
+def test_healthz_private_reports_owner_once_the_container_dns_matches(
+    local_catalog, access_config, monkeypatch, host_enabled
+) -> None:
+    # The gate always verifies the container DNS marker, whether or not the
+    # controller additionally publishes host DNS.
+    with MarkerDns("catalog-owner:ready1") as dns:
+        monkeypatch.setattr("portmap.catalog.READY_DNS_PORT", dns.port)
+        access_config(dns=container_dns("catalog-owner:ready1", host_enabled=host_enabled))
 
-    status, headers, body = request_catalog("/healthz")
+        status, headers, body = request_catalog("/healthz")
 
     assert status == 200
     assert headers["Content-Type"].startswith("application/json")
-    assert json.loads(body) == {"ok": True, "owner": "catalog-owner"}
+    assert json.loads(body) == {"ok": True, "owner": "catalog-owner", "dns_marker": "catalog-owner:ready1"}
+
+
+def test_healthz_private_fails_on_a_mismatched_container_dns_marker(
+    local_catalog, access_config, monkeypatch
+) -> None:
+    with MarkerDns("someone-else:ready1") as dns:
+        monkeypatch.setattr("portmap.catalog.READY_DNS_PORT", dns.port)
+        access_config(dns=container_dns("catalog-owner:ready1"))
+
+        status, _, body = request_catalog("/healthz")
+
+    assert status == 503
+    assert json.loads(body) == {"ok": False}
+
+
+def test_healthz_private_fails_when_the_container_dns_bridge_is_unreachable(
+    local_catalog, access_config, monkeypatch
+) -> None:
+    monkeypatch.setattr("portmap.catalog.READY_DNS_PORT", closed_udp_port())
+    access_config(dns=container_dns("catalog-owner:ready1"))
+
+    status, _, body = request_catalog("/healthz")
+
+    assert status == 503
+    assert json.loads(body) == {"ok": False}
+
+
+def test_healthz_private_never_claims_ready_without_probe_metadata(
+    local_catalog, access_config, monkeypatch
+) -> None:
+    # A legacy snapshot without container probe data cannot be verified, and
+    # readiness must fail closed before reaching for a probe target.
+    def no_probe(*args, **kwargs):
+        raise AssertionError("readiness probed DNS without snapshot probe metadata")
+
+    monkeypatch.setattr("portmap.catalog.probe_marker", no_probe)
+    access_config()
+
+    status, _, body = request_catalog("/healthz")
+
+    assert status == 503
+    assert json.loads(body) == {"ok": False}
+
+
+def test_healthz_public_stays_plain_with_a_ready_private_gate(
+    local_catalog, access_config, monkeypatch
+) -> None:
+    with MarkerDns("catalog-owner:ready1") as dns:
+        monkeypatch.setattr("portmap.catalog.READY_DNS_PORT", dns.port)
+        access_config(dns=container_dns("catalog-owner:ready1"))
+
+        status, headers, body = request_catalog("/readyz", scope="public")
+
+    # The public scope keeps ordinary liveness; it can neither invoke the
+    # private readiness gate nor observe its owner or marker data.
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/plain")
+    assert body == b"ok\n"
 
 
 def test_healthz_public_stays_plain(local_catalog, access_config) -> None:

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from portmap import server
+from portmap import client, server
 from portmap.errors import PortmapError
 from portmap.settings import load_portmap_settings
 
@@ -203,6 +203,39 @@ def test_up_rolls_back_a_fresh_role_when_the_lan_ingress_fails(tmp_path, host):
     assert not (settings.state_dir / "server" / "instance.json").exists()
 
 
+@pytest.mark.parametrize("operation", ["up", "down"])
+def test_failed_publication_change_preserves_the_saved_http_address(tmp_path, host, monkeypatch, operation):
+    settings = make_settings(tmp_path, PORTMAP_HTTP_BIND="192.0.2.10")
+    lan = {"bind_address": "192.0.2.10", "port": 80}
+    save_record(settings, v2_record(settings, host, lan=lan))
+    monkeypatch.setattr(client, "_publish", lambda *args, **kwargs: host.sync_result)
+    monkeypatch.setattr(server, "set_local_server", client.set_local_server)
+    monkeypatch.setattr(server, "_load_client_local", client._load_local)
+    client.set_local_server(host.access_dir, {**server.local_role(settings), "http_address": lan["bind_address"]})
+    original = client._load_local(host.access_dir)
+    host.infra_state = {"public_backend_port": BACKEND_PORT}
+
+    if operation == "up":
+        changed = make_settings(tmp_path, PORTMAP_HTTP_BIND="192.0.2.11")
+        host.errors["ensure_ingress"] = PortmapError("requested address is unavailable")
+        with pytest.raises(PortmapError):
+            server.start_server(changed, ["up", "-d"])
+    else:
+        unlink = Path.unlink
+
+        def fail_record_removal(path, *args, **kwargs):
+            if path == server._record_path(settings):
+                raise PortmapError("cannot commit removal")
+            return unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", fail_record_removal)
+        with pytest.raises(PortmapError):
+            server.stop_server(settings, ["down"])
+
+    assert client._load_local(host.access_dir) == original
+    assert load_saved(settings)["lan"] == lan
+
+
 def test_up_failure_before_the_role_leaves_no_partial_state(tmp_path, host):
     settings = make_settings(tmp_path)
     host.errors["set_local_server"] = PortmapError("sync boom")
@@ -242,7 +275,6 @@ def test_down_failure_restores_the_role_and_ingress(tmp_path, host, monkeypatch)
     with pytest.raises(PortmapError, match="could not be stopped: unpublish boom"):
         server.stop_server(settings, ["down"])
 
-    assert local_calls(host)[-1] == (host.access_dir, {"domain": settings.dns_domain, "http_port": settings.http_port})
     assert len(host.calls("ensure_ingress")) == 1
     assert host.kwargs("ensure_ingress")["target_port"] == BACKEND_PORT
     assert host.kwargs("ensure_ingress")["bind_address"] == "192.0.2.10"

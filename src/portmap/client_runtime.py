@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping
 
@@ -117,6 +118,7 @@ _SCOPE_ADOPT_WAIT = 5.0
 _SCOPE_ADOPT_POLL = 0.05
 # Name (adopted scope), "" (no escape was needed), or None (not yet decided).
 _persistent_scope: str | None = None
+_foreground_active = False
 
 
 def _cgroup_paths() -> list[str]:
@@ -204,6 +206,24 @@ def ensure_persistent_scope(*, use_sudo: bool = True) -> str | None:
         "no background portmap worker was started"
     )
 
+
+def foreground_active() -> bool:
+    return _foreground_active
+
+
+@contextmanager
+def foreground_lifetime():
+    """Suppress scope adoption for the entire explicit foreground lifetime."""
+    global _persistent_scope, _foreground_active
+    previous = _persistent_scope
+    previous_foreground = _foreground_active
+    _persistent_scope = ""
+    _foreground_active = True
+    try:
+        yield
+    finally:
+        _persistent_scope = previous
+        _foreground_active = previous_foreground
 
 
 def process_identity(pid: int) -> tuple[int, str, list[str] | str] | None:

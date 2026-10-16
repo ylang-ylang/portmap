@@ -23,7 +23,7 @@ from .broker_shim import (
     uninstall_compose_plugin_shim,
 )
 from .compose_takeover import plan_docker_compose_command
-from .client_runtime import native_environment
+from .client_runtime import foreground_lifetime, native_environment
 from .errors import PortmapError
 from .infrastructure import container_dns_address
 from .host_dns import DEFAULT_RESOLVED_CONF_DIR, set_resolved_dropin, unset_resolved_dropin
@@ -113,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_serve = agent_subparsers.add_parser("serve", help="serve the host agent in the foreground")
     agent_serve.add_argument("--socket", type=Path)
     agent_serve.add_argument("--pid-file", type=Path)
+    agent_serve.add_argument("--foreground-lifetime", action="store_true", help=argparse.SUPPRESS)
     agent_serve.set_defaults(func=cmd_agent_serve)
 
     agent_start = agent_subparsers.add_parser("start", help="start the host agent in the background")
@@ -339,7 +340,13 @@ def cmd_agent_serve(args: argparse.Namespace) -> int:
     settings = load_portmap_settings(environ=os.environ)
     socket_path = args.socket or settings.agent_socket
     pid_file = args.pid_file or settings.agent_pid_file
-    run_agent_server(socket_path, pid_file=pid_file)
+    if args.foreground_lifetime:
+        # Supervised foreground-runner worker: serving stays inside one
+        # explicit foreground lifetime and never adopts a manager scope.
+        with foreground_lifetime():
+            run_agent_server(socket_path, pid_file=pid_file)
+    else:
+        run_agent_server(socket_path, pid_file=pid_file)
     return 0
 
 

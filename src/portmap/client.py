@@ -66,7 +66,8 @@ class SSHSelectionRequired(PortmapError):
 def client_lock(state_dir: Path) -> Iterator[None]:
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     metadata = state_dir.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+    # Inherited setgid affects group inheritance, not directory access.
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o700:
         raise PortmapError(f"client state must be an owned private directory with mode 0700: {state_dir}")
     with (state_dir / "client.lock").open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -559,6 +560,7 @@ def setup_client(
     use_sudo: bool = True,
     http_port: int | None = None,
     settings: PortmapSettings | None = None,
+    activate_host_dns: bool = True,
 ) -> dict[str, Any]:
     if http_port is not None:
         _port(http_port)
@@ -574,7 +576,10 @@ def setup_client(
         # _publish adopts live native masters before the controller can prove
         # or retire anything. The controller owns transactional rollback; a
         # blanket stop here could destroy the old route or a committed cutover.
-        shared = _publish(state_dir, profiles, settings=settings, http_port=http_port, use_sudo=use_sudo)
+        shared = _publish(
+            state_dir, profiles, settings=settings, http_port=http_port, use_sudo=use_sudo,
+            host_dns=True if activate_host_dns else None,
+        )
         if http_port is not None:
             _apply_public_http_port(state_dir, profiles, http_port)
         restored, restore_failures = _restore_saved_ssh(state_dir, profiles, use_sudo=use_sudo)
@@ -612,6 +617,7 @@ def _migrate_legacy_publishing(settings: PortmapSettings, *, use_sudo: bool = Tr
 def _publish(
     state_dir: Path, profiles: dict[str, dict[str, Any]], *, use_sudo: bool = True,
     settings: PortmapSettings | None = None, http_port: int | None = None, timeout: float = 5,
+    host_dns: bool | None = None,
 ) -> dict[str, Any]:
     # The local catalog view reads connections.json. Persist both the proposed
     # routes and their pending legacy ownership before the controller stages
@@ -621,7 +627,7 @@ def _publish(
     source = _load_state(state_dir).get("legacy_state_dir")
     shared = sync_infrastructure(
         state_dir, profiles, _load_local(state_dir), use_sudo=use_sudo, settings=settings,
-        http_port=http_port, legacy_state_dir=Path(source) if source else None,
+        http_port=http_port, legacy_state_dir=Path(source) if source else None, host_dns=host_dns,
     )
     failures = _retire_obsolete_forwards(state_dir, profiles)
     if failures:
@@ -663,6 +669,8 @@ def _restore_ssh_profile(
         raise PortmapError(f"{domain} has no saved SSH target to restore; disconnect it and connect again")
     saved_config = profile.get("ssh_config") or (stale.get("config_file") if isinstance(stale, dict) else None)
     ssh_config = Path(saved_config) if isinstance(saved_config, str) and saved_config else None
+    if ssh_config is not None:
+        profile["ssh_config"] = str(ssh_config)
     original = dict(profile)
     tunnel = None
     socket_path: str | None = None
@@ -764,6 +772,37 @@ def _restore_saved_ssh(
                 "error": str(exc),
             })
     return restored, failures
+
+
+def retire_stopped_transports(
+    state_dir: Path, *, use_sudo: bool = True, timeout: float = 5,
+) -> list[str]:
+    """Withdraw dead SSH routes without forgetting saved connection settings."""
+    failures: list[str] = []
+    with client_lock(state_dir):
+        profiles = _load(state_dir)
+        changed = False
+        for domain, profile in profiles.items():
+            if profile.get("via") != "ssh" or profile.get("tunnel") is None:
+                continue
+            try:
+                if tunnel_alive(profile["tunnel"], timeout=min(timeout, 2)):
+                    continue
+            except PortmapError as exc:
+                failures.append(f"{domain}: cannot verify stopped SSH transport: {exc}")
+                continue
+            saved_config = profile["tunnel"].get("config_file")
+            if not profile.get("ssh_config") and isinstance(saved_config, str) and saved_config:
+                profile["ssh_config"] = saved_config
+            for key in ("tunnel", "http_socket", "legacy_http_forward"):
+                profile.pop(key, None)
+            changed = True
+        if changed:
+            # Publication persists the dormant profiles before updating routes.
+            # Failure remains visible; live tunnels and project containers are
+            # never stopped as a side effect of retiring another runner.
+            _publish(state_dir, profiles, use_sudo=use_sudo, timeout=timeout)
+    return failures
 
 
 def connect(
@@ -897,6 +936,8 @@ def connect(
             profile["endpoints"] = _endpoints(info.catalog, profile)
             if tunnel:
                 profile["tunnel"] = tunnel
+                if tunnel.get("config_file"):
+                    profile["ssh_config"] = tunnel["config_file"]
             publishing = True
             _publish(state_dir, {**profiles, domain: profile}, use_sudo=use_sudo)
             # Prove the published path. Direct connections resolve straight to
@@ -945,12 +986,19 @@ def _local_role(state_dir: Path, spec: dict[str, Any]) -> dict[str, Any]:
     if public is None:
         public = 80
     _port(public)
+    http_address = spec.get("http_address")
+    if http_address is not None:
+        try:
+            http_address = str(ipaddress.ip_address(http_address))
+        except ValueError as exc:
+            raise PortmapError("local HTTP publication requires a numeric address") from exc
     return {
         "domain": domain,
         "via": "local",
         "remote_http_port": public,
         "http_port": public,
         "address": "127.0.0.1",
+        "http_address": http_address,
         "target": "local",
         "scheme": "http",
         "tcp_address": "127.0.0.1",
@@ -976,7 +1024,7 @@ def set_local_server(state_dir: Path, profile: dict[str, Any] | None, *, use_sud
         _save_local(state_dir, role)
         try:
             status = _publish(state_dir, profiles, use_sudo=use_sudo, settings=settings)
-        except Exception:
+        except BaseException:
             _save_local(state_dir, current)
             raise
         return {"local": _public(role) if role else None, **status}
@@ -1009,7 +1057,7 @@ def connections(state_dir: Path, *, check: bool = False) -> dict[str, Any]:
                 row["last_checked_at"] = checked_at
             rows.append(row)
         local = _load_local(state_dir)
-        status = infrastructure_status(state_dir)
+        status = infrastructure_status(state_dir, check=check)
         return {
             "connections": rows,
             "local": _public(local) if local else None,
@@ -1043,9 +1091,7 @@ def disconnect(state_dir: Path, domain: str, *, use_sudo: bool = True) -> dict[s
 
 def teardown_client(state_dir: Path, *, use_sudo: bool = True) -> dict[str, Any]:
     with client_lock(state_dir):
-        # Never silently destroy a live server's local gateway and DNS role.
-        if _load_local(state_dir) is not None:
-            raise PortmapError("local publishing is active; run portmap down before teardown")
+        local = _load_local(state_dir)
         profiles = _load(state_dir)
         errors = []
         remaining = {}
@@ -1061,12 +1107,16 @@ def teardown_client(state_dir: Path, *, use_sudo: bool = True) -> dict[str, Any]
                 remaining[domain] = profile
         _save(state_dir, remaining)
         try:
-            stop_infrastructure(state_dir, use_sudo=use_sudo)
+            if remaining:
+                _publish(state_dir, remaining, use_sudo=use_sudo)
+                shared = {"retained": True}
+            else:
+                shared = stop_infrastructure(state_dir, use_sudo=use_sudo, local=local)
         except Exception as exc:
             errors.append(str(exc))
         if errors:
             raise PortmapError("client teardown incomplete: " + "; ".join(errors))
-        return {"stopped": True, "state_dir": str(state_dir)}
+        return {"stopped": True, "state_dir": str(state_dir), "shared": shared}
 
 
 def discover(state_dir: Path, target: str | None = None, *, ssh_config: Path | None = None, timeout: float = 3) -> dict[str, Any]:

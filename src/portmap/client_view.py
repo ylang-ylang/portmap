@@ -12,7 +12,6 @@ import re
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from .client_dns import DNS_ADDRESS, DNS_PORT
 from .errors import PortmapError
 
 
@@ -147,8 +146,21 @@ def project_catalog(
         raise PortmapError("invalid registered domain")
     result = dict(catalog)
     result["http_port"] = http_port
-    result["dns_server"] = dns_address if dns_address is not None else DNS_ADDRESS
-    result["dns_port"] = dns_port if dns_port is not None else DNS_PORT
+    # A projected remote catalog cannot choose this machine's DNS listener.
+    # Only the controller's recorded binding may advertise that metadata.
+    for key, value in (("dns_server", dns_address), ("dns_port", dns_port)):
+        if value is None:
+            result.pop(key, None)
+        else:
+            result[key] = value
+    # The remote's own http_address is never carried over unverified: direct
+    # views use the controller-verified address, while ssh/local views keep
+    # the browser's virtual Host origin instead of an unreachable address.
+    result.pop("http_address", None)
+    if profile["via"] == "direct":
+        verified_address = profile.get("address")
+        if isinstance(verified_address, str) and verified_address:
+            result["http_address"] = verified_address
     result["client_access"] = {
         "transport": profile["via"],
         "domain": domain,

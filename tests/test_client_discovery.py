@@ -208,6 +208,39 @@ def test_eof_terminated_catalog_does_not_touch_closed_socket(catalog, serve_cata
     assert probe_gateway(url).domain == "work.portmap"
 
 
+def test_probe_accepts_a_server_only_catalog_without_dns_endpoint(catalog, serve_catalog):
+    del catalog["dns_server"]
+
+    url, _ = serve_catalog(catalog)
+
+    # A server-only publication serves HTTP with no DNS endpoint at all;
+    # discovery never needs to probe the remote DNS listener.
+    assert probe_gateway(url).domain == "work.portmap"
+
+
+def test_probe_accepts_optional_http_address_metadata(catalog, serve_catalog):
+    catalog["http_address"] = "203.0.113.99"
+
+    url, _ = serve_catalog(catalog)
+
+    assert probe_gateway(url).domain == "work.portmap"
+
+
+@pytest.mark.parametrize("replacement", [
+    {"dns_domain": "work.portmap", "http_port": 8080, "services": [], "dns_server": "not-an-ip"},
+    {"dns_domain": "work.portmap", "http_port": 8080, "services": [], "dns_server": "http://203.0.113.99"},
+    {"dns_domain": "work.portmap", "http_port": 8080, "services": [], "dns_port": 0},
+    {"dns_domain": "work.portmap", "http_port": 8080, "services": [], "dns_port": "53"},
+    {"dns_domain": "work.portmap", "http_port": 8080, "services": [], "http_address": "http://203.0.113.99"},
+    {"dns_domain": "work.portmap", "http_port": 8080, "services": [], "http_address": "203.0.113.99:80"},
+    {"dns_domain": "work.portmap", "http_port": 8080, "services": [], "http_address": " "},
+])
+def test_probe_rejects_invalid_optional_metadata(replacement, serve_catalog):
+    url, _ = serve_catalog(replacement)
+    with pytest.raises(PortmapError):
+        probe_gateway(url)
+
+
 def test_bare_targets_probe_only_the_default_http_port(catalog, monkeypatch):
     attempted = []
 

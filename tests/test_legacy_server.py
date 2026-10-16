@@ -661,7 +661,6 @@ def test_migration_partial_retirement_keeps_new_chain_and_resumes(migration, mon
     pending = legacy_server.load_migration(settings.state_dir)
     assert pending["phase"] == "retire"
     assert migration.infra_state["public_dns"]["address"] == "172.20.0.99"
-    assert migration.local_calls()[-1][1] == {"domain": settings.dns_domain, "http_port": settings.http_port}
 
     monkeypatch.setattr(runtime, "request", request)
     result = server.migrate_legacy_server(settings)

@@ -30,7 +30,7 @@ from .client import set_local_server, setup_client
 from .client_discovery import probe_gateway
 from .container_runtime import ContainerRuntime
 from .errors import PortmapError
-from .infrastructure import infrastructure_status, load_infrastructure
+from .infrastructure import _START_TIMEOUT, infrastructure_status, load_infrastructure
 from .ingress import ensure_ingress, ingress_status, stop_ingress
 from .legacy_server import (
     capture_legacy_server,
@@ -56,7 +56,7 @@ def _server_lock(settings: PortmapSettings) -> Iterator[None]:
     directory = settings.state_dir / "server"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     metadata = directory.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o700:
         raise PortmapError(f"server state must be an owned private directory with mode 0700: {directory}")
     fd = os.open(directory / "server.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "a+", encoding="utf-8") as handle:
@@ -184,7 +184,9 @@ def _require_public_backend(status: dict[str, Any], settings: PortmapSettings) -
     port = gateway.get("public_backend_port")
     if not status.get("running") or not isinstance(port, int):
         raise PortmapError("the shared container infrastructure did not report a running public backend")
-    probe_gateway(f"http://127.0.0.1:{port}", expected_domain=settings.dns_domain)
+    # A cold catalog includes runtime discovery and an agent worktree scan.
+    # Use the stack's startup budget, not interactive remote discovery's 3s.
+    probe_gateway(f"http://127.0.0.1:{port}", timeout=_START_TIMEOUT, expected_domain=settings.dns_domain)
 
 
 def _set_public_dns_bindings(state: dict[str, Any], bindings: dict[str, Any] | None) -> dict[str, Any]:
@@ -236,10 +238,12 @@ def _apply_role(settings: PortmapSettings, *, use_sudo: bool) -> dict[str, Any]:
                 "before changing the runtime, network, domain or HTTP port"
             )
     lan = _effective_lan(settings, previous, None)
+    previous_local = _load_client_local(access_dir)
     role_installed = False
     ingress_installed = False
     try:
-        status = set_local_server(access_dir, local_role(settings), settings=settings, use_sudo=use_sudo)
+        role = {**local_role(settings), "http_address": lan["bind_address"] if lan else None}
+        status = set_local_server(access_dir, role, settings=settings, use_sudo=use_sudo)
         role_installed = True
         _require_public_backend(status, settings)
         if lan is not None:
@@ -270,11 +274,11 @@ def _apply_role(settings: PortmapSettings, *, use_sudo: bool) -> dict[str, Any]:
                 stop_ingress(access_dir, name=_INGRESS_NAME, use_sudo=use_sudo)
             except Exception as cleanup:
                 failures.append(f"LAN ingress cleanup failed: {cleanup}")
-        if role_installed and previous is None:
+        if role_installed:
             try:
-                set_local_server(access_dir, None, settings=settings, use_sudo=use_sudo)
+                set_local_server(access_dir, previous_local, settings=settings, use_sudo=use_sudo)
             except Exception as cleanup:
-                failures.append(f"local role cleanup failed: {cleanup}")
+                failures.append(f"local role restore failed: {cleanup}")
         suffix = f"; cleanup needs attention: {'; '.join(failures)}" if failures else ""
         raise PortmapError(f"local publishing failed: {exc}{suffix}") from exc
     return status
@@ -332,7 +336,8 @@ def _migrate_legacy(settings: PortmapSettings, *, use_sudo: bool) -> dict[str, A
     legacy_ingress = capture.get("ingress")
     try:
         lan = _effective_lan(settings, None, capture)
-        status = set_local_server(access_dir, local_role(settings), settings=settings, use_sudo=use_sudo)
+        role = {**local_role(settings), "http_address": lan["bind_address"] if lan else None}
+        status = set_local_server(access_dir, role, settings=settings, use_sudo=use_sudo)
         role_set = True
         _require_public_backend(status, settings)
         phase = "ingress"
@@ -445,7 +450,7 @@ def start_server(
     access_dir = settings.client_state_dir
     # Client setup takes the client lock and may itself run the legacy server
     # migration; it must finish before the server lock is taken.
-    setup_client(access_dir, settings=settings, use_sudo=use_sudo, http_port=settings.http_port)
+    setup_client(access_dir, settings=settings, use_sudo=use_sudo, http_port=settings.http_port, activate_host_dns=False)
     with _server_lock(settings):
         if _migrate_legacy(settings, use_sudo=use_sudo) is not None:
             return server_status(settings, check=True)
@@ -469,6 +474,7 @@ def stop_server(
         effective = _saved_settings(settings, record)
         access_dir = Path(record["client_state_dir"])
         lan = record.get("lan")
+        previous_local = _load_client_local(access_dir)
         lan_removed = False
         role_removed = False
         try:
@@ -482,7 +488,7 @@ def stop_server(
             failures: list[str] = []
             if role_removed:
                 try:
-                    set_local_server(access_dir, local_role(effective), settings=effective, use_sudo=use_sudo)
+                    set_local_server(access_dir, previous_local, settings=effective, use_sudo=use_sudo)
                 except Exception as cleanup:
                     failures.append(f"local role restore failed: {cleanup}")
             if lan_removed and lan is not None:

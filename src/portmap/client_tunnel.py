@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import BinaryIO, Mapping, TypedDict
 
-from .client_runtime import ensure_persistent_scope, native_environment
+from .client_runtime import ensure_persistent_scope, foreground_active, native_environment
 from .errors import PortmapError
 
 
@@ -35,6 +35,7 @@ _DETAIL_BYTES = 4096
 _HOST = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*\Z")
 _SCOPE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 _CHILDREN: dict[str, subprocess.Popen[bytes]] = {}
+_TRACKED_TUNNELS: dict[str, dict[str, object]] = {}
 
 
 def start_tunnel(
@@ -111,7 +112,7 @@ def start_tunnel(
             command.extend(("-F", config))
         command.extend(("--", target))
 
-        # The SSH master must outlive the login session that started it.
+        # Detached workers outlive login; explicit foreground workers do not.
         ensure_persistent_scope(use_sudo=use_sudo)
         with os.fdopen(os.open(tunnel["log_file"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as log:
             child = subprocess.Popen(
@@ -122,7 +123,7 @@ def start_tunnel(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=log,
-                start_new_session=True,
+                start_new_session=not foreground_active(),
             )
         while True:
             status = child.poll()
@@ -138,6 +139,7 @@ def start_tunnel(
                     status = 1
                 if status == 0 and child.poll() is None:
                     _CHILDREN[tunnel["controlpath"]] = child
+                    _TRACKED_TUNNELS[tunnel["controlpath"]] = dict(tunnel)
                     return tunnel
             time.sleep(min(0.05, max(0, deadline - time.monotonic())))
     except BaseException as exc:
@@ -192,7 +194,7 @@ def http_socket_dir(state_dir: Path) -> Path:
     else:
         created = True
     metadata = directory.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o777 != 0o700:
         raise PortmapError("HTTP socket directory is not private or owned by this user")
     record = directory / "owner.json"
     if created:
@@ -329,10 +331,39 @@ def stop_tunnel(tunnel: Mapping[str, object], *, timeout: float = 5) -> None:
             child.wait(timeout=max(0, deadline - time.monotonic()))
             del _CHILDREN[controlpath]
         _remove_runtime(runtime)
+        _TRACKED_TUNNELS.pop(controlpath, None)
     except subprocess.TimeoutExpired as exc:
         raise PortmapError("SSH tunnel did not exit before the deadline; its runtime files were retained") from exc
     except OSError as exc:
         raise PortmapError(f"Could not clean up SSH tunnel: {exc}") from exc
+
+
+def stop_tracked_tunnels() -> list[str]:
+    """Stop every SSH master this process started, for foreground shutdown.
+
+    Only masters spawned by this invocation are touched: persisted tunnels
+    owned by other invocations keep running, and no saved connection
+    configuration is modified, so a stopped master leaves its profile for
+    the next restore. Failures are reported per target; one unresponsive
+    master never blocks reaping the rest.
+    """
+    failures: list[str] = []
+    for controlpath, tunnel in list(_TRACKED_TUNNELS.items()):
+        try:
+            stop_tunnel(tunnel)
+        except (PortmapError, OSError) as exc:
+            child = _CHILDREN.get(controlpath)
+            if child is not None and child.poll() is None:
+                try:
+                    _terminate_child(child)
+                except (OSError, subprocess.TimeoutExpired) as terminate_error:
+                    failures.append(f"{tunnel['target']}: {exc}; could not terminate its process: {terminate_error}")
+                    continue
+            failures.append(f"{tunnel['target']}: {exc}")
+        finally:
+            _CHILDREN.pop(controlpath, None)
+            _TRACKED_TUNNELS.pop(controlpath, None)
+    return failures
 
 
 def _timeout(value: float) -> float:
@@ -433,7 +464,7 @@ def _owned_runtime(tunnel: Mapping[str, object]) -> Path | None:
         return None
     except (OSError, ValueError) as exc:
         raise PortmapError(f"Cannot inspect SSH tunnel ownership: {exc}") from exc
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o777 != 0o700:
         raise PortmapError("SSH tunnel directory is not private or is not owned by this user")
     try:
         with os.fdopen(os.open(runtime / "owner.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as owner:

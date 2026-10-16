@@ -14,6 +14,15 @@ network = "portmap_gateway"
 # backend = "auto"
 # socket = "/run/user/1000/podman/podman.sock"
 
+# Normal setup/run uses runtime HTTP ingress and Linux original-DNS forwarding.
+# No backend choice is required. Owned legacy selections retain compatibility.
+# [access]
+# resolver = "auto"     # auto | resolved | forward | external
+# ingress = "auto"      # auto | container | systemd
+# Host DNS uses loopback UDP/TCP 53 and needs authorized resolver-file writes.
+# Fresh server-only `up` does not take over host DNS.
+# resolved/external/systemd remain advanced or legacy compatibility options.
+
 [ports]
 tcp_start = 18000
 udp_start = 19000

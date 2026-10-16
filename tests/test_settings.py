@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+
+from portmap.errors import PortmapError
 from portmap.settings import load_portmap_settings, resolve_runtime
 
 
@@ -225,3 +228,30 @@ def test_settings_dns_domain_explicit_config_wins(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr("portmap.settings.socket.gethostname", lambda: "ylang-U22")
     settings = load_portmap_settings(environ={"PORTMAP_ROOT": str(tmp_path)})
     assert settings.dns_domain == "debug.lan"
+
+
+def test_access_backend_environment_overrides_file(tmp_path: Path) -> None:
+    (tmp_path / "portmap.toml").write_text(
+        '[access]\nresolver = "resolved"\ningress = "systemd"\n', encoding="utf-8"
+    )
+    settings = load_portmap_settings(
+        root=tmp_path,
+        environ={
+            "PORTMAP_HOST_IP": "192.0.2.20",
+            "PORTMAP_RUNTIME_SOCKET": "/test/docker.sock",
+            "PORTMAP_RESOLVER_BACKEND": "forward",
+            "PORTMAP_INGRESS_BACKEND": "container",
+        },
+    )
+    assert settings.resolver_backend == "forward"
+    assert settings.ingress_backend == "container"
+    configured = load_portmap_settings(root=tmp_path, environ={"PORTMAP_HOST_IP": "192.0.2.20"})
+    assert configured.resolver_backend == "resolved"
+    assert configured.ingress_backend == "systemd"
+
+
+@pytest.mark.parametrize("key", ["resolver", "ingress"])
+def test_unknown_access_backend_is_rejected(tmp_path: Path, key: str) -> None:
+    (tmp_path / "portmap.toml").write_text(f'[access]\n{key} = "unsupported"\n', encoding="utf-8")
+    with pytest.raises(PortmapError):
+        load_portmap_settings(root=tmp_path, environ={"PORTMAP_HOST_IP": "192.0.2.20"})
