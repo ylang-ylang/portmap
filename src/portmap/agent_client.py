@@ -168,13 +168,15 @@ def agent_mutate_connection(payload: dict[str, Any], *, socket_path: Path | None
 
 
 UPDATE_STATUS_LIST_TIMEOUT = 60.0
-UPDATE_STATUS_CHECK_TIMEOUT = 120.0
+# The manager checks itself, then bounded concurrent waves of remote machines.
+UPDATE_STATUS_CHECK_TIMEOUT = 600.0
 UPDATE_START_TIMEOUT = 30.0
 UPDATE_JOB_TIMEOUT = 30.0
 UPDATE_TOKEN_TIMEOUT = 60.0
 UPDATE_CREDENTIALS_TIMEOUT = 30.0
 UPDATE_VERSION_TIMEOUT = 10.0
-UPDATE_AGENT_DISPATCH_TIMEOUT = 30.0
+# Target dispatch may resolve "latest" through two sequential 30s HTTP calls.
+UPDATE_AGENT_DISPATCH_TIMEOUT = 90.0
 
 
 def agent_update_version(*, socket_path: Path | None = None) -> dict[str, Any]:

@@ -250,6 +250,12 @@ Portmap release source. Update one eligible machine or use **Update all eligible
 the machine serving the portal runs last, so restarting it does not interrupt
 the other targets.
 
+Explicit release checks and update starts have a longer request budget than
+cached status reads: resolving the latest tag and downloading its manifest can
+take longer than a normal machine probe. SSH connections show release readiness
+before their first update; that update pairs through the owned private tunnel
+automatically, without requiring a token to be pasted.
+
 Each target executes its own fixed updater through an authenticated HTTP API.
 SSH connections carry that API through Portmap's owned SSH forward; they do not
 execute remote installation scripts. Direct connections require the target's

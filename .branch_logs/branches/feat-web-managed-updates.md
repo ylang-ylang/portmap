@@ -10,3 +10,13 @@
 - Verification: independent full non-integration suite: 988 passed, 2 deselected. Real isolated rootless Podman candidate: HTTP API reports Brew 0.15.0 with candidate build identity, eligible updater and existing demo/catalog intact. Release upgrade verification is recorded separately after publication.
 - Real Chromium Settings/API smoke passed. Correct initial unknown-release status to “not checked” instead of claiming “up to date”; rebuild UI and Linux amd64 archive.
 - Synchronize dev integration before final release. Independent real-browser check confirms NOT CHECKED for unknown latest version; frozen 0.16 CLI and missing-job worker entry both execute correctly.
+
+## 2026-10-17
+
+- Real browser-triggered Brew update 0.15 → 0.16 succeeded after closing the page; CLI, agent and catalog reported 0.16, demo HTTP and system DNS remained healthy. Standard teardown restored exact resolver contents/dev/inode, preserved 5 original containers and 7 networks, and removed isolated runtime scaffolding.
+- Bootstrapped official 0.16 on mj, mujoco, dexgem and ylang-u22; mj's three connections and three existing project HTTP routes passed. Direct management capability was verified without exposing its token.
+- Found actual SSH cold checks taking 9.4–11.0 seconds against an 8-second caller budget. Separate explicit-check budgets from cached probes and align target IPC, start and aggregate deadlines for V0.17.
+- Include latest_version in unsigned private SSH display status; retain the exclusion of jobs and logs. Add real-socket regressions for paired and unpaired slow checks; explicitly model the old running version in the activation regression.
+- Candidate real SSH smoke passed for both Coder targets: 9.856/9.452-second checks, signed status verification and same-version HTTP409 refusal, without SSH installation commands or elevated test scope.
+- mj's final UI verification is pending this development host's Tailscale browser reauthorization; do not confuse that connectivity prerequisite with target installation readiness.
+- Synchronize the completed V0.16 dev integration before merging the V0.17 corrections.

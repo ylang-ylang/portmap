@@ -1,13 +1,13 @@
 {
-  "version": "0.16.0",
+  "version": "0.17.0",
   "assets": [
     {
       "os": "linux",
       "arch": "amd64",
-      "filename": "portmap-0.16.0-linux-amd64.tar.gz",
-      "sha256": "f189d3efbb314731a9fc6cc204a09c91a2d19b6a33f1cc56dc5447d03549c550",
-      "size": 8781429,
-      "source_url": "https://github.com/ylang-ylang/portmap/releases/download/V0.16/portmap-0.16.0-linux-amd64.tar.gz"
+      "filename": "portmap-0.17.0-linux-amd64.tar.gz",
+      "sha256": "78ede196c96706e2522340359a23c800ddf2581269c7ef667180b83815210dbd",
+      "size": 8783888,
+      "source_url": "https://github.com/ylang-ylang/portmap/releases/download/V0.17/portmap-0.17.0-linux-amd64.tar.gz"
     }
   ]
 }
