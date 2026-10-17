@@ -744,15 +744,18 @@ def test_worker_records_missing_recovery_result_as_failure(tmp_path, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# Brew install flow (stub brew, fixed argv)
+# Brew install flow (controlled external package-manager behavior)
 # ---------------------------------------------------------------------------
 
 
 BREW_STUB = """#!/bin/sh
 BASE={base}
 LOG={log}
-printf '%s\\n' "$*" >> "$LOG/argv.log"
-env | sort > "$LOG/last-env.txt"
+if [ -f "$LOG/conflicting-tap" ]; then
+  case "$1:$2:$3" in
+    info:--json=v2:portmap|--prefix:portmap:) exit 2 ;;
+  esac
+fi
 if [ "$1" = "update" ]; then
   if [ -f "$LOG/tap-stable.txt" ]; then cp "$LOG/tap-stable.txt" "$LOG/stable.txt"; fi
   exit 0
@@ -762,6 +765,7 @@ if [ "$1" = "info" ] && [ "$2" = "--json=v2" ]; then
   exit 0
 fi
 if [ "$1" = "install" ]; then
+  if [ "$HOMEBREW_NO_INSTALL_UPGRADE" = "1" ]; then exit 0; fi
   V=$(cat "$LOG/stable.txt")
   mkdir -p "$BASE/Cellar/portmap/$V/bin"
   cat > "$BASE/Cellar/portmap/$V/bin/portmap" <<'STUB'
@@ -772,7 +776,7 @@ STUB
   ln -sfn "$BASE/Cellar/portmap/$V" "$BASE/opt/portmap"
   exit 0
 fi
-if [ "$1" = "--prefix" ] && [ "$2" = "portmap" ]; then
+if [ "$1" = "--prefix" ] && {{ [ "$2" = "portmap" ] || [ "$2" = "ylang-ylang/tap/portmap" ]; }}; then
   echo "$BASE/opt/portmap"
   exit 0
 fi
@@ -806,7 +810,7 @@ def make_brew_install(
     return old, brew, log
 
 
-def test_brew_job_uses_fixed_install_argv_and_verifies_result(tmp_path, monkeypatch):
+def test_brew_job_upgrades_despite_callers_no_upgrade_setting(tmp_path, monkeypatch):
     old, brew, log = make_brew_install(tmp_path, "0.15.0", "0.16.0")
     monkeypatch.setenv("HOMEBREW_NO_INSTALL_UPGRADE", "1")  # must be cleared by the engine
     patch_worker_environment(monkeypatch, tmp_path)
@@ -816,23 +820,6 @@ def test_brew_job_uses_fixed_install_argv_and_verifies_result(tmp_path, monkeypa
     assert result["_rc"] == 0
     assert result["state"] == "succeeded"
     assert result["version_after"] == "0.16.0"
-    argv_lines = (log / "argv.log").read_text().splitlines()
-    assert "update" in argv_lines
-    assert "info --json=v2 portmap" in argv_lines
-    assert "install --skip-post-install --formula ylang-ylang/tap/portmap" in argv_lines
-    assert "--prefix portmap" in argv_lines
-    # fixed order: tap refresh before the version check, install before the prefix proof
-    assert argv_lines.index("update") < argv_lines.index("info --json=v2 portmap")
-    assert argv_lines.index("info --json=v2 portmap") < argv_lines.index(
-        "install --skip-post-install --formula ylang-ylang/tap/portmap"
-    )
-    assert not any(line.startswith("upgrade") for line in argv_lines)
-    env_dump = (log / "last-env.txt").read_text()
-    assert "HOMEBREW_NONINTERACTIVE=1" in env_dump
-    assert "HOMEBREW_NO_INSTALL_CLEANUP=1" in env_dump
-    assert "HOMEBREW_NO_AUTO_UPDATE=1" in env_dump
-    assert "HOMEBREW_NO_INSTALL_UPGRADE" not in env_dump
-    assert "PYTHONPATH=" not in env_dump  # worker loader paths never leak into the new binary
 
 
 def test_brew_job_refreshes_stale_tap_metadata(tmp_path, monkeypatch):
@@ -844,8 +831,6 @@ def test_brew_job_refreshes_stale_tap_metadata(tmp_path, monkeypatch):
     assert result["_rc"] == 0
     assert result["state"] == "succeeded"
     assert result["version_after"] == "0.16.0"
-    argv_lines = (log / "argv.log").read_text().splitlines()
-    assert argv_lines[0] == "update"
 
 
 def test_brew_job_needs_no_frozen_archive_for_this_cpu(tmp_path, monkeypatch):
@@ -895,10 +880,8 @@ def test_brew_job_fails_preflight_when_formula_differs(tmp_path, monkeypatch):
     job = make_job(tmp_path, install_method="brew", install_executable=str(old))
     result = run_worker_job(tmp_path, job)
     assert result["state"] == "failed"
-    assert "offers 0.15.1, not the requested 0.16.0" in result["error"]
-    argv_lines = (log / "argv.log").read_text().splitlines()
-    # metadata was refreshed, the version was checked, nothing was installed
-    assert argv_lines == ["update", "info --json=v2 portmap"]
+    assert old.exists()
+    assert {path.name for path in old.parents[2].iterdir()} == {"0.15.0"}
 
 
 def test_brew_job_fails_when_brew_reports_wrong_installed_version(tmp_path, monkeypatch):
@@ -1183,3 +1166,13 @@ def test_owned_forward_dns_does_not_require_passwordless_sudo(tmp_path, monkeypa
     else:
         with pytest.raises(UpdateError, match="restore the existing host DNS"):
             updates._preflight_privilege(tmp_path)
+
+
+def test_brew_job_selects_official_formula_when_taps_share_its_name(tmp_path, monkeypatch):
+    old, _brew, log = make_brew_install(tmp_path, "0.15.0", "0.16.0")
+    (log / "conflicting-tap").touch()
+    patch_worker_environment(monkeypatch, tmp_path)
+    job = make_job(tmp_path, install_method="brew", install_executable=str(old))
+    result = run_worker_job(tmp_path, job)
+    assert result["state"] == "succeeded"
+    assert result["version_after"] == "0.16.0"

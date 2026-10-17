@@ -84,6 +84,7 @@ BUNDLE_DIR_RE = re.compile(r"^(?P<version>\d+\.\d+\.\d+)\.[0-9A-Za-z]{6}$")
 BREW_PATH_RE = re.compile(
     r"^(?P<prefix>.+)/(?:Cellar|opt)/portmap/(?P<version>\d+\.\d+\.\d+)(?:/|$)"
 )
+BREW_FORMULA = "ylang-ylang/tap/portmap"
 JOB_ID_RE = re.compile(r"job-\d{8}T\d{6}Z-[0-9a-f]{8}\Z")
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+\Z")
 REQUEST_ID_MAX = 128
@@ -1192,7 +1193,9 @@ def _sudo_noninteractive(*, timeout: float = SUDO_PROBE_TIMEOUT) -> bool:
         return False
     try:
         result = subprocess.run(
-            ["sudo", "-n", "-v"],
+            # sudo -v can demand a password under verifypw=all even when
+            # executing commands is NOPASSWD. Probe execution, not validation.
+            ["sudo", "-n", "true"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -1357,10 +1360,10 @@ def refresh_brew_metadata(state_dir: Path, brew: str) -> None:
 def brew_available_version(state_dir: Path, brew: str) -> str:
     """The formula version Brew would install, without changing anything."""
     env = _brew_environment(state_dir)
-    result = _run_child([brew, "info", "--json=v2", "portmap"], env=env, timeout=BREW_INFO_TIMEOUT)
+    result = _run_child([brew, "info", "--json=v2", BREW_FORMULA], env=env, timeout=BREW_INFO_TIMEOUT)
     if result.returncode != 0:
         raise UpdateError(
-            f"`brew info --json=v2 portmap` failed with exit {result.returncode}: "
+            f"`brew info --json=v2 {BREW_FORMULA}` failed with exit {result.returncode}: "
             f"{(result.stderr or result.stdout).strip()[:500]}"
         )
     try:
@@ -1378,7 +1381,7 @@ def brew_available_version(state_dir: Path, brew: str) -> str:
 # portmap setup behind the updater's back); `brew install --skip-post-install`
 # on the official tap formula performs the same upgrade without any hook, so
 # the durable updater stays the only recovery path.
-BREW_INSTALL_ARGV = ["install", "--skip-post-install", "--formula", "ylang-ylang/tap/portmap"]
+BREW_INSTALL_ARGV = ["install", "--skip-post-install", "--formula", BREW_FORMULA]
 
 
 def install_brew(
@@ -1406,9 +1409,9 @@ def install_brew(
         )
     # rc0 alone proves nothing: `brew install` is a no-op on an unchanged
     # version. The located keg and the executed binary must both be the target.
-    prefix_result = _run_child([brew, "--prefix", "portmap"], env=env, timeout=BREW_INFO_TIMEOUT)
+    prefix_result = _run_child([brew, "--prefix", BREW_FORMULA], env=env, timeout=BREW_INFO_TIMEOUT)
     if prefix_result.returncode != 0:
-        raise UpdateError("`brew --prefix portmap` failed after the install")
+        raise UpdateError(f"`brew --prefix {BREW_FORMULA}` failed after the install")
     opt = Path(prefix_result.stdout.strip())
     candidates = [opt / "bin" / "portmap", opt / "portmap"]
     binary = next((candidate for candidate in candidates if candidate.is_file()), None)
