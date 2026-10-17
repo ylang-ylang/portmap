@@ -1662,9 +1662,9 @@ function machineStatus(machine) {
     return { label: text(machine.active_job.state) || "updating", title: text(machine.active_job.message) || "" };
   }
   if (machine.supported === false) {
-    return { label: "unsupported", title: text(machine.reason) || "remote version too old for managed updates" };
+    return { label: "unavailable", title: text(machine.reason) || "update service unavailable" };
   }
-  if (machine.authorized === false) {
+  if (machine.authorized === false && machine.via !== "ssh") {
     return { label: "needs authorization", title: text(machine.reason) || "management capability missing" };
   }
   if (machine.update_available === true) {
@@ -1678,7 +1678,7 @@ function machineStatus(machine) {
 
 function machineStatusClass(machine) {
   if (machineHasActiveJob(machine)) return "upd-state-active";
-  if (machine.supported === false || machine.authorized === false) return "upd-state-warn";
+  if (machine.supported === false || (machine.authorized === false && machine.via !== "ssh")) return "upd-state-warn";
   if (machine.update_available === true) {
     return machine.can_update === true ? "upd-state-info" : "upd-state-warn";
   }
@@ -2297,6 +2297,36 @@ function CatalogApp() {
   const [actionMessage, setActionMessage] = useState(null);
   const [actionLog, setActionLog] = useState([]);
   const [canManageConnections, setCanManageConnections] = useState(false);
+  const [serviceVersion, setServiceVersion] = useState("");
+  const versionAbortRef = useRef(null);
+
+  async function loadServiceVersion() {
+    versionAbortRef.current?.abort();
+    const controller = new AbortController();
+    versionAbortRef.current = controller;
+    try {
+      const response = await fetch("/api/version", { signal: controller.signal, cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (!controller.signal.aborted) setServiceVersion(text(data.catalog_version));
+    } catch {
+      if (!controller.signal.aborted) setServiceVersion("");
+    }
+  }
+
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") void loadServiceVersion();
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      versionAbortRef.current?.abort();
+    };
+  }, []);
   // Shared abort ref: the controller stored here is the authoritative catalog request.
   // Both the useEffect and reloadCatalog write to this ref after aborting the prior value,
   // so whichever started last is the one that may apply its result.
@@ -2628,10 +2658,18 @@ function CatalogApp() {
         />
         <UpdatesPanel
           active={activePage === "settings"}
-          onMachinesRefresh={() => loadMachines({ keepSelection: true })}
+          onMachinesRefresh={() => {
+            void loadMachines({ keepSelection: true });
+            void loadServiceVersion();
+          }}
         />
         <DownloadPanel catalog={catalog?.client_access ? null : catalog} />
       </section>
+      {serviceVersion && (
+        <footer className="meta app-version" title="Version of the Portmap service serving this page">
+          Portmap v{serviceVersion}
+        </footer>
+      )}
     </main>
   );
 }

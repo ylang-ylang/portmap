@@ -164,3 +164,7 @@
   sudo execution instead of credential validation. Real collision/permission
   scenarios verified; no extra privileges granted. Regression: 991 passed,
   2 integration cases deselected; remove incidental argv/env echo assertions.
+- Integrate requested frontend hotfix: unobtrusive serving-version footer and
+  accurate SSH auto-pairing/unavailable labels. mj's 0.18 footer was deployed
+  and visually verified live; label corrections were verified with recorded
+  real responses but their mj transfer is blocked by lost SSH connectivity.
