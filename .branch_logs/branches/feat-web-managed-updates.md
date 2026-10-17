@@ -9,3 +9,4 @@
 - Keep prior completion-paced catalog polling and hostname/transport machine tabs.
 - Verification: independent full non-integration suite: 988 passed, 2 deselected. Real isolated rootless Podman candidate: HTTP API reports Brew 0.15.0 with candidate build identity, eligible updater and existing demo/catalog intact. Release upgrade verification is recorded separately after publication.
 - Real Chromium Settings/API smoke passed. Correct initial unknown-release status to “not checked” instead of claiming “up to date”; rebuild UI and Linux amd64 archive.
+- Synchronize dev integration before final release. Independent real-browser check confirms NOT CHECKED for unknown latest version; frozen 0.16 CLI and missing-job worker entry both execute correctly.
