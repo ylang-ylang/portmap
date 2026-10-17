@@ -240,6 +240,10 @@ or run its installer below. **Settings** is the last tab after the machines;
 in the private portal it also contains **Connections**. Service empty states
 stay inside machine tabs. Machine tabs show the hostname and an SSH/direct badge
 for remote connections; full addresses remain in **Settings → Connections**.
+The subtle bottom-right footer shows the running catalog service version,
+not the latest release or the selected remote machine's version. It refreshes
+when the page returns to the foreground and after a local managed update;
+an unavailable version endpoint leaves the footer hidden instead of guessing.
 
 ### Web-managed updates
 

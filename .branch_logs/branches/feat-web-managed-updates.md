@@ -30,3 +30,13 @@
   Harmless noninteractive execution succeeds; no privilege policy was changed.
 - Independent final V0.18 regression: 991 passed, 2 integration cases deselected.
 - Synchronize the V0.17 integration before merging the final preflight corrections.
+- Complete real API upgrades to 0.18 on mujoco, dexgem and ylang-u22; the
+  notebook subsequently upgraded to official 0.18 during its online window.
+- Add a subtle 12px right-aligned page footer using the serving catalog version,
+  refreshed on foreground return and completed local updates. Hot-deploy mj
+  JS/CSS without restarting services; real browser verifies “Portmap v0.18.0”
+  in catalog and Settings.
+- Correct misleading update badges: unavailable services are not labelled
+  unsupported; SSH auto-pairing does not require manual authorization. Verify
+  against recorded real mj responses in Chromium. Its follow-up asset transfer
+  is blocked by mj SSH becoming unreachable; do not claim this label fix live.

@@ -88,6 +88,11 @@ function mockCatalogPlugin() {
     configureServer(server) {
       server.middlewares.use(async (request, response, next) => {
         const path = (request.url || "").split("?")[0];
+        if (path === "/api/version") {
+          const local = readFixture().machines.find((machine) => machine.id === "local");
+          sendJson(response, 200, { catalog_version: local?.current_version });
+          return;
+        }
         if (path === "/registry.json") {
           const body = readFileSync(new URL("./frontend/mock/registry.json", import.meta.url));
           response.statusCode = 200;

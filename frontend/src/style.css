@@ -47,6 +47,13 @@ h1 {
   font-size: 14px;
 }
 
+.app-version {
+  margin-top: 18px;
+  padding-bottom: 4px;
+  font-size: 12px;
+  text-align: right;
+}
+
 .catalog-tree {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
