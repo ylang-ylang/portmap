@@ -155,3 +155,8 @@
   rootless Podman deployment serves the candidate API and existing demo correctly.
 - Integrate final unchecked-release UI correction, verified in real Chromium.
   Frozen V0.16 CLI and safe missing-job update-worker entry smoke passed.
+- Integrate V0.17: allow cold release checks to finish across SSH/IPC, retain
+  fast cached reads, and include latest version in private unpaired SSH status.
+- Real target checks exceeding the old 8-second limit now succeed through owned
+  SSH forwards; signatures and same-version refusal verified on both targets.
+  Independent final regression: 990 passed, 2 integration cases deselected.

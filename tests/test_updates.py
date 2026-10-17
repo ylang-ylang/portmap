@@ -458,6 +458,7 @@ def test_start_update_allows_completing_activation_of_installed_newer_version(tm
     launcher.unlink()
     launcher.symlink_to(new)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(updates, "__version__", "0.15.0")
     real_probe = updates.probe_installation
     monkeypatch.setattr(updates, "probe_installation", lambda executable=None: real_probe(old))
     monkeypatch.setattr(updates, "foreground_runner_active", lambda state_dir: False)

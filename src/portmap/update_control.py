@@ -67,8 +67,11 @@ MAX_NONCE_ENTRIES = 20_000
 
 REMOTE_MAX_BYTES = 262_144
 REMOTE_STATUS_TIMEOUT = 8.0
+# A cold check resolves the release tag and fetches its manifest (30s each).
+# Keep cached display reads short, but let explicit checks and starts finish.
+REMOTE_CHECK_TIMEOUT = 100.0
 REMOTE_PROBE_TIMEOUT = 5.0
-REMOTE_START_TIMEOUT = 20.0
+REMOTE_START_TIMEOUT = 100.0
 REMOTE_JOB_TIMEOUT = 15.0
 REMOTE_ENROLL_TIMEOUT = 20.0
 
@@ -619,7 +622,7 @@ def _remote_machine_item(machine: Any, *, state_dir: Path, check: bool) -> dict[
         try:
             status, body, _raw, _server = _request_machine(machine, f"/api/update-agent/status{query}", state_dir=state_dir, capability=credential,
             machine=machine.id,
-            timeout=REMOTE_STATUS_TIMEOUT,)
+            timeout=REMOTE_CHECK_TIMEOUT if check else REMOTE_STATUS_TIMEOUT,)
         except RemoteUpdateError as exc:
             item["error"] = exc.message
             item["reason"] = "machine could not be reached with the stored authorization"
@@ -656,7 +659,7 @@ def _remote_machine_item(machine: Any, *, state_dir: Path, check: bool) -> dict[
         query = "?check=1" if check else ""
         try:
             status, body, _raw, _server = _request_machine(machine, f"/api/update-agent/status{query}", state_dir=state_dir, machine=machine.id,
-            timeout=REMOTE_STATUS_TIMEOUT,)
+            timeout=REMOTE_CHECK_TIMEOUT if check else REMOTE_STATUS_TIMEOUT,)
         except RemoteUpdateError as exc:
             item["error"] = exc.message
             body = None
@@ -1316,7 +1319,7 @@ def _parse_body_json(body: bytes) -> dict[str, Any]:
 def _remote_version_payload(status: dict[str, Any]) -> dict[str, Any]:
     """The minimal identity a version query may reveal: no jobs or logs."""
     payload: dict[str, Any] = {"update_api": True}
-    for field in ("current_version", "installed_version", "build_id", "install_method", "update_available", "can_update", "reason"):
+    for field in ("current_version", "installed_version", "build_id", "latest_version", "install_method", "update_available", "can_update", "reason"):
         payload[field] = status.get(field)
     return payload
 
@@ -1372,7 +1375,7 @@ def start_local_job(payload: Any, *, state_dir: Path) -> dict[str, Any]:
     return {"job": job}
 
 
-UPDATE_LOCAL_START_TIMEOUT = 60.0
+UPDATE_LOCAL_START_TIMEOUT = 100.0
 
 
 def _agent_local_start(version: str, request_id: str, *, state_dir: Path) -> tuple[int, dict[str, Any]] | None:

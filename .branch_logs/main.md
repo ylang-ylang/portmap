@@ -99,3 +99,10 @@
   and safe missing-job worker entry execution.
 - Frozen archive SHA256:
   `f189d3efbb314731a9fc6cc204a09c91a2d19b6a33f1cc56dc5447d03549c550`.
+- Release `V0.17` (`portmap 0.17.0`): align explicit release-check/start request
+  budgets with target operations without slowing cached status probes; report
+  latest version before the first SSH pairing.
+- Real 9.4–9.9-second SSH checks, signed responses and same-version refusal
+  verified. Independent regression: 990 passed, 2 integration cases deselected.
+- Frozen archive SHA256:
+  `78ede196c96706e2522340359a23c800ddf2581269c7ef667180b83815210dbd`.
