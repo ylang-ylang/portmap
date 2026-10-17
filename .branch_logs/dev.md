@@ -140,3 +140,18 @@
 - Integrate V0.15 cold-remount recovery of owned state beneath a private
   ancestor, with descriptor identity and fail-closed foreign/shared checks.
   Preserve state contents and connections; 870 non-integration tests passed.
+- Integrate `feat/catalog-auto-refresh`: visible-only automatic catalog updates,
+  foreground refresh, explicit error Retry, and hostname-only machine tabs.
+  Hot-update mj's JS/CSS without service restarts; real browser before/after
+  verifies polling, hidden-tab pause, foreground recovery, retained selection,
+  compact tabs and Settings details. All three existing connections remain reachable.
+- Retain SSH/direct badges beside compact machine hostnames per user clarification,
+  while keeping full connection addresses hidden. Real mj browser confirms two SSH
+  badges, one DIRECT badge, no local badge/address rows, and no top-level Refresh.
+- Integrate `feat/web-managed-updates` for V0.16: Settings version/build identity,
+  authenticated target-owned updates, durable per-machine/batch jobs and manager-last
+  ordering; preserve DNS, roles and connections during explicit restart recovery.
+- Independent non-integration regression: 988 passed, 2 deselected. Real isolated
+  rootless Podman deployment serves the candidate API and existing demo correctly.
+- Integrate final unchecked-release UI correction, verified in real Chromium.
+  Frozen V0.16 CLI and safe missing-job update-worker entry smoke passed.

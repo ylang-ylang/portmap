@@ -952,7 +952,6 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
       <div className="machine-nav-scroll" role="tablist" aria-label="Machines and settings">
         {machines.map((machine, index) => {
           const isSelected = !settingsSelected && machine.id === selectedId;
-          const isLocal = machine.via === "local";
           return (
             <button
               key={machine.id}
@@ -963,6 +962,7 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
               aria-controls="page-panel-catalog"
               tabIndex={isSelected ? 0 : -1}
               type="button"
+              title={!machine.available ? "Machine is offline" : undefined}
               className={[
                 "machine-tab",
                 isSelected ? "machine-tab-active" : "",
@@ -972,19 +972,10 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
               onKeyDown={(e) => handleTabKeyDown(e, index)}
             >
               <span className="machine-tab-name">{machine.label || machine.domain || machine.id}</span>
-              {isLocal && (
-                <span className="machine-via-badge">本机</span>
-              )}
-              {!isLocal && machine.via && (
+              {(machine.via === "ssh" || machine.via === "direct") && (
                 <span className={`machine-via-badge machine-via-${machine.via}`}>
                   {machine.via}
                 </span>
-              )}
-              {!isLocal && machine.target && (
-                <span className="machine-tab-target">{machine.target}</span>
-              )}
-              {!machine.available && (
-                <span className="machine-unavail-badge">offline</span>
               )}
             </button>
           );
@@ -1616,6 +1607,683 @@ function ConnectionManager({ canManageConnections, onMachinesRefresh }) {
   );
 }
 
+const JOB_TERMINAL_STATES = new Set(["succeeded", "failed", "interrupted"]);
+const BATCH_TERMINAL_STATES = new Set(["succeeded", "failed", "partial"]);
+const JOB_POLL_MS = 2000;
+const JOB_POLL_MAX_DELAY_MS = 8000;
+// A local update restarts the server this page is served from; keep retrying
+// long enough to ride out the restart window before declaring a lost job.
+const JOB_POLL_MAX_FAILURES = 4;
+const JOB_POLL_MAX_FAILURES_LOCAL = 90;
+
+function updatesStateClass(state) {
+  if (state === "succeeded") return "upd-state-ok";
+  if (state === "failed") return "upd-state-error";
+  if (state === "partial" || state === "interrupted") return "upd-state-warn";
+  if (state === "queued") return "upd-state-idle";
+  return "upd-state-active";
+}
+
+function StateBadge({ state, className = "" }) {
+  const clean = text(state);
+  return (
+    <span className={`upd-badge ${updatesStateClass(clean)} ${className}`} data-upd-state={clean}>
+      {clean || "unknown"}
+    </span>
+  );
+}
+
+function shortIdentity(value, keep = 12) {
+  const clean = text(value);
+  return clean.length > keep ? `${clean.slice(0, keep)}…` : clean;
+}
+
+function machineLabel(machine) {
+  return text(machine?.label) || text(machine?.id) || "machine";
+}
+
+function machineHasActiveJob(machine) {
+  const state = text(machine?.active_job?.state);
+  return Boolean(state) && !JOB_TERMINAL_STATES.has(state);
+}
+
+function machineUpdateEligible(machine) {
+  return machine?.can_update === true && machine?.update_available === true && !machineHasActiveJob(machine);
+}
+
+function compareUpdateMachines(left, right) {
+  if (left.id === "local") return -1;
+  if (right.id === "local") return 1;
+  return text(left.label).localeCompare(text(right.label)) || text(left.id).localeCompare(text(right.id));
+}
+
+function machineStatus(machine) {
+  if (machineHasActiveJob(machine)) {
+    return { label: text(machine.active_job.state) || "updating", title: text(machine.active_job.message) || "" };
+  }
+  if (machine.supported === false) {
+    return { label: "unsupported", title: text(machine.reason) || "remote version too old for managed updates" };
+  }
+  if (machine.authorized === false) {
+    return { label: "needs authorization", title: text(machine.reason) || "management capability missing" };
+  }
+  if (machine.update_available === true) {
+    if (machine.can_update === true) return { label: "update available", title: "" };
+    return { label: "cannot update", title: text(machine.reason) || "" };
+  }
+  if (machine.error) return { label: "error", title: text(machine.error) };
+  if (!machine.latest_version) return { label: "not checked", title: "Use Check updates to discover the latest release" };
+  return { label: "up to date", title: "" };
+}
+
+function machineStatusClass(machine) {
+  if (machineHasActiveJob(machine)) return "upd-state-active";
+  if (machine.supported === false || machine.authorized === false) return "upd-state-warn";
+  if (machine.update_available === true) {
+    return machine.can_update === true ? "upd-state-info" : "upd-state-warn";
+  }
+  if (machine.error) return "upd-state-error";
+  if (!machine.latest_version) return "upd-state-info";
+  return "upd-state-ok";
+}
+
+function VersionFacts({ machine }) {
+  const current = text(machine.current_version);
+  const installed = text(machine.installed_version);
+  const build = text(machine.build_id);
+  const latest = text(machine.latest_version);
+  const mismatch = installed && installed !== current;
+  return (
+    <span className="upd-row-meta">
+      <span className="upd-ver">running <b>{current || "unknown"}</b></span>
+      {installed ? (
+        <span
+          className={mismatch ? "upd-ver upd-ver-mismatch" : "upd-ver"}
+          title={mismatch
+            ? `The installed package (${installed}) differs from the running process (${current || "unknown"}); a restart or in-flight update is pending.`
+            : "installed package version"}
+        >
+          installed <b>{installed}</b>{mismatch ? " · restart pending" : ""}
+        </span>
+      ) : null}
+      {build ? <span className="upd-build" title={build}>build {shortIdentity(build)}</span> : null}
+      {latest
+        ? <span className="upd-ver">latest <b>{latest}</b></span>
+        : <span className="upd-muted">latest unknown — use Check</span>}
+    </span>
+  );
+}
+
+function JobLogTail({ job, label }) {
+  const log = text(job?.log_tail);
+  if (!log) return null;
+  return (
+    <details className="upd-log">
+      <summary>{label}</summary>
+      <pre><code>{log}</code></pre>
+    </details>
+  );
+}
+
+function UpdateMachineRow({ machine, onUpdate, onAuthorized, submitting, batchActive }) {
+  const via = text(machine.via);
+  const status = machineStatus(machine);
+  const eligible = machineUpdateEligible(machine) && !submitting && !batchActive;
+  const reason = text(machine.reason);
+  const lastJob = machine.last_job || null;
+  const activeJob = machine.active_job || null;
+  const disabledTitle = batchActive
+    ? "another update batch is already active; follow it below"
+    : machineHasActiveJob(machine)
+      ? "an update is already running on this machine"
+      : reason || (machine.update_available !== true ? "no update available" : "this machine cannot be updated right now");
+  return (
+    <div className="upd-row" role="listitem" data-upd-machine={machine.id}>
+      <div className="upd-row-body">
+        <div className="upd-row-main">
+          <span className={`upd-badge ${machineStatusClass(machine)}`} title={status.title} data-upd-status={status.label}>
+            {status.label}
+          </span>
+          <span className="upd-row-name">{machineLabel(machine)}</span>
+          {via && via !== "local" ? (
+            <span className={`machine-via-badge machine-via-${via === "direct" || via === "ssh" ? via : "auto"}`}>{via}</span>
+          ) : null}
+          {machine.id === "local" ? <span className="machine-via-badge machine-via-auto">local</span> : null}
+          {text(machine.install_method) ? (
+            <span
+              className={`upd-method-badge ${machine.install_method === "unsupported" ? "upd-state-warn" : ""}`}
+              title="how portmap is installed on this machine"
+            >
+              {text(machine.install_method)}
+            </span>
+          ) : null}
+        </div>
+        <VersionFacts machine={machine} />
+        {reason ? <div className="upd-reason" title={reason}>{reason}</div> : null}
+        {machine.error ? <div className="upd-error-inline" title={text(machine.error)}>{text(machine.error)}</div> : null}
+        {activeJob ? (
+          <div className="upd-job-line" data-upd-active-job>
+            <StateBadge state={activeJob.state} />
+            <span className="upd-muted">{text(activeJob.message) || "update in progress"}</span>
+            <JobLogTail job={activeJob} label="log" />
+          </div>
+        ) : null}
+        {lastJob ? (
+          <div className="upd-job-line" data-upd-last-job>
+            <span className="upd-muted">
+              last update {text(lastJob.state)}
+              {text(lastJob.version_after) ? ` → ${text(lastJob.version_after)}` : ""}
+              {text(lastJob.updated_at) ? ` · ${formatCheckedAt(lastJob.updated_at)}` : ""}
+            </span>
+            {text(lastJob.error) ? <span className="upd-error-inline" title={text(lastJob.error)}>{text(lastJob.error)}</span> : null}
+            <JobLogTail job={lastJob} label="log" />
+          </div>
+        ) : null}
+        {via === "direct" && machine.authorized === false ? (
+          <CredentialEnrollment machineId={machine.id} machineName={machineLabel(machine)} onAuthorized={onAuthorized} />
+        ) : null}
+        {via === "ssh" && machine.authorized === false ? (
+          <p className="upd-reason">
+            SSH machines are authorized by the server over the existing connection when an update runs;
+            no token entry is needed here.
+          </p>
+        ) : null}
+      </div>
+      <div className="upd-row-actions">
+        <button
+          className="action-button conn-connect-btn"
+          type="button"
+          disabled={!eligible}
+          title={eligible
+            ? `Update ${machineLabel(machine)} to ${text(machine.latest_version) || "the latest release"}`
+            : disabledTitle}
+          onClick={() => onUpdate(machine)}
+        >
+          <Play className="button-icon" aria-hidden="true" />
+          {" "}{machineHasActiveJob(machine) ? "Updating…" : "Update"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CredentialEnrollment({ machineId, machineName, onAuthorized }) {
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [ok, setOk] = useState(false);
+
+  async function submit() {
+    const token = draft.trim();
+    setOk(false);
+    if (!token) {
+      setError(`Paste the management token revealed on ${machineName} itself (its own portal: Settings → Updates → Reveal local token).`);
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/updates/credentials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ machine: machineId, token }),
+      });
+      let data = {};
+      try { data = await res.json(); } catch { data = {}; }
+      if (!res.ok || data.ok !== true) {
+        throw new Error(text(data.error) || `HTTP ${res.status}`);
+      }
+      setDraft("");
+      setOk(true);
+      await onAuthorized();
+    } catch (err) {
+      setError(`${err.message || err}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="upd-cred-form" data-upd-cred={machineId}>
+      <input
+        className="conn-form-input upd-cred-input"
+        type="password"
+        value={draft}
+        onChange={(e) => { setDraft(e.target.value); setOk(false); }}
+        onKeyDown={(e) => { if (e.key === "Enter") void submit(); }}
+        placeholder={`paste ${machineName}'s own management token`}
+        autoComplete="off"
+        spellCheck="false"
+        disabled={busy}
+        aria-label={`Management token for ${machineName}`}
+      />
+      <button className="action-button conn-save-btn" type="button" onClick={() => void submit()} disabled={busy}>
+        {busy ? "Verifying…" : "Authorize"}
+      </button>
+      {ok ? <span className="upd-muted">authorized</span> : null}
+      {error ? <div className="conn-form-error" role="alert">{error}</div> : null}
+    </div>
+  );
+}
+
+function BatchTargets({ batch }) {
+  const targets = Array.isArray(batch?.targets) ? batch.targets : [];
+  return (
+    <div className="upd-targets">
+      {targets.map((target) => (
+        <div className="upd-target-row" key={target.machine_id} data-upd-target={target.machine_id}>
+          <StateBadge state={target.state} />
+          <span className="upd-row-name">{text(target.label) || text(target.machine_id)}</span>
+          <span className="upd-ver">
+            <b>{text(target.current_version) || "?"}</b>
+            {" → "}
+            <b>{text(target.target_version) || "latest"}</b>
+          </span>
+          {text(target.message) ? <span className="upd-muted">{text(target.message)}</span> : null}
+          {text(target.error) ? <span className="upd-error-inline" title={text(target.error)}>{text(target.error)}</span> : null}
+          <JobLogTail job={target} label="log" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function UpdatesPanel({ active, onMachinesRefresh }) {
+  const [updatesData, setUpdatesData] = useState(null);
+  const [updatesAvailable, setUpdatesAvailable] = useState(true);
+  const [updatesError, setUpdatesError] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [batch, setBatch] = useState(null);
+  const [batchError, setBatchError] = useState("");
+  const [reconnecting, setReconnecting] = useState(false);
+  const [panelError, setPanelError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [tokenBox, setTokenBox] = useState(null);
+  const [pollEpoch, setPollEpoch] = useState(0);
+  const [notice, setNotice] = useState("");
+  const batchRef = useRef(null);
+  const tokenRequestRef = useRef(null);
+
+  useEffect(() => { batchRef.current = batch; }, [batch]);
+
+  // Load persisted machines/batches whenever the Settings tab becomes active.
+  // The manager API is private; public portals answer 401/403/404 and the
+  // section hides itself. No fetch happens while Settings is closed.
+  useEffect(() => {
+    if (!active) {
+      setTokenBox(null);
+      return;
+    }
+    void refreshUpdates({ resume: true });
+    return () => tokenRequestRef.current?.abort();
+  }, [active]);
+
+  async function refreshUpdates({ check = false, resume = false } = {}) {
+    if (check) setChecking(true);
+    try {
+      const res = await fetch(`/api/updates${check ? "?check=1" : ""}`);
+      if (res.status === 401 || res.status === 403 || res.status === 404) {
+        setUpdatesAvailable(false);
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data?.update_api === false) {
+        setUpdatesAvailable(false);
+        return;
+      }
+      setUpdatesAvailable(true);
+      setUpdatesError("");
+      const machines = Array.isArray(data?.machines) ? data.machines : [];
+      const batches = Array.isArray(data?.batches) ? data.batches : [];
+      setUpdatesData({ machines, batches });
+      if (resume && batches.length) {
+        const running = batches.find((item) => !BATCH_TERMINAL_STATES.has(text(item.state)));
+        const target = running || batches[0];
+        const current = batchRef.current;
+        const currentActive = current && !BATCH_TERMINAL_STATES.has(text(current.state));
+        if (!currentActive || text(target.id) !== text(current?.id)) setBatch(target);
+      }
+    } catch (err) {
+      setUpdatesError(`Failed to load updates: ${err.message || err}`);
+    } finally {
+      if (check) setChecking(false);
+    }
+  }
+
+
+  // Poll the watched batch job while it is non-terminal and Settings is open.
+  // One serialized request chain: no overlapping polls, cleanup on unmount/tab
+  // leave, escalating backoff, and a long retry window while a local update
+  // restarts the very server this page is served from.
+  useEffect(() => {
+    const id = text(batch?.id);
+    if (!active || !id) return;
+    if (BATCH_TERMINAL_STATES.has(text(batch?.state))) return;
+    let stopped = false;
+    let busy = false;
+    let timer = null;
+    let failures = 0;
+
+    async function tick() {
+      if (stopped || busy) return;
+      busy = true;
+      let done = false;
+      let delay = JOB_POLL_MS;
+      try {
+        const res = await fetch(`/api/updates/jobs/${encodeURIComponent(id)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const job = data && typeof data.job === "object" && data.job ? data.job : data;
+        if (stopped) return;
+        failures = 0;
+        setReconnecting(false);
+        setBatchError("");
+        setBatch(job);
+        if (BATCH_TERMINAL_STATES.has(text(job.state))) {
+          done = true;
+          try { await refreshUpdates(); } catch { /* listing refresh is best-effort */ }
+          if ((job.targets || []).some((target) => target.machine_id === "local")) onMachinesRefresh();
+          return;
+        }
+      } catch (err) {
+        if (!stopped) {
+          failures += 1;
+          const includesLocal = (batchRef.current?.targets || []).some((target) => target.machine_id === "local");
+          const limit = includesLocal ? JOB_POLL_MAX_FAILURES_LOCAL : JOB_POLL_MAX_FAILURES;
+          delay = Math.min(JOB_POLL_MS * failures, JOB_POLL_MAX_DELAY_MS);
+          if (failures > limit) {
+            done = true;
+            setReconnecting(false);
+            setBatchError(includesLocal
+              ? `Lost contact while ${batchLocalName} updated itself (it restarts its catalog server). The update continues server-side; reload later. Last error: ${err.message || err}`
+              : `Lost contact with the update job: ${err.message || err}`);
+            return;
+          }
+          if (includesLocal) setReconnecting(true);
+        }
+      } finally {
+        busy = false;
+        if (!stopped && !done) timer = setTimeout(tick, delay);
+      }
+    }
+
+    void tick();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [active, batch?.id, pollEpoch]);
+
+  async function startUpdate(machineIds) {
+    const ids = Array.from(new Set(machineIds.map(text).filter(Boolean)));
+    if (!ids.length) return;
+    setSubmitting(true);
+    setPanelError("");
+    setNotice("");
+    try {
+      const res = await fetch("/api/updates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ machines: ids, version: "latest" }),
+      });
+      let data = {};
+      try { data = await res.json(); } catch { data = {}; }
+      if (res.status === 409 && data && typeof data.job === "object" && data.job) {
+        // One active batch per manager: follow the existing batch instead of
+        // surfacing a failure — never start a second concurrent batch.
+        setBatch(data.job);
+        setBatchError("");
+        setNotice(`An update batch is already active — following batch ${shortIdentity(data.job.id, 8)} instead.`);
+        await refreshUpdates();
+        return;
+      }
+      if (!res.ok) throw new Error(text(data.error) || `HTTP ${res.status}`);
+      const job = data && typeof data.job === "object" && data.job ? data.job : data;
+      setBatch(job);
+      setBatchError("");
+      await refreshUpdates();
+    } catch (err) {
+      setPanelError(`Update request failed: ${err.message || err}`);
+      await refreshUpdates();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function requestSingleUpdate(machine) {
+    const label = machineLabel(machine);
+    const from = text(machine.current_version) || "unknown";
+    const to = text(machine.latest_version) || "the latest release (resolved on the machine)";
+    const lines = [`Update ${label}: ${from} → ${to}?`];
+    if (text(machine.installed_version) && machine.installed_version !== machine.current_version) {
+      lines.push(`Installed package ${text(machine.installed_version)} differs from the running ${from}.`);
+    }
+    if (machine.id === "local") {
+      lines.push(`${label} updates last: its catalog service restarts, this page reconnects automatically, and existing connections and DNS are preserved.`);
+    } else if (text(machine.via) === "ssh") {
+      lines.push("Runs over the existing SSH connection; the server authorizes the remote updater.");
+    } else {
+      lines.push("Runs over the direct connection using the enrolled management capability.");
+    }
+    lines.push("The update continues in the background if this page closes.");
+    if (!window.confirm(lines.join("\n"))) return;
+    void startUpdate([machine.id]);
+  }
+
+  function requestUpdateAll() {
+    const eligible = (updatesData?.machines || []).filter(machineUpdateEligible).sort(compareUpdateMachines);
+    if (!eligible.length) return;
+    const lines = eligible.map((machine) => `• ${machineLabel(machine)}: ${text(machine.current_version) || "unknown"} → ${text(machine.latest_version) || "latest"}`);
+    const notes = [];
+    if (eligible.some((machine) => machine.id === "local")) {
+      notes.push(`Remote machines update first; ${localName} (this portal's host) updates last and this page reconnects automatically.`);
+    }
+    notes.push("One machine failing does not stop the others; failures are reported per machine.");
+    notes.push("Updates continue in the background if this page closes.");
+    if (!window.confirm(`Update ${eligible.length} machine(s) to the latest release?\n${lines.join("\n")}\n\n${notes.join(" ")}`)) return;
+    void startUpdate(eligible.map((machine) => machine.id));
+  }
+
+  async function revealLocalToken() {
+    const controller = new AbortController();
+    tokenRequestRef.current?.abort();
+    tokenRequestRef.current = controller;
+    setTokenBox({ loading: true });
+    try {
+      const res = await fetch("/api/updates/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        signal: controller.signal,
+      });
+      let data = {};
+      try { data = await res.json(); } catch { data = {}; }
+      if (!res.ok) throw new Error(text(data.error) || `HTTP ${res.status}`);
+      // Held in component state only: never persisted, logged, or echoed elsewhere.
+      if (!controller.signal.aborted) setTokenBox({ token: text(data.token) });
+    } catch (err) {
+      if (err.name !== "AbortError") {
+        setTokenBox({ error: `Could not reveal local token: ${err.message || err}` });
+      }
+    } finally {
+      if (tokenRequestRef.current === controller) tokenRequestRef.current = null;
+    }
+  }
+
+  async function viewBatch(id) {
+    const clean = text(id);
+    if (!clean) return;
+    setBatchError("");
+    try {
+      const res = await fetch(`/api/updates/jobs/${encodeURIComponent(clean)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const job = data && typeof data.job === "object" && data.job ? data.job : data;
+      setBatch(job);
+    } catch (err) {
+      setBatchError(`Could not load batch ${shortIdentity(clean, 8)}: ${err.message || err}`);
+    }
+  }
+
+  const machines = (updatesData?.machines || []).slice().sort(compareUpdateMachines);
+  const eligibleCount = machines.filter(machineUpdateEligible).length;
+  const history = (updatesData?.batches || []).filter((item) => text(item.id) !== text(batch?.id)).slice(0, 5);
+  // One active batch per manager: while any batch is queued/running, no new
+  // update can start (the server answers 409 with the active job; the UI
+  // disables the start controls up front and follows the running batch).
+  const batchActive = (batch && !BATCH_TERMINAL_STATES.has(text(batch.state)))
+    || (updatesData?.batches || []).some((item) => !BATCH_TERMINAL_STATES.has(text(item.state)));
+  // Always name the machine with id='local' from the updates API: it is the host
+  // serving this portal (e.g. ylangsmj), which may differ from the browser URL
+  // host (e.g. dexgem-server.portmap) or the currently selected machine tab.
+  const localMachine = machines.find((machine) => machine.id === "local") || null;
+  const localName = localMachine ? machineLabel(localMachine) : "the host machine";
+  const batchLocalName = text(
+    (batch?.targets || []).find((target) => target.machine_id === "local")?.label,
+  ) || localName;
+
+  if (!active || !updatesAvailable) return null;
+  return (
+    <section className="utility-panel" aria-label="Portmap updates" data-updates-panel>
+      <details className="quick-setup upd-section" open>
+        <summary>
+          <RefreshCw className="button-icon" aria-hidden="true" />
+          {" "}Updates
+        </summary>
+        <div className="quick-setup-body">
+          <div className="upd-toolbar">
+            <button
+              className="action-button"
+              type="button"
+              onClick={() => void refreshUpdates({ check: true })}
+              disabled={checking || submitting}
+              title="Check every machine against the trusted release source"
+            >
+              <RefreshCw className="button-icon" aria-hidden="true" />
+              {" "}{checking ? "Checking…" : "Check updates"}
+            </button>
+            <button
+              className="action-button conn-connect-btn"
+              type="button"
+              onClick={requestUpdateAll}
+              disabled={!eligibleCount || submitting || checking || batchActive}
+              title={batchActive
+                ? "An update batch is already active; only one batch runs at a time"
+                : eligibleCount
+                  ? `Update every eligible machine (${eligibleCount}); ${localName} updates last`
+                  : "No machine currently has an available update it can perform"}
+            >
+              <Play className="button-icon" aria-hidden="true" />
+              {" "}Update all eligible{eligibleCount ? ` (${eligibleCount})` : ""}
+            </button>
+            <button
+              className="action-button upd-token-btn"
+              type="button"
+              onClick={() => (tokenBox?.token ? setTokenBox(null) : void revealLocalToken())}
+              disabled={tokenBox?.loading}
+              title={`Reveal ${localName}'s local management token (the machine serving this portal) for authorizing another manager`}
+            >
+              <Copy className="button-icon" aria-hidden="true" />
+              {" "}{tokenBox?.loading ? `Revealing ${localName} token…` : tokenBox?.token ? `Hide ${localName} token` : `Reveal ${localName} token`}
+            </button>
+          </div>
+          <p className="upd-muted" data-upd-manager-note>
+            Updates are managed by <b>{localName}</b> (id <code>local</code>) — the machine serving this
+            portal — regardless of which machine tab is selected.
+          </p>
+          {tokenBox?.token ? (
+            <div className="upd-token-reveal" data-upd-local-token>
+              <p className="upd-token-warning">
+                Treat this token like a password — it authorizes managing updates on
+                {" "}<b>{localName}</b>{" "} (the machine with id <code>local</code> serving this portal,
+                not the currently selected machine).
+                It is shown only here; this page does not store it.
+              </p>
+              <div className="upd-token-value-row">
+                <code className="upd-token-value" id="upd-local-token-value">{tokenBox.token}</code>
+                <CopyButton targetId="upd-local-token-value" />
+              </div>
+            </div>
+          ) : null}
+          {tokenBox?.error ? <div className="conn-panel-error" role="alert">{tokenBox.error}</div> : null}
+          {panelError ? <div className="conn-panel-error" role="alert">{panelError}</div> : null}
+          {notice ? <p className="upd-reconnect" role="status" data-upd-notice>{notice}</p> : null}
+          {updatesError ? (
+            <div className="empty load-error" role="alert">
+              {updatesError}{" "}
+              <button className="action-button" type="button" onClick={() => void refreshUpdates({ resume: true })}>Retry</button>
+            </div>
+          ) : null}
+          {updatesData === null && !updatesError ? <div className="empty">Loading updates…</div> : null}
+          {updatesData !== null && machines.length === 0 ? (
+            <div className="empty">No machines reported by the updates API.</div>
+          ) : null}
+          {machines.length > 0 ? (
+            <div className="upd-list" role="list">
+              {machines.map((machine) => (
+                <UpdateMachineRow
+                  key={machine.id}
+                  machine={machine}
+                  onUpdate={requestSingleUpdate}
+                  onAuthorized={() => refreshUpdates()}
+                  submitting={submitting}
+                  batchActive={batchActive}
+                />
+              ))}
+            </div>
+          ) : null}
+          {batch ? (
+            <section className="upd-batch" data-updates-batch data-batch-state={text(batch.state)} aria-label="Update batch">
+              <div className="upd-batch-header">
+                <StateBadge state={batch.state} />
+                <span className="upd-batch-id" title={text(batch.id)}>batch {shortIdentity(batch.id, 8)}</span>
+                <span className="upd-muted">
+                  {(batch.targets || []).length} machine(s)
+                  {text(batch.updated_at) ? ` · updated ${formatCheckedAt(batch.updated_at)}` : ""}
+                </span>
+              </div>
+              {reconnecting ? (
+                <div className="upd-reconnect" role="status">
+                  {batchLocalName} is updating itself; waiting for its catalog server to come back…
+                </div>
+              ) : null}
+              {batchError ? (
+                <div className="conn-panel-error" role="alert">
+                  {batchError}{" "}
+                  <button className="action-button" type="button" onClick={() => { setBatchError(""); setPollEpoch((epoch) => epoch + 1); }}>
+                    Retry
+                  </button>
+                </div>
+              ) : null}
+              <BatchTargets batch={batch} />
+              <p className="upd-muted">
+                Updates run on each machine's own updater and continue in the background if this page closes.
+              </p>
+            </section>
+          ) : null}
+          {history.length > 0 ? (
+            <div className="upd-history" aria-label="Recent update batches">
+              <div className="upd-history-label">Recent batches</div>
+              {history.map((item) => (
+                <div className="upd-history-row" key={item.id}>
+                  <StateBadge state={item.state} />
+                  <span className="upd-batch-id" title={text(item.id)}>{shortIdentity(item.id, 8)}</span>
+                  <span className="upd-muted">
+                    {(item.targets || []).length} machine(s)
+                    {text(item.updated_at) ? ` · ${formatCheckedAt(item.updated_at)}` : ""}
+                  </span>
+                  <button className="action-button" type="button" onClick={() => void viewBatch(item.id)}>View</button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </details>
+    </section>
+  );
+}
+
 function CatalogApp() {
   const [activePage, setActivePage] = useState("catalog");
   // null = not yet fetched (loading or failed); [] or [...] = loaded
@@ -1730,21 +2398,56 @@ function CatalogApp() {
     }
   }
 
-  // Explicit refresh: preserves the user's current machine selection.
-  // If /api/machines never loaded (initial failure), retry the full initial load;
-  // the useEffect on selectedMachineId will trigger catalog fetch once it resolves.
-  async function handleRefresh() {
-    if (machines === null) {
-      await loadMachines();
-    } else {
-      await loadMachines({ keepSelection: true });
-      await reloadCatalog();
+  // Poll only while the catalog is visible. Schedule after completion so slow
+  // remote catalogs never accumulate requests; focus/visibility events coalesce.
+  useEffect(() => {
+    if (activePage !== "catalog" || catalogLoading) return;
+    let stopped = false;
+    let running = false;
+    let timer;
+
+    function schedule() {
+      clearTimeout(timer);
+      if (!stopped && document.visibilityState === "visible") {
+        timer = setTimeout(refresh, 15000);
+      }
     }
-  }
+
+    async function refresh() {
+      clearTimeout(timer);
+      if (stopped || running || document.visibilityState !== "visible") return;
+      running = true;
+      try {
+        if (selectedMachineId === null) await loadMachines();
+        else await reloadCatalog();
+      } finally {
+        running = false;
+        schedule();
+      }
+    }
+
+    function visibilityChanged() {
+      if (document.visibilityState === "visible") void refresh();
+      else clearTimeout(timer);
+    }
+
+    schedule();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", visibilityChanged);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", visibilityChanged);
+    };
+  }, [activePage, selectedMachineId, catalogLoading]);
 
   function handleSelectMachine(id) {
     setActivePage("catalog");
-    if (id === selectedMachineId) return;
+    if (id === selectedMachineId) {
+      if (!catalogLoading) void reloadCatalog();
+      return;
+    }
     setSelectedMachineId(id);
   }
 
@@ -1867,7 +2570,10 @@ function CatalogApp() {
   } else if (catalogError) {
     catalogContent = (
       <section className="catalog-tree" data-catalog-tree>
-        <div className="empty load-error">{catalogError}</div>
+        <div className="empty load-error">
+          {catalogError}{" "}
+          <button className="action-button" type="button" onClick={() => reloadCatalog()}>Retry</button>
+        </div>
       </section>
     );
   } else {
@@ -1879,20 +2585,7 @@ function CatalogApp() {
       <header className="app-header">
         <div className="title-row">
           <h1>portmap catalog</h1>
-          {activePage === "catalog" && (
-            <>
-              <AccessStatus catalog={catalog} />
-              <button
-                className="action-button"
-                type="button"
-                title="Refresh machines and catalog"
-                onClick={handleRefresh}
-              >
-                <RefreshCw className="button-icon" aria-hidden="true" />
-                Refresh
-              </button>
-            </>
-          )}
+          {activePage === "catalog" && <AccessStatus catalog={catalog} />}
         </div>
         <CatalogTabs
           machines={machines || []}
@@ -1912,7 +2605,10 @@ function CatalogApp() {
         tabIndex={0}
       >
         {machinesError && machines !== null && (
-          <p className="meta machine-nav-error">{machinesError}</p>
+          <p className="meta machine-nav-error">
+            {machinesError}{" "}
+            <button className="action-button" type="button" onClick={() => loadMachines({ keepSelection: true })}>Retry</button>
+          </p>
         )}
         <ActionMessage message={actionMessage} />
         <ActionLog entries={actionLog} />
@@ -1928,6 +2624,10 @@ function CatalogApp() {
       >
         <ConnectionManager
           canManageConnections={canManageConnections}
+          onMachinesRefresh={() => loadMachines({ keepSelection: true })}
+        />
+        <UpdatesPanel
+          active={activePage === "settings"}
           onMachinesRefresh={() => loadMachines({ keepSelection: true })}
         />
         <DownloadPanel catalog={catalog?.client_access ? null : catalog} />

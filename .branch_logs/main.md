@@ -90,3 +90,12 @@
   Independent regression: 870 passed, 2 integration cases deselected.
 - Frozen archive SHA256:
   `41dd2d75fc86f66b72021c68bc7b1c684a8181d0427cd23d1920c6a4a58c5fdd`.
+- Release `V0.16` (`portmap 0.16.0`) with Web Settings version/build identities,
+  authenticated target-owned updates, durable jobs and remote-first batches.
+  Restore existing roles, DNS and saved connections and verify restarted versions.
+- Preserve compact hostname/transport tabs and completion-paced catalog refresh.
+  Independent regression: 988 passed, 2 integration cases deselected; real
+  isolated Podman API and Chromium Settings smoke passed, as did frozen CLI
+  and safe missing-job worker entry execution.
+- Frozen archive SHA256:
+  `f189d3efbb314731a9fc6cc204a09c91a2d19b6a33f1cc56dc5447d03549c550`.
