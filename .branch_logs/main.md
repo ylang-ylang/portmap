@@ -106,3 +106,10 @@
   verified. Independent regression: 990 passed, 2 integration cases deselected.
 - Frozen archive SHA256:
   `78ede196c96706e2522340359a23c800ddf2581269c7ef667180b83815210dbd`.
+- Release `V0.18` (`portmap 0.18.0`) to remove ambiguous bare Brew lookups and
+  false sudo-validation refusals under an existing NOPASSWD policy. Never grant
+  additional permissions; preserve failure-before-install on actual refusal.
+- Real qualified Brew queries and harmless privilege execution verified;
+  independent regression: 991 passed, 2 integration cases deselected.
+- Frozen archive SHA256:
+  `cbf81910f6f42624ea24e91af0d4ac78d52a5cb99fefad748aa27f12fdae6813`.

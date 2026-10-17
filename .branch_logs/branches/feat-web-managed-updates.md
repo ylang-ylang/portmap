@@ -20,3 +20,13 @@
 - Candidate real SSH smoke passed for both Coder targets: 9.856/9.452-second checks, signed status verification and same-version HTTP409 refusal, without SSH installation commands or elevated test scope.
 - mj's final UI verification is pending this development host's Tailscale browser reauthorization; do not confuse that connectivity prerequisite with target installation readiness.
 - Synchronize the completed V0.16 dev integration before merging the V0.17 corrections.
+- V0.18 follow-through: dexgem completed a signed-API 0.16 → 0.17 update;
+  mujoco exposed ambiguous bare Brew queries in the presence of the obsolete
+  snapshot tap. Qualify info/install/prefix consistently; real qualified queries
+  succeeded while both taps existed, and a package-manager behavior regression
+  now covers the collision without pinning command logs.
+- Fix sudo preflight's credential-validation false negative: existing policy
+  already permits NOPASSWD ALL, while sudo -v can still require validation.
+  Harmless noninteractive execution succeeds; no privilege policy was changed.
+- Independent final V0.18 regression: 991 passed, 2 integration cases deselected.
+- Synchronize the V0.17 integration before merging the final preflight corrections.
