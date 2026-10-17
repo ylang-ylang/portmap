@@ -40,3 +40,4 @@
   unsupported; SSH auto-pairing does not require manual authorization. Verify
   against recorded real mj responses in Chromium. Its follow-up asset transfer
   is blocked by mj SSH becoming unreachable; do not claim this label fix live.
+- Synchronize released V0.18 before integrating the requested frontend hotfix.

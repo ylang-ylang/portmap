@@ -160,3 +160,7 @@
 - Real target checks exceeding the old 8-second limit now succeed through owned
   SSH forwards; signatures and same-version refusal verified on both targets.
   Independent final regression: 990 passed, 2 integration cases deselected.
+- Integrate V0.18: consistently qualify official Brew queries and probe existing
+  sudo execution instead of credential validation. Real collision/permission
+  scenarios verified; no extra privileges granted. Regression: 991 passed,
+  2 integration cases deselected; remove incidental argv/env echo assertions.
