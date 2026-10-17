@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -1028,3 +1029,41 @@ def test_reused_pid_does_not_block_batch_recovery_or_kill_unrelated_process(engi
     finally:
         child.stdin.close()
         child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_explicit_ssh_release_check_outlives_cached_status_deadline(
+    engine, state_dir, ssh_remote, monkeypatch, paired,
+):
+    target, remote_state, _socket, _profile = ssh_remote
+    if paired:
+        token = update_control.local_capability(state_dir=remote_state)
+        update_control._store_credential(target.id, token, state_dir=state_dir)
+    entered = threading.Event()
+    release = threading.Event()
+    original_status = engine.local_status
+
+    def slow_release_check(*, state_dir, check=False):
+        if state_dir == remote_state and check:
+            entered.set()
+            if not release.wait(timeout=5):
+                raise PortmapError("release-check fixture was not released")
+        return original_status(state_dir=state_dir, check=check)
+
+    monkeypatch.setattr(engine, "local_status", slow_release_check)
+    monkeypatch.setattr(update_control, "REMOTE_STATUS_TIMEOUT", 0.01)
+    monkeypatch.setattr(update_control, "REMOTE_CHECK_TIMEOUT", 2.0, raising=False)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(update_control.updates_status, state_dir=state_dir, check=True)
+        try:
+            assert entered.wait(timeout=2)
+            with pytest.raises(FutureTimeout):
+                future.result(timeout=0.2)
+        finally:
+            release.set()
+        result = future.result(timeout=3)
+    remote = next(item for item in result["machines"] if item["id"] == target.id)
+    assert remote["current_version"] == "0.15.0"
+    assert remote["latest_version"] == "0.16.0"
+    assert remote["update_available"] is True
+    assert remote["error"] is None
