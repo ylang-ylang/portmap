@@ -281,6 +281,10 @@ changing installation methods. Homebrew updates use the installation's bound
 Brew executable and skip its automatic post-install setup; existing Portmap
 roles are restored explicitly instead. A legacy installation without the
 update API needs one ordinary, on-machine upgrade to 0.16 or newer first.
+All Brew version, installation and prefix operations name
+`ylang-ylang/tap/portmap` explicitly, even when another tap defines `portmap`.
+Privilege preflight checks existing noninteractive command execution; it does
+not grant sudo rights, modify sudoers or add capabilities.
 
 ### Installation
 
