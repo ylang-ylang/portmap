@@ -19,3 +19,4 @@
 - Include latest_version in unsigned private SSH display status; retain the exclusion of jobs and logs. Add real-socket regressions for paired and unpaired slow checks; explicitly model the old running version in the activation regression.
 - Candidate real SSH smoke passed for both Coder targets: 9.856/9.452-second checks, signed status verification and same-version HTTP409 refusal, without SSH installation commands or elevated test scope.
 - mj's final UI verification is pending this development host's Tailscale browser reauthorization; do not confuse that connectivity prerequisite with target installation readiness.
+- Synchronize the completed V0.16 dev integration before merging the V0.17 corrections.

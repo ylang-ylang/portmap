@@ -153,3 +153,5 @@
   ordering; preserve DNS, roles and connections during explicit restart recovery.
 - Independent non-integration regression: 988 passed, 2 deselected. Real isolated
   rootless Podman deployment serves the candidate API and existing demo correctly.
+- Integrate final unchecked-release UI correction, verified in real Chromium.
+  Frozen V0.16 CLI and safe missing-job update-worker entry smoke passed.
