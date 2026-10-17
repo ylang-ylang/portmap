@@ -29,3 +29,4 @@
   already permits NOPASSWD ALL, while sudo -v can still require validation.
   Harmless noninteractive execution succeeds; no privilege policy was changed.
 - Independent final V0.18 regression: 991 passed, 2 integration cases deselected.
+- Synchronize the V0.17 integration before merging the final preflight corrections.
