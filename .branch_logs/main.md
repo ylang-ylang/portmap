@@ -2,6 +2,37 @@
 
 <!-- git-guard: ref=refs/heads/main -->
 
+- Release `V0.2` from `dev`, including the portmap gateway compose rename,
+  Vite/React catalog UI, host DNS helpers, container DNS forwarding,
+  catalog restart/down/start actions, repo/wt-root/branch grouping, and
+  running/dead branch controls.
+- Release `V0.3` from `dev`, including the host-side worktree agent, container
+  access to HTTP-like portmap URLs, catalog compose restart/down/start actions,
+  submodule discovery across superproject worktrees, corrected submodule branch
+  display semantics, and docs clarifying that portmap manages port resources
+  and endpoint indexes rather than protocol behavior.
+- Release `V0.6` from `dev`: add local client discovery, direct/SSH connections,
+  isolated split DNS and one shared native HTTP gateway with projected catalog
+  links. Verify real Docker/Podman Debian VM access, ordinary .coder SSH
+  configuration, browser routing, private-state cleanup and immediate restart
+  behavior. Homebrew supplies the native CoreDNS and Traefik dependencies.
+- Release `V0.7` from `dev`: distribute an independent `portmap-client` bundle
+  through the catalog web page, with versioned manifests, verified archives,
+  and a user-space installer. Publish the verified Linux amd64/glibc 2.31+
+  artifact; remove client commands and native-client dependencies from the
+  server installation path. Verify frozen execution without Python/Homebrew,
+  real SSH/DNS access and teardown, browser downloads, installed server assets,
+  and 147 focused regressions.
+- Release `V0.8` from `dev`: fix cold-cache downloads through signed GitHub
+  asset-CDN URLs while retaining all redirect trust checks. Preserve V0.7
+  immutability; publish matching 0.8.0 package/client metadata and artifacts.
+  Verify real upstream fetching with no monkeypatches, 99 focused regressions,
+  causal pre-fix failure, and the rebuilt standalone bundle without Python.
+- Release `V0.9` from `dev`: display real terminal download progress in the
+  piped client installer, keep non-terminal output quiet with visible failures,
+  and announce verification/extraction stages. Verify the descriptor boundary
+  with 66 focused regressions and actual archive installation under a PTY.
+  Include the hostname-derived source gateway default.
 - Release `V0.10` (`portmap 0.10.0`) from dev: one command for remote access
   and local publishing, direct DNS-to-remote routing, shared private HTTP port 80
   for SSH/local roles, and separately scoped LAN ingress.
@@ -41,3 +72,44 @@
 - Validate the compiled UI with recorded API data in Chromium, including the
   local-only `本机` badge and keyboard/remote navigation. Keep the final notebook
   badge/manifest synchronization pending its network recovery.
+
+- Release `V0.14` (`portmap 0.14.0`) with portable container HTTP, resolver-file
+  DNS, explicit foreground/background startup and safe standard-entry runtime
+  compatibility. Docker or Podman remains required; host capabilities and
+  low-port policy are never silently changed.
+- Preserve private/public isolation, project DNS consumers and SSH recovery.
+  Eliminate Brew-only Compose wiring and deployment-only runtime repair.
+- Independent source regression: 842 passed with 2 integration cases deselected;
+  tap regression: 9 passed. Frozen Linux amd64 archive SHA256:
+  `42d41062f8e42d42e60da26a4e3f68f962f56ffaeca31eaad6a125d2a00398dd`.
+- Release `V0.15` (`portmap 0.15.0`) to recover persistent state whose group
+  permissions were reset on volume remount, only within an already-private
+  owned scope. Keep foreign/shared paths refused and preserve state contents.
+- Cover persisted agent, client/server and ingress records; reject symlinks,
+  mismatched descriptors, hard-link aliases and parent-traversal proofs.
+  Independent regression: 870 passed, 2 integration cases deselected.
+- Frozen archive SHA256:
+  `41dd2d75fc86f66b72021c68bc7b1c684a8181d0427cd23d1920c6a4a58c5fdd`.
+- Release `V0.16` (`portmap 0.16.0`) with Web Settings version/build identities,
+  authenticated target-owned updates, durable jobs and remote-first batches.
+  Restore existing roles, DNS and saved connections and verify restarted versions.
+- Preserve compact hostname/transport tabs and completion-paced catalog refresh.
+  Independent regression: 988 passed, 2 integration cases deselected; real
+  isolated Podman API and Chromium Settings smoke passed, as did frozen CLI
+  and safe missing-job worker entry execution.
+- Frozen archive SHA256:
+  `f189d3efbb314731a9fc6cc204a09c91a2d19b6a33f1cc56dc5447d03549c550`.
+- Release `V0.17` (`portmap 0.17.0`): align explicit release-check/start request
+  budgets with target operations without slowing cached status probes; report
+  latest version before the first SSH pairing.
+- Real 9.4–9.9-second SSH checks, signed responses and same-version refusal
+  verified. Independent regression: 990 passed, 2 integration cases deselected.
+- Frozen archive SHA256:
+  `78ede196c96706e2522340359a23c800ddf2581269c7ef667180b83815210dbd`.
+- Release `V0.18` (`portmap 0.18.0`) to remove ambiguous bare Brew lookups and
+  false sudo-validation refusals under an existing NOPASSWD policy. Never grant
+  additional permissions; preserve failure-before-install on actual refusal.
+- Real qualified Brew queries and harmless privilege execution verified;
+  independent regression: 991 passed, 2 integration cases deselected.
+- Frozen archive SHA256:
+  `cbf81910f6f42624ea24e91af0d4ac78d52a5cb99fefad748aa27f12fdae6813`.
