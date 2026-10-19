@@ -113,3 +113,4 @@
   independent regression: 991 passed, 2 integration cases deselected.
 - Frozen archive SHA256:
   `cbf81910f6f42624ea24e91af0d4ac78d52a5cb99fefad748aa27f12fdae6813`.
+- Release `V0.19` (`portmap 0.19.0`): automated immutable distribution of the linux-amd64 archive, sha256 checksum and matching release manifest; the Brew tap is updated by the reusable release-distribution workflow in the same run.
