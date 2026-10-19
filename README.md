@@ -679,6 +679,11 @@ target, so reconnecting does not force a disconnect. A different target with
 the same hostname zone is rejected rather than overwriting its DNS mapping.
 The remote catalog cannot choose your workstation's reachable IP.
 
+Reconfiguration preserves the compiled backend URLs in its rollback snapshot.
+Historical SSH routes are not rebuilt from a newer relay-port allocation:
+retiring a disconnected relay must not prevent another saved connection from
+being restored or redirect an old route during rollback.
+
 `connect --tcp` additionally forwards advertised raw TCP ports. UDP and port
 ranges do not travel over ordinary SSH forwards and are marked unsupported.
 SSH apex catalogs project client-visible URLs; application subdomains and

@@ -168,3 +168,8 @@
   accurate SSH auto-pairing/unavailable labels. mj's 0.18 footer was deployed
   and visually verified live; label corrections were verified with recorded
   real responses but their mj transfer is blocked by lost SSH connectivity.
+- Integrate `feat/reconnect-snapshot`: preserve historical compiled SSH backend
+  URLs when upgrading rollback probe metadata, even after relay allocations retire.
+  Affected regression: 18 passed; real mj reconnects now succeed without dropping
+  saved profiles. Complete previously blocked UI deployment and live verification:
+  all four machines show 0.18.0 / UP TO DATE, footer correct, three project URLs200.
