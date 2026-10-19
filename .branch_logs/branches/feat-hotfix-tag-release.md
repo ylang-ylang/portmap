@@ -19,3 +19,12 @@
   runner-owned source: run the release container as the runner UID/GID, matching
   the documented/local deployment build, and remove ineffective safe.directory
   command-line configuration. Actual frozen build verification resumes with this fix.
+- Final independent gate: 1179 passed, 2 integration tests deselected; both release
+  workflows passed checksum-verified Actionlint 1.7.12. Restore the accidentally
+  omitted fake tap routes and verification step id; retain the initial failing
+  gate as historical evidence rather than relabeling it.
+- Actual frozen candidate build and provenance/checksum gate passed as host UID;
+  CLI version and private/public Skill HTTP 200 matched canonical rendered bytes.
+  Read-only V0.19 validation/inspection/Brew verification confirmed the original
+  commit and published archive digest, with no retained artifact needed for retry.
+  No official version tag, Release, tap write or machine upgrade was performed.

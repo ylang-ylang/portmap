@@ -746,6 +746,33 @@ class FakeGitHub(release_brew.GitHub):
                     merge_commit_sha="5" * 40,
                 )
             return self.pull
+        if method == "GET" and route == f"/repos/{TAP_REPO}/pulls/{self.pull_number}/files":
+            return self.pull_files
+        if method == "GET" and route.startswith(f"/repos/{TAP_REPO}/compare/"):
+            return self.compare
+        if method == "GET" and route.endswith("/check-runs"):
+            if len(self.check_runs) > 1:
+                return {"check_runs": self.check_runs.pop(0)}
+            return {"check_runs": self.check_runs[0]}
+        if method == "GET" and route.endswith("/statuses"):
+            return self.statuses
+        if method == "PUT" and route == f"/repos/{TAP_REPO}/pulls/{self.pull_number}/merge":
+            self.writes += 1
+            self.merge_bodies.append(json_body)
+            if json_body["sha"] != self.pull["head"]["sha"]:
+                raise release_brew.ApiError(
+                    f"GitHub API PUT {path} failed with HTTP 409: Head sha mismatch"
+                )
+            self.merged = True
+            assert self.last_push_branch is not None
+            self.pull.update(
+                state="closed", merged_at="2026-10-19T00:00:00Z", merge_commit_sha="5" * 40
+            )
+            self.files[self.default_branch] = self.files[self.last_push_branch]
+            self.branches[self.default_branch] = "5" * 40
+            self.files["5" * 40] = self.files[self.default_branch]
+            return {"merged": True, "sha": "5" * 40}
+        raise AssertionError(f"unexpected request {method} {route}")
 
 
 class FakeSourceGitHub:

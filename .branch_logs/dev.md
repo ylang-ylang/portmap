@@ -216,3 +216,9 @@
 - Build-generated manifests bind the exact source identity and artifact checksums
   without post-build source writes. Preserve published V0.19, checked formula-only
   Brew distribution, explicit-tag retries and user-controlled machine upgrades.
+- Tag-only repair acceptance: 1179 tests passed, 2 integration tests deselected;
+  both workflows passed Actionlint. Real frozen candidate CLI and private/public
+  Skill HTTP passed; real V0.19 was verified read-only without artifacts/rebuild.
+  Sync the existing main/V0.19 refs without changing their objects. Integrating
+  this repair into dev does not publish: only an existing main-history version
+  tag push (or explicit-tag manual retry) enters the release pipeline.

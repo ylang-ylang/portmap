@@ -168,6 +168,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify immutable tag, published release, and required assets
+        id: verify
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TAG: ${{ steps.resolve.outputs.tag }}
