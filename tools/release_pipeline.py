@@ -404,17 +404,19 @@ def plan_run(
     event type — so a re-run of the original push after publication, and a
     dispatch of an already released tag, never rebuild published bytes:
 
-    * ``build``  — no release exists yet (genuine HTTP 404 only): the exact
-      tagged commit is built, smoked and published for the first time. This
-      covers both the tag push and an initial dispatch of a valid existing
-      lowercase main tag whose first publication never completed. An absent
-      historical uppercase release is always refused, never rebuilt.
+    * ``build``  — no release exists after a tag-endpoint 404 and a complete,
+      successful REST release listing: the exact tagged commit is built,
+      smoked and published for the first time. This covers both the tag push
+      and an initial dispatch of a valid existing lowercase main tag whose
+      first publication never completed. An absent historical uppercase
+      release is always refused, never rebuilt.
     * ``verify`` — a release (draft or published) already exists: no source
       checkout or build; the publish job verifies/completes it from the
       anchor manifest and the original attempt's retained artifact.
 
-    A non-404 API failure (403, 5xx, network) is a hard error and is never
-    interpreted as an absent release.
+    API failures (403, 5xx, network), invalid metadata and ambiguous release
+    listings are hard errors and are never interpreted as absence. Planning
+    requires push access (``contents: write``) so REST listings include drafts.
     """
     runner = gh_runner if runner is None else runner
     validated = validate_tag(
@@ -502,39 +504,98 @@ def _gh_repo_slug() -> str:
 
 
 def gh_release_document(tag: str, repo: Path, runner=gh_runner) -> dict | None:
-    """Release metadata from the REST API; ``None`` only on a genuine 404.
+    """Read REST metadata, including drafts, without losing asset digests.
 
-    ``gh release view --json assets`` reports ``digest: null`` on real
-    installations, so asset digests MUST come from the REST endpoint, which
-    does return them. Any non-404 failure (bad credentials, forbidden,
-    5xx, network) is a hard error and is never interpreted as an absent
-    release.
+    The tag endpoint only finds published releases. A genuine 404 triggers a
+    complete paginated listing with exact tag matching, not an absent-release
+    decision. The caller must have push access for that listing to include
+    drafts. Authentication, network, server, malformed-data and ambiguity
+    failures must never allow a rebuild.
     """
     slug = _gh_repo_slug()
-    code, out, err = runner(["api", f"repos/{slug}/releases/tags/{tag}"], repo)
-    if code == 0:
+    not_found = object()
+
+    def request(endpoint: str, *, allow_not_found: bool = False):
+        code, out, err = runner(["api", endpoint], repo)
+        if code != 0:
+            diagnostic = (err or out or "").strip()
+            if allow_not_found and re.search(r"\(HTTP 404\)", diagnostic, re.IGNORECASE):
+                return not_found
+            raise ReleaseError(
+                f"reading release metadata for {tag} at {endpoint} failed "
+                "(authentication, permission, server and network failures never count "
+                f"as an absent release): {diagnostic}"
+            )
         try:
-            document = json.loads(out)
+            return json.loads(out)
         except json.JSONDecodeError as error:
-            raise ReleaseError(f"cannot parse REST release metadata for {tag}: {error}") from error
-        if not isinstance(document, dict):
-            raise ReleaseError(f"REST release metadata for {tag} is not an object")
+            raise ReleaseError(
+                f"cannot parse REST release metadata for {tag} at {endpoint}: {error}"
+            ) from error
+
+    def validate(document: object) -> dict:
+        if (
+            not isinstance(document, dict)
+            or type(document.get("id")) is not int
+            or document["id"] <= 0
+            or not isinstance(document.get("tag_name"), str)
+            or not document["tag_name"]
+            or type(document.get("draft")) is not bool
+            or not isinstance(document.get("assets"), list)
+            or not isinstance(document.get("body", ""), (str, type(None)))
+        ):
+            raise ReleaseError(f"invalid REST release metadata for {tag}")
+        names: set[str] = set()
+        for asset in document["assets"]:
+            if (
+                not isinstance(asset, dict)
+                or not isinstance(asset.get("name"), str)
+                or not asset["name"]
+            ):
+                raise ReleaseError(f"invalid REST release asset metadata for {tag}")
+            if asset["name"] in names:
+                raise ReleaseError(f"ambiguous duplicate REST release asset for {tag}: {asset['name']}")
+            names.add(asset["name"])
         return document
-    diagnostic = (err or out or "").strip()
-    if "http 404" in diagnostic.lower():
-        return None
-    raise ReleaseError(
-        f"reading release metadata for {tag} failed without a 404 (authentication, "
-        f"permission, server and network failures never count as an absent release): {diagnostic}"
-    )
+
+    document = request(f"repos/{slug}/releases/tags/{tag}", allow_not_found=True)
+    if document is not not_found:
+        document = validate(document)
+        if document["tag_name"] != tag:
+            raise ReleaseError(f"REST release metadata tag does not match {tag}")
+        return document
+
+    match = None
+    seen_ids: set[int] = set()
+    page = 1
+    while True:
+        documents = request(f"repos/{slug}/releases?per_page=100&page={page}")
+        if not isinstance(documents, list) or len(documents) > 100:
+            raise ReleaseError(f"invalid REST release listing for {tag} on page {page}")
+        for item in documents:
+            document = validate(item)
+            if document["id"] in seen_ids:
+                raise ReleaseError(f"ambiguous repeated REST release id for {tag}: {document['id']}")
+            seen_ids.add(document["id"])
+            if document["tag_name"] == tag:
+                if match is not None:
+                    raise ReleaseError(f"ambiguous REST releases for tag {tag}")
+                match = document
+        if len(documents) < 100:
+            return match
+        page += 1
 
 
 def gh_download_manifest_asset(tag: str, repo: Path, runner=gh_runner) -> str:
-    """Download the published manifest asset bytes (drafts included)."""
+    """Download the manifest bytes, including drafts via gh's FetchRelease.
+
+    Unlike REST GET /releases/tags/{tag}, ``gh release download <tag>`` also
+    resolves draft pending tags through GraphQL and downloads by asset API URL.
+    """
     with tempfile.TemporaryDirectory(prefix="portmap-anchor-") as temporary:
         dest = Path(temporary)
         code, _, err = runner(
-            ["release", "download", tag, "--pattern", MANIFEST_NAME, "--dir", str(dest), "--clobber"],
+            ["release", "download", tag, "--pattern", MANIFEST_NAME, "--dir", str(dest)],
             repo,
         )
         if code != 0:
@@ -992,6 +1053,8 @@ def publish_release(
             + ", ".join(missing_after)
         )
     if bool(final.get("draft")):
+        # gh release edit uses the same draft-aware FetchRelease lookup as
+        # download, then PATCHes the resolved release ID (not the tag endpoint).
         code, _, err = runner(["release", "edit", tag, "--draft=false"], repo)
         if code != 0:
             raise ReleaseError(
