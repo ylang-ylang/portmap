@@ -97,7 +97,6 @@ def source_tree(tmp_path):
     (root / "src/portmap").mkdir(parents=True)
     (root / "tools").mkdir(parents=True)
     (root / "src/portmap/__init__.py").write_text("", encoding="utf-8")
-    (root / "src/portmap/release.json").write_text('{"version": "0.13.0", "assets": []}\n', encoding="utf-8")
     (root / "pyproject.toml").write_text('[project]\nname = "portmap"\nversion = "0.14.0"\n', encoding="utf-8")
     helper = root / "tools/helper.sh"
     helper.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -111,16 +110,17 @@ def source_tree(tmp_path):
     return root
 
 
-def test_source_tar_carries_built_manifest_and_excludes_local_build_state(source_tree, tmp_path):
+def test_source_tar_is_pristine_and_excludes_local_build_state(source_tree, tmp_path):
     records = controller.source_records(source_tree)
     tar_path = tmp_path / "snapshot.tar.gz"
-    controller.create_source_tar(source_tree, records, "0.14.0", BUILT_MANIFEST, tar_path)
+    controller.create_source_tar(source_tree, records, "0.14.0", tar_path)
 
     with tarfile.open(tar_path) as tar:
         names = tar.getnames()
         assert names and {name.split("/")[0] for name in names} == {"portmap-0.14.0"}
-        member = tar.getmember("portmap-0.14.0/src/portmap/release.json")
-        assert tar.extractfile(member).read().decode("utf-8") == BUILT_MANIFEST
+        # No generated manifest travels inside the source: the repository
+        # carries no packaged release.json for the tar to replace.
+        assert not any(name.endswith("/release.json") for name in names)
         assert "portmap-0.14.0/pyproject.toml" in names
         script = tar.getmember("portmap-0.14.0/tools/helper.sh")
         assert script.mode & 0o111, "staged scripts must stay executable"
@@ -128,8 +128,6 @@ def test_source_tar_carries_built_manifest_and_excludes_local_build_state(source
         assert not any(name.startswith("portmap-0.14.0/dist") for name in names)
         assert not any(".env.production" in name or name.endswith("/.git") for name in names)
 
-    # The repository's public manifest is never modified.
-    assert (source_tree / "src/portmap/release.json").read_text(encoding="utf-8") != BUILT_MANIFEST
 
 
 def test_snapshot_identity_ignores_build_state_but_tracks_source(source_tree):
@@ -315,48 +313,56 @@ def test_preseed_download_cache_is_atomic_and_preserves_neighbors(tmp_path):
     archive = tmp_path / "staged-portmap.tar.gz"
     payload = b"actual built archive"
     archive.write_bytes(payload)
+    manifest = tmp_path / "release.json"
+    manifest.write_text(BUILT_MANIFEST, encoding="utf-8")
     asset = {
         "filename": "portmap-0.14.0-linux-amd64.tar.gz",
         "sha256": hashlib.sha256(payload).hexdigest(),
         "size": len(payload),
     }
 
-    first = deploy_apply.preseed_download_cache(cache, archive, asset)
-    assert first["action"] == "seeded"
+    first = deploy_apply.preseed_download_cache(cache, archive, asset, manifest)
+    assert first["archive"] == "seeded"
+    assert first["manifest"] == "seeded"
     assert (cache / asset["filename"]).read_bytes() == payload
-    assert deploy_apply.preseed_download_cache(cache, archive, asset)["action"] == "present"
+    assert (cache / "release.json").read_bytes() == BUILT_MANIFEST.encode("utf-8")
+    again = deploy_apply.preseed_download_cache(cache, archive, asset, manifest)
+    assert again["archive"] == "present"
+    assert again["manifest"] == "present"
 
     (cache / asset["filename"]).write_bytes(b"corrupt")
-    assert deploy_apply.preseed_download_cache(cache, archive, asset)["action"] == "seeded"
+    (cache / "release.json").write_bytes(b"stale manifest")
+    repaired = deploy_apply.preseed_download_cache(cache, archive, asset, manifest)
+    assert repaired["archive"] == "seeded"
+    assert repaired["manifest"] == "seeded"
     assert (cache / asset["filename"]).read_bytes() == payload
+    assert (cache / "release.json").read_bytes() == BUILT_MANIFEST.encode("utf-8")
     assert neighbor.read_text(encoding="utf-8") == "foreign bytes"
     assert {path.name for path in cache.iterdir() if path.is_file()} == {
-        asset["filename"], "foreign-archive.tar.gz",
+        asset["filename"], "release.json", "foreign-archive.tar.gz",
     }
 
 
-
-
-def test_unpack_source_flattens_replaces_manifest_and_reuses_identical_tar(source_tree, tmp_path):
+def test_unpack_source_flattens_and_reuses_identical_tar(source_tree, tmp_path):
     stage = tmp_path / "stage"
     (stage / "source").mkdir(parents=True)
     records = controller.source_records(source_tree)
     tar_path = stage / "source/portmap-0.14.0-src-ab12.tar.gz"
-    controller.create_source_tar(source_tree, records, "0.14.0", BUILT_MANIFEST, tar_path)
+    controller.create_source_tar(source_tree, records, "0.14.0", tar_path)
     snapshot = {"files": {"source/portmap-0.14.0-src-ab12.tar.gz": controller.digest(tar_path)}}
 
     tree = deploy_apply.unpack_source(stage, snapshot)
     assert (tree / "pyproject.toml").is_file()
     assert (tree / "tools/helper.sh").exists()
     assert (tree / "tools/helper.sh").stat().st_mode & 0o111, "executables survive staging"
-    assert (tree / "src/portmap/release.json").read_text(encoding="utf-8") == BUILT_MANIFEST
+    assert not (tree / "src/portmap/release.json").exists()
 
     tar_path.unlink()  # identical unpacked copy is reused without re-extraction
     assert deploy_apply.unpack_source(stage, snapshot) == tree
 
     records.append({"path": "src/portmap/extra.py", "executable": False, "sha256": hashlib.sha256(b"").hexdigest()})
     (source_tree / "src/portmap/extra.py").write_text("", encoding="utf-8")
-    controller.create_source_tar(source_tree, records, "0.14.0", BUILT_MANIFEST, tar_path)
+    controller.create_source_tar(source_tree, records, "0.14.0", tar_path)
     snapshot["files"]["source/portmap-0.14.0-src-ab12.tar.gz"] = controller.digest(tar_path)
     refreshed = deploy_apply.unpack_source(stage, snapshot)
     assert (refreshed / "src/portmap/extra.py").is_file()

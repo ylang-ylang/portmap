@@ -5,15 +5,16 @@ python3 tools/deploy_portmap.py SSH_TARGET --tap-source PATH
 
 Builds the real frozen Linux archive with the existing pinned builder
 (packaging/portmap.Dockerfile + tools/build_portmap.py), stages a checksummed
-source snapshot whose packaged src/portmap/release.json is replaced by the
-actual built manifest (the repository manifest itself is never modified)
-together with the feature tap's exact Brew helpers and Formula template,
-streams the stage to the target through safely quoted SSH commands, and
-applies it remotely via tools/deploy_apply.py. Re-running with unchanged
-inputs reuses the staged build and only re-verifies the remote installation.
-The controller owns only its labeled build artifacts, its tagged builder
-image and its stage directory; nothing is pruned and no foreign data is
-touched.
+pristine source snapshot together with the built release manifest, the
+feature tap's exact Brew helpers and Formula template, streams the stage to
+the target through safely quoted SSH commands, and applies it remotely via
+tools/deploy_apply.py. Source installs resolve the official published
+manifest for their exact version; the staged manifest is seeded into the
+target's portmap download cache so the deployed snapshot serves its own
+verified archive. Re-running with unchanged inputs reuses the staged build
+and only re-verifies the remote installation. The controller owns only its
+labeled build artifacts, its tagged builder image and its stage directory;
+nothing is pruned and no foreign data is touched.
 """
 from __future__ import annotations
 
@@ -33,7 +34,6 @@ from io import BytesIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_MANIFEST = "src/portmap/release.json"
 TAP_FORMULA = "Formula/portmap.rb"
 APPLY_SCRIPT = "tools/deploy_apply.py"
 BREW_HELPERS = ("portmap_brew_setup.py", "portmap_brew_postinstall.py")
@@ -155,14 +155,12 @@ def build_frozen_archive(engine: str, source: Path, out_dir: Path) -> None:
     )
 
 
-def create_source_tar(
-    source: Path, records: list[dict], version: str, manifest_document: str, destination: Path
-) -> None:
-    """Pack the snapshot source tree.
+def create_source_tar(source: Path, records: list[dict], version: str, destination: Path) -> None:
+    """Pack the pristine snapshot source tree.
 
-    The packaged src/portmap/release.json member is replaced by the actual
-    built manifest so a source install serves exactly the built release; the
-    repository file itself is never modified.
+    No generated manifest is committed to the source: the repository carries
+    no packaged release.json, and the installed source resolves the official
+    published manifest (or the seeded cache entry) for its exact version.
     """
 
     def deterministic(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -175,19 +173,10 @@ def create_source_tar(
     with tarfile.open(destination, "w:gz") as tar:
         for record in records:
             relative = record["path"]
-            if relative == PUBLIC_MANIFEST:
-                payload = manifest_document.encode("utf-8")
-                info = tarfile.TarInfo(f"{top}/{relative}")
-                info.size = len(payload)
-                info.mode = 0o644
-                info.mtime = 0
-                tar.addfile(info, BytesIO(payload))
-                continue
             tar.add(source / relative, arcname=f"{top}/{relative}", recursive=False, filter=deterministic)
 
 
 def stage_is_valid(stage: Path) -> bool:
-    snapshot_path = stage / "snapshot.json"
     if not snapshot_path.is_file():
         return False
     try:
@@ -234,7 +223,7 @@ def restage(
             raise DeployError(f"builder produced an unexpected manifest: {manifest}")
         if digest(build_dir / asset["filename"]) != asset["sha256"]:
             raise DeployError("builder archive checksum does not match its manifest")
-        manifest_document = manifest_path.read_text()
+        manifest_document = manifest_path.read_bytes()
         for name in ("archive", "helpers", "formula", "source"):
             (work / name).mkdir()
         shutil.move(str(build_dir / asset["filename"]), str(work / "archive" / asset["filename"]))
@@ -243,8 +232,8 @@ def restage(
             shutil.copy2(tap_source / "libexec" / name, work / "helpers" / name)
         shutil.copy2(tap_source / TAP_FORMULA, work / "formula" / "template.rb")
         source_tar = work / "source" / f"portmap-{version}-src-{identity[:12]}.tar.gz"
-        create_source_tar(source, records, version, manifest_document, source_tar)
-        shutil.move(str(manifest_path), str(work / "release.json"))
+        create_source_tar(source, records, version, source_tar)
+        (work / "release.json").write_bytes(manifest_document)
         shutil.rmtree(build_dir)
         files = {}
         for path in sorted(work.rglob("*")):
@@ -343,9 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         stage_root = args.stage_root.resolve() if args.stage_root else source / "dist" / "deploy"
         _require_stage_root_outside_snapshot(source, stage_root)
         version = tomllib.loads((source / "pyproject.toml").read_text())["project"]["version"]
-        for relative in (PUBLIC_MANIFEST, APPLY_SCRIPT):
-             if not (source / relative).is_file():
-                 raise DeployError(f"missing {relative} in {source}")
+        if not (source / APPLY_SCRIPT).is_file():
+            raise DeployError(f"missing {APPLY_SCRIPT} in {source}")
         helpers = {}
         for name in BREW_HELPERS:
             helper = tap_source / "libexec" / name

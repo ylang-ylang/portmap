@@ -82,6 +82,11 @@ end
 
 MANIFEST = {
     "version": VERSION,
+    "source": {
+        "repository": SOURCE_REPO,
+        "tag": TAG,
+        "commit": TAG_SHA,
+    },
     "assets": [
         {
             "os": "linux",
@@ -103,6 +108,16 @@ def manifest_document(mutate: Any = None) -> str:
     if mutate is not None:
         mutate(payload)
     return json.dumps(payload)
+
+
+def legacy_manifest_document(mutate: Any = None) -> str:
+    """A historical (through V0.19) manifest: identical but no source block."""
+    def strip_and_mutate(payload: dict[str, Any]) -> None:
+        payload.pop("source")
+        if mutate is not None:
+            mutate(payload)
+
+    return manifest_document(strip_and_mutate)
 
 
 def target_formula(
@@ -273,12 +288,42 @@ def test_parse_release_manifest_accepts_project_manifest() -> None:
     assert manifest["filename"] == f"portmap-{VERSION}-linux-amd64.tar.gz"
     assert manifest["sha256"] == MANIFEST_SHA
     assert manifest["size"] == MANIFEST_SIZE
+    assert manifest["source"] == MANIFEST["source"]
+
+
+def test_parse_release_manifest_accepts_legacy_manifest_without_source() -> None:
+    manifest = release_brew.parse_release_manifest(
+        legacy_manifest_document(), source_repo=SOURCE_REPO, tag=TAG
+    )
+    assert manifest["source"] is None
 
 
 def test_parse_release_manifest_rejects_version_tag_mismatch() -> None:
-    document = manifest_document(lambda payload: payload.update(version="0.18.0"))
-    with pytest.raises(release_brew.InputError, match="does not match tag"):
-        release_brew.parse_release_manifest(document, source_repo=SOURCE_REPO, tag=TAG)
+    for bad_version in ("0.18.0", "0.19.1"):
+        document = manifest_document(
+            lambda payload, version=bad_version: payload.update(version=version)
+        )
+        with pytest.raises(release_brew.InputError, match="does not match tag"):
+            release_brew.parse_release_manifest(document, source_repo=SOURCE_REPO, tag=TAG)
+
+
+@pytest.mark.parametrize(
+    "mutate,match",
+    [
+        (lambda p: p.update(source=None), "source must be a JSON object"),
+        (lambda p: p.update(source=[]), "source must be a JSON object"),
+        (lambda p: p["source"].update(repository="github.com/ylang-ylang/portmap"), "repository"),
+        (lambda p: p["source"].update(tag="V0.18"), "source tag"),
+        (lambda p: p["source"].update(commit="short"), "40-hex"),
+        (lambda p: p["source"].update(commit="B" * 40), "40-hex"),
+        (lambda p: p["source"].pop("commit"), "40-hex"),
+    ],
+)
+def test_parse_release_manifest_rejects_bad_source_blocks(mutate: Any, match: str) -> None:
+    with pytest.raises(release_brew.InputError, match=match):
+        release_brew.parse_release_manifest(
+            manifest_document(mutate), source_repo=SOURCE_REPO, tag=TAG
+        )
 
 
 @pytest.mark.parametrize(
@@ -733,6 +778,29 @@ class FakeGitHub(release_brew.GitHub):
 class FakeSourceGitHub:
     def __init__(self, *, tag_sha: str = TAG_SHA) -> None:
         self.tag_sha = tag_sha
+        self.compare_status = "ahead"
+        self.committed_manifest: str | None = None
+        self.source_pyproject_version: str = VERSION
+        self.source_init_version: str = VERSION
+
+    def _contents(self, path: str, ref: str) -> dict[str, Any]:
+        import base64
+
+        if path == "pyproject.toml":
+            text = f'[project]\nname = "portmap"\nversion = "{self.source_pyproject_version}"\n'
+        elif path == "src/portmap/__init__.py":
+            text = f'__version__ = "{self.source_init_version}"\n'
+        elif path == "src/portmap/release.json":
+            if self.committed_manifest is None:
+                raise release_brew.ApiError(
+                    f"GitHub API GET {path} failed with HTTP 404: Not Found"
+                )
+            text = self.committed_manifest
+        else:
+            raise AssertionError(f"unexpected contents path {path}")
+        # Identity content is always anchored at the immutable peeled commit.
+        assert ref == self.tag_sha, ref
+        return {"encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
 
     def request(
         self,
@@ -746,6 +814,14 @@ class FakeSourceGitHub:
             return {"object": {"sha": self.tag_sha, "type": "commit"}}
         if method == "GET" and route == f"/repos/{SOURCE_REPO}/git/tags/{self.tag_sha}":
             return {"object": {"sha": "4" * 40, "type": "commit"}}
+        if method == "GET" and route.startswith(f"/repos/{SOURCE_REPO}/compare/"):
+            if not route.endswith(f"...{release_brew.MAIN_BRANCH}"):
+                raise AssertionError(f"unexpected compare basehead {route}")
+            return {"status": self.compare_status, "files": []}
+        if method == "GET" and route.startswith(f"/repos/{SOURCE_REPO}/contents/"):
+            file_path = route.removeprefix(f"/repos/{SOURCE_REPO}/contents/")
+            ref = urllib.parse.unquote(path.rsplit("ref=", 1)[1])
+            return self._contents(file_path, ref)
         if method == "GET" and route == f"/repos/{SOURCE_REPO}/releases/tags/{TAG}":
             return {
                 "id": 99,
@@ -1163,6 +1239,123 @@ def test_verify_release_binds_full_identity(monkeypatch: pytest.MonkeyPatch) -> 
     assert spec.archive_size == MANIFEST_SIZE
     assert spec.tag_object_sha == TAG_SHA
     assert spec.commit_sha == TAG_SHA
+    assert spec.manifest_source == MANIFEST["source"]
+
+
+def verify_with_document(monkeypatch: pytest.MonkeyPatch, document: str, source: FakeSourceGitHub):
+    monkeypatch.setattr(release_brew, "download_bytes", lambda url: document.encode())
+    return release_brew.verify_published_release(
+        source,
+        SOURCE_REPO,
+        TAG,
+        asset_wait_seconds=0,
+        poll_seconds=1,
+        digest_of=lambda url: MANIFEST_SHA,
+    )
+
+
+def test_verify_release_binds_manifest_source_to_peeled_tag_and_main_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = verify_with_document(monkeypatch, manifest_document(), FakeSourceGitHub())
+    assert spec.manifest_source == {"repository": SOURCE_REPO, "tag": TAG, "commit": TAG_SHA}
+
+
+def test_verify_release_rejects_manifest_source_commit_off_the_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = manifest_document(
+        lambda payload: payload["source"].update(commit="9" * 40)
+    )
+    with pytest.raises(release_brew.ReleaseError, match="peeled tag commit"):
+        verify_with_document(monkeypatch, document, FakeSourceGitHub())
+
+
+def test_verify_release_rejects_tag_commit_outside_main_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = FakeSourceGitHub()
+    source.compare_status = "diverged"
+    with pytest.raises(release_brew.ReleaseError, match="never merged to main"):
+        verify_with_document(monkeypatch, manifest_document(), source)
+
+
+def test_verify_release_rejects_legacy_tag_commit_outside_main_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dev-only tag with a perfectly anchored legacy manifest is still
+    undistributable: main ancestry is required for both generations."""
+    source = FakeSourceGitHub()
+    source.compare_status = "diverged"
+    source.committed_manifest = legacy_manifest_document()
+    with pytest.raises(release_brew.ReleaseError, match="never merged to main"):
+        verify_with_document(monkeypatch, legacy_manifest_document(), source)
+
+
+def test_verify_release_rejects_mismatched_tagged_pyproject_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = FakeSourceGitHub()
+    source.source_pyproject_version = "0.18.0"
+    with pytest.raises(release_brew.ReleaseError, match="pyproject.toml declares version"):
+        verify_with_document(monkeypatch, manifest_document(), source)
+
+
+def test_verify_release_rejects_mismatched_tagged_init_version_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = FakeSourceGitHub()
+    source.source_init_version = "0.19.1"
+    source.committed_manifest = legacy_manifest_document()
+    with pytest.raises(release_brew.ReleaseError, match="__version__"):
+        verify_with_document(monkeypatch, legacy_manifest_document(), source)
+
+
+def test_verify_release_accepts_legacy_manifest_matching_tag_committed_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = FakeSourceGitHub()
+    source.committed_manifest = legacy_manifest_document()
+    spec = verify_with_document(monkeypatch, legacy_manifest_document(), source)
+    assert spec.manifest_source is None
+
+
+def test_verify_release_rejects_legacy_manifest_without_tag_committed_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(release_brew.ReleaseError, match="no historical"):
+        verify_with_document(monkeypatch, legacy_manifest_document(), FakeSourceGitHub())
+
+
+def test_verify_release_rejects_legacy_manifest_drifting_from_tag_committed_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = FakeSourceGitHub()
+    source.committed_manifest = legacy_manifest_document(
+        lambda payload: payload["assets"][0].update(sha256="e" * 64)
+    )
+    with pytest.raises(release_brew.ReleaseError, match="tag-committed manifest bytes"):
+        verify_with_document(monkeypatch, legacy_manifest_document(), source)
+
+
+def test_update_tap_distributes_legacy_release_anchored_to_tag_committed_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tap = FakeGitHub(default_branch="main", formula=FORMULA)
+    tap.check_runs = [[run(REQUIRED_CHECK, "completed", "success")]]
+    source = FakeSourceGitHub()
+    source.committed_manifest = legacy_manifest_document()
+    assert (
+        run_update_tap(
+            monkeypatch,
+            tap,
+            formula_on_main=FORMULA,
+            source=source,
+            download=lambda url: legacy_manifest_document().encode(),
+        )
+        == 0
+    )
+    assert tap.merged is True
 
 
 def test_update_tap_binds_expected_release_identity(

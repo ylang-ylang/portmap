@@ -11,10 +11,12 @@ Manifest lifecycle (no self-hash loop): a frozen archive cannot embed the
 manifest that pins the archive's own checksum, so manifests resolve in
 order — (1) a ``release.json`` sidecar next to the frozen executable,
 written atomically by the installer from already-validated ``/api/downloads``
-metadata or by the build for bundle smoke tests; (2) the packaged
- ``release.json`` used by source and Brew installs; (3) for raw-archive
-bundles, the pinned published manifest on the project's GitHub release,
-bootstrapped once over bounded HTTPS and cached in the download cache.
+metadata or by the build for bundle smoke tests; (2) the exact official
+published manifest for the running version on the project's GitHub release
+(``V<major>.<minor>`` tag), bootstrapped once over bounded HTTPS and cached
+in the download cache. Source and Brew installs have no packaged manifest:
+they resolve the official published manifest for their exact version, so no
+generated manifest is ever committed to the source tree.
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ from typing import Any, Iterator
 from . import __version__
 
 PROGRAM_NAME = "portmap"
-RELEASE_MANIFEST_PATH = Path(__file__).with_name("release.json")
+SOURCE_REPOSITORY = "ylang-ylang/portmap"
 INSTALL_SCRIPT_PATH = Path(__file__).with_name("download_assets") / "install.sh"
 INSTALL_SCRIPT_CONTENT_TYPE = "text/x-shellscript; charset=utf-8"
 DOWNLOADS_PREFIX = "/downloads/portmap/"
@@ -57,7 +59,11 @@ TRUSTED_SOURCE_PATH_PREFIX = "/ylang-ylang/portmap/releases/download/"
 SUPPORTED_PLATFORM_OS = frozenset({"linux", "darwin"})
 SUPPORTED_PLATFORM_ARCH = frozenset({"amd64", "arm64"})
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+RELEASE_TAG_RE = re.compile(r"V\d+\.\d+")
+COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
 ARCHIVE_FILENAME_RE = re.compile(
     r"portmap-(?P<version>\d+\.\d+\.\d+)-(?P<os>[a-z0-9]+)-(?P<arch>[a-z0-9]+)\.tar\.gz"
 )
@@ -218,6 +224,39 @@ def _parse_asset(entry: Any, *, version: str, index: int) -> ReleaseAsset:
     )
 
 
+def _parse_manifest_source(payload: dict[str, Any], *, version: str) -> dict[str, str]:
+    """Validate the optional generated-identity block of a manifest.
+
+    New manifests carry ``source = {repository, tag, commit}`` recording the
+    exact repository, release tag and source commit they were built from.
+    Historical manifests (through V0.19) simply omit the ``source`` key —
+    an explicit ``source: null`` is malformed, not legacy; omitted blocks
+    stay acceptable because clients resolve them from the tag-pinned
+    official release URL and every asset is checksum-pinned. A present but
+    malformed block is always rejected.
+    """
+    if "source" not in payload:
+        return {}
+    source = payload["source"]
+    if not isinstance(source, dict):
+        raise ValueError("manifest source must be a JSON object")
+    repository = source.get("repository")
+    tag = source.get("tag")
+    commit = source.get("commit")
+    if not isinstance(repository, str) or repository != SOURCE_REPOSITORY:
+        raise ValueError(
+            f"manifest source repository must be {SOURCE_REPOSITORY}: {repository!r}"
+        )
+    major, minor, _patch = version.split(".")
+    if not isinstance(tag, str) or RELEASE_TAG_RE.fullmatch(tag) is None:
+        raise ValueError(f"manifest source tag is malformed: {tag!r}")
+    if tag != f"V{major}.{minor}":
+        raise ValueError(f"manifest source tag {tag} does not match version {version}")
+    if not isinstance(commit, str) or COMMIT_RE.fullmatch(commit) is None:
+        raise ValueError(f"manifest source commit is malformed: {commit!r}")
+    return {"source": source}
+
+
 def parse_release(payload: Any) -> Release:
     """Validate a raw manifest document; raise ValueError on anything malformed."""
     if not isinstance(payload, dict):
@@ -227,6 +266,7 @@ def parse_release(payload: Any) -> Release:
         raise ValueError(f"manifest version is malformed: {version!r}")
     if version != __version__:
         raise ValueError(f"manifest version {version} does not match portmap {__version__}")
+    _parse_manifest_source(payload, version=version)
     assets_payload = payload.get("assets")
     if not isinstance(assets_payload, list) or not assets_payload:
         raise ValueError("manifest assets must be a non-empty list")
@@ -248,7 +288,7 @@ def parse_release(payload: Any) -> Release:
 def published_manifest_url() -> str:
     """The pinned published manifest for the running version (V<major>.<minor> tag)."""
     tag = "V" + ".".join(__version__.split(".")[:2])
-    return f"https://github.com/ylang-ylang/portmap/releases/download/{tag}/{RELEASE_MANIFEST_CACHE_NAME}"
+    return f"https://github.com/{SOURCE_REPOSITORY}/releases/download/{tag}/{RELEASE_MANIFEST_CACHE_NAME}"
 
 
 def frozen_manifest_sidecar_path() -> Path | None:
@@ -274,13 +314,13 @@ def _read_release_document(path: Path) -> tuple[str, Release | None]:
 
 
 def remote_release_state() -> tuple[str, Release | None]:
-    """Bootstrap the pinned published manifest for bundles without a local one.
+    """Bootstrap the pinned published manifest for installs without a sidecar.
 
-    Raw-archive users have no installer-written sidecar and no packaged
-    manifest, so the exact published document for the running version is
-    fetched once over bounded HTTPS from the trusted release host, strictly
-    validated, and cached for offline reuse. Invalid documents are never
-    cached."""
+    Source installs, Brew installs and raw-archive users have no
+    installer-written sidecar, so the exact official published document for
+    the running version is fetched once over bounded HTTPS from the trusted
+    release host, strictly validated, and cached for offline reuse. Invalid
+    documents are never cached."""
     url = published_manifest_url()
     cache_path = download_cache_dir() / RELEASE_MANIFEST_CACHE_NAME
     if cache_path.is_file():
@@ -300,7 +340,7 @@ def remote_release_state() -> tuple[str, Release | None]:
     except OSError as exc:
         return (
             "portmap downloads are not published for this build "
-            f"(no local release manifest; fetching {url} failed: {exc})",
+            f"(fetching the official manifest {url} failed: {exc})",
             None,
         )
     try:
@@ -320,19 +360,14 @@ def remote_release_state() -> tuple[str, Release | None]:
 
 def release_state() -> tuple[str, Release | None]:
     """Resolve the release manifest. Returns (reason, release); release is
-    None when the server cannot honestly publish portmap downloads. Local
-    manifests (frozen sidecar first, then the packaged one) win; a present
-    but invalid local manifest is an honest failure, never silently replaced
-    by network data. Bundles with no local manifest bootstrap the pinned
-    published manifest remotely."""
-    candidates: list[Path] = []
+    None when the server cannot honestly publish portmap downloads. A frozen
+    sidecar wins and a present but invalid sidecar is an honest failure,
+    never silently replaced by network data. Installs without a sidecar
+    (source/Brew installs and raw-archive bundles) bootstrap the exact
+    official published manifest for the running version, cached locally."""
     sidecar = frozen_manifest_sidecar_path()
-    if sidecar is not None:
-        candidates.append(sidecar)
-    candidates.append(RELEASE_MANIFEST_PATH)
-    for candidate in candidates:
-        if candidate.is_file():
-            return _read_release_document(candidate)
+    if sidecar is not None and sidecar.is_file():
+        return _read_release_document(sidecar)
     return remote_release_state()
 
 

@@ -112,18 +112,20 @@ def valid_manifest_payload() -> dict:
 
 
 def publish_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload) -> Path:
-    manifest_path = tmp_path / "release.json"
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-    monkeypatch.setattr("portmap.downloads.RELEASE_MANIFEST_PATH", manifest_path)
-    return manifest_path
+    """Install a local manifest as the bundle sidecar: the only local
+    manifest candidate (source installs bootstrap the official manifest)."""
+    sidecar = tmp_path / "bundle" / "release.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr("portmap.downloads.frozen_manifest_sidecar_path", lambda: sidecar)
+    return sidecar
 
 
 def unpublish_manifest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
-        "portmap.downloads.RELEASE_MANIFEST_PATH",
-        tmp_path / "absent-release.json",
+        "portmap.downloads.frozen_manifest_sidecar_path",
+        lambda: tmp_path / "absent-release.json",
     )
-
 
 def make_asset(**overrides) -> ReleaseAsset:
     return parse_release({"version": VERSION, "assets": [asset_payload(**overrides)]}).assets[0]
@@ -295,6 +297,51 @@ def test_parse_release_rejects_malformed_manifests(mutate, match: str) -> None:
         parse_release(payload)
 
 
+def test_parse_release_accepts_generated_source_block() -> None:
+    payload = valid_manifest_payload()
+    payload["source"] = {
+        "repository": "ylang-ylang/portmap",
+        "tag": "V" + VERSION.rsplit(".", 1)[0],
+        "commit": "b" * 40,
+    }
+    release = parse_release(payload)
+    assert release.version == VERSION
+
+
+@pytest.mark.parametrize(
+    "mutate, match",
+    [
+        pytest.param(lambda p: p.update(source=None), "source must be", id="explicit-null"),
+        pytest.param(lambda p: p.update(source=[]), "source must be", id="source-not-object"),
+        pytest.param(
+            lambda p: p.update(source={"repository": "evil/portmap", "tag": "V0.19", "commit": "b" * 40}),
+            "repository",
+            id="foreign-repository",
+        ),
+        pytest.param(
+            lambda p: p.update(source={"repository": "ylang-ylang/portmap", "tag": "V0.18", "commit": "b" * 40}),
+            "does not match version",
+            id="tag-version-mismatch",
+        ),
+        pytest.param(
+            lambda p: p.update(source={"repository": "ylang-ylang/portmap", "tag": "V0.19", "commit": "abc"}),
+            "commit is malformed",
+            id="short-commit",
+        ),
+    ],
+)
+def test_parse_release_rejects_malformed_source_blocks(mutate, match: str) -> None:
+    payload = valid_manifest_payload()
+    payload["source"] = {
+        "repository": "ylang-ylang/portmap",
+        "tag": "V" + VERSION.rsplit(".", 1)[0],
+        "commit": "b" * 40,
+    }
+    mutate(payload)
+    with pytest.raises(ValueError, match=match):
+        parse_release(payload)
+
+
 def test_validate_trusted_source_url_hosts() -> None:
     validate_trusted_source_url(
         f"https://github.com/ylang-ylang/portmap/releases/download/V0.7/{LINUX_ASSET}"
@@ -396,7 +443,7 @@ def test_release_state_reports_malformed_manifest(
     assert download_info()["available"] is False
 
 
-# --- manifest lifecycle: sidecar, packaged, remote bootstrap -----------------
+# --- manifest lifecycle: sidecar, remote bootstrap ---------------------------
 
 
 def use_frozen_sidecar(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -406,21 +453,23 @@ def use_frozen_sidecar(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return sidecar
 
 
-def test_frozen_sidecar_wins_over_packaged_manifest(
+def test_frozen_sidecar_wins_over_cached_bootstrap_manifest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     sidecar = use_frozen_sidecar(monkeypatch, tmp_path)
     archive = fake_portmap_archive()
     asset = asset_payload(sha256=sha256_hex(archive), size=len(archive))
     sidecar.write_text(json.dumps({"version": VERSION, "assets": [asset]}), encoding="utf-8")
-    # The packaged manifest disagrees; the sidecar must win.
-    publish_manifest(
-        monkeypatch, tmp_path, {"version": VERSION, "assets": [asset_payload(os="darwin", arch="arm64")]}
-    )
+    # A previously bootstrapped official manifest sits in the shared cache and
+    # disagrees; the local sidecar must win without touching the network.
+    cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
+    cache.mkdir(parents=True, exist_ok=True)
+    cached = {"version": VERSION, "assets": [asset_payload(os="darwin", arch="arm64")]}
+    (cache / "release.json").write_text(json.dumps(cached), encoding="utf-8")
     message, release = release_state()
     assert release is not None
     assert release.assets[0].filename == asset["filename"]
-
+    assert (cache / "release.json").read_text(encoding="utf-8") == json.dumps(cached)
 
 def test_corrupt_sidecar_is_refused_without_network(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

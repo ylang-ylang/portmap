@@ -57,6 +57,15 @@ gitGraph TB:
 - Every shipped change, including a small hotfix, must use the immutable release
   and Homebrew distribution workflow. Use `feat/hotfix-*` for small fixes under
   the same protected branch graph; “hotfix” does not mean live patching.
+- Maintainers prepare matching source versions, compiled catalog assets and the
+  protected main release merge/tag before pushing. Only a GitHub version-tag
+  push starts automatic publication; ordinary main/dev/feat pushes do not.
+- CI validates the exact existing tag commit against remote main history and
+  source version, then tests, builds and distributes it. CI must not allocate
+  versions, merge branches, write main/dev commits, or create/move tags.
+- Generated release manifests belong to verified Release attachments, not a
+  post-build source commit. Explicit-tag retries must reuse published bytes
+  and remain valid after main advances or temporary build artifacts expire.
 - Never overwrite Python modules, JavaScript, CSS, or other files inside users'
   installed Portmap packages as a deployment method.
 - A release is complete only after its artifacts are published and the tap formula

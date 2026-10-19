@@ -360,10 +360,12 @@ and musl/Alpine are not published. The Linux workflow below is the supported
 default-port workflow; other resolver adapters do not imply verified port-80
 support on those platforms.
 
-### One-command Source Snapshot Deployment
+### Isolated Source Snapshot Validation
 
-Deploy the current checkout over ordinary SSH, including workspaces without
-systemd. This path does not depend on Coder or Kubernetes:
+The historical source-snapshot tool is for explicitly authorized, disposable
+development environments only. It is not a supported way to ship updates or
+hotfixes to user machines; those must use the tagged release and Brew workflow.
+For isolated validation over ordinary SSH (without Coder or Kubernetes):
 
 ```bash
 python3 tools/deploy_portmap.py SSH_TARGET \
@@ -833,16 +835,40 @@ publishing state is not exposed. Teardown retains cached release archives.
 
 ### Automated releases and hotfixes
 
-Every shipped update must use `.github/workflows/release.yml`, followed by
-`.github/workflows/release-distribution.yml`. Push integrated changes to GitHub's
-`dev` branch to trigger the release pipeline; ordinary `feat/*` pushes do not publish.
-In the maintainer checkout, `upstream` is GitHub and `origin` is the internal Gitea
-remote: after the normal feature-to-dev merge, use `git push upstream dev`.
-Pushing only to the internal mirror does not trigger GitHub Actions.
-The pipeline builds and verifies the package, commits the exact generated assets
-and manifest on a release-preparation feature branch, merges through `dev` into
-`main`, and creates the immutable `V<major>.<minor>` release tag. It must refuse
-concurrent branch changes rather than force-push over them.
+Every shipped update uses `.github/workflows/release.yml`, followed by
+`.github/workflows/release-distribution.yml`. Only pushing an existing
+`V<major>.<minor>` version tag to GitHub starts automatic publication.
+Ordinary `main`, `dev`, and `feat/*` pushes do not publish; pushing to the
+internal Gitea mirror does not trigger GitHub Actions.
+
+Maintainers choose the version, update `pyproject.toml`, `src/portmap/__init__.py`
+and `uv.lock`, and run `npm ci && npm run build` before committing the release
+source. Commit the generated catalog/Skill assets as well: Brew uses the tag's
+source archive, so CI rejects stale generated assets rather than silently
+shipping different source-install and standalone UIs. Integrate through
+`feat/*` → `dev` → the protected tagged merge into `main`.
+
+For example, **after** the protected release merge and existing `V0.20` tag
+have been prepared locally with source version `0.20.0`, publish them with:
+
+```bash
+git push --atomic upstream main refs/tags/V0.20
+```
+
+Here `upstream` is GitHub and `origin` is the internal Gitea remote.
+CI validates the tag's exact peeled commit against remote `main` history and
+checks the source version before executing that source. It builds that exact
+commit, not the latest main HEAD. Main may advance without invalidating a
+legitimate retry. CI never chooses/increments versions, commits generated files,
+merges branches, or creates/moves tags.
+
+`release.json` is generated **after** the archive is built and hashed. It is a
+Release attachment, not a generated file committed back into the tagged source.
+Its source identity binds the repository, tag and exact commit; its asset records
+bind archive names, sizes and SHA-256 digests. Version-pinned source/Brew installs
+resolve their official published manifest, while installed standalone bundles
+retain the validated sidecar/cache behavior. Historical published releases remain
+immutable; legacy manifests are verified against their original tagged metadata.
 
 The final job downloads the **source archive actually used by the Brew formula**,
 computes its SHA-256, and opens or reuses a formula-only PR in
@@ -851,9 +877,15 @@ checks before normal merging. A queued PR is not a completed release: absent
 credentials, failed checks, timeouts or merge failures keep the workflow failed.
 Retry the failed Actions jobs to complete distribution; never rewrite a published
 tag or replace its assets.
-For a full-pipeline retry, the `source_sha` dispatch input identifies the original
-dev commit; leaving it empty selects current dev. A published release whose only
-remaining step is Brew can be retried with the distribution workflow's `tag` input.
+For a full-pipeline retry, supply the existing version tag explicitly:
+
+```bash
+gh workflow run release.yml --repo ylang-ylang/portmap -f tag=V0.20
+```
+
+The retry verifies and reuses complete published assets even when temporary CI
+artifacts have expired; it never rebuilds or replaces an already published package.
+If only Brew remains, the distribution workflow also accepts the same `tag` input.
 The publisher uploads assets to a draft before publishing. GitHub's optional
 repository-level release immutability setting adds protection against out-of-band
 administrator edits; this automation itself never overwrites tags or assets.
