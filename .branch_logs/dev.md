@@ -173,3 +173,14 @@
   Affected regression: 18 passed; real mj reconnects now succeed without dropping
   saved profiles. Complete previously blocked UI deployment and live verification:
   all four machines show 0.18.0 / UP TO DATE, footer correct, three project URLs200.
+- Integrate `feat/machine-connection-settings`: one Settings Machines area combines
+  connection controls and update/version facts per domain; duplicate profiles stay
+  editable within one card. Known failed remotes move behind an unlink icon beside
+  Settings and into a collapsed Settings group.
+- Real mj deployment verifies desktop/mobile same-row icon, disclosure actions,
+  four machine cards, duplicate dexgem profile preservation, Add/Cancel and mujoco
+  project access. Browser-only injections verify failure/recovery transitions and
+  recovery from an initial list502 through shared health data without manual Retry.
+- Restore official0.18 on mujoco and its mj connection; dexgem deployment remains
+  externally blocked by failed Coder workspace startup/no agents. No persistence
+  template changes or deferred Tailscale DNS redesign included.

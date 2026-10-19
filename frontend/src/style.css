@@ -913,16 +913,27 @@ pre {
 
 /* Machine navigation tabs */
 .machine-nav {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
   margin: 10px 0 0;
-  overflow-x: auto;
-  /* ensure inner buttons don't wrap on narrow screens */
-  -webkit-overflow-scrolling: touch;
+}
+
+.machine-nav-tabs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
 }
 
 .machine-nav-scroll {
   display: flex;
   gap: 4px;
-  min-width: max-content;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .machine-tab {
@@ -992,6 +1003,124 @@ pre {
   color: #9f1d16;
   font-size: 13px;
   margin: 6px 0 0;
+}
+
+/* Disconnected machine group in nav */
+.machine-nav-disconnected {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #b91c1c;
+}
+
+.machine-nav-disconnected > summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 34px;
+  height: 34px;
+  list-style: none;
+  border: 1px solid #c8d3dc;
+  background: #eef2f6;
+}
+
+.machine-nav-disconnected > summary::-webkit-details-marker {
+  display: none;
+}
+
+.machine-nav-disconnected > summary:focus-visible {
+  outline: 2px solid #0ea5e9;
+  outline-offset: 2px;
+}
+
+.machine-nav-disconnected > summary,
+.machine-settings-disconnected > summary {
+  cursor: pointer;
+  padding: 8px;
+  font-weight: 600;
+}
+
+.machine-disconnected-items {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  min-width: 180px;
+  max-width: calc(100vw - 48px);
+  padding: 6px;
+  border: 1px solid #c8d3dc;
+  background: #ffffff;
+  box-shadow: 0 4px 12px #0002;
+  gap: 4px;
+}
+
+.machine-tab-failed-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #dc2626;
+  flex-shrink: 0;
+}
+
+/* Machine management: unified machine card (settings panel) */
+.machine-mgr-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.machine-card-list {
+  display: grid;
+  gap: 10px;
+}
+
+.machine-card {
+  border: 1px solid #d1dae3;
+  border-radius: 4px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.machine-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #eef2f6;
+  border-bottom: 1px solid #d1dae3;
+}
+
+.machine-card-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: #283544;
+}
+
+.machine-card-conns {
+  /* connection rows inside card */
+}
+
+.machine-card-conn-row {
+  border-bottom: 1px solid #edf1f5;
+}
+
+.machine-card-conn-row:last-child {
+  border-bottom: 0;
+}
+
+.machine-card-upd {
+  border-top: 1px solid #e6ebf1;
+  background: #f8fafc;
+}
+
+/* Remove outer border from upd-row inside a card (card provides it) */
+.machine-card-upd .upd-row {
+  border-bottom: 0;
+  background: transparent;
 }
 
 
@@ -2067,6 +2196,44 @@ pre {
 
   .machine-tab-unavailable {
     color: #7d8997;
+  }
+
+  .machine-nav-disconnected {
+    color: #fca5a5;
+  }
+
+  .machine-nav-disconnected > summary,
+  .machine-disconnected-items {
+    background: #202832;
+    border-color: #2b3540;
+  }
+
+
+  .machine-card {
+    background: #151b22;
+    border-color: #2b3540;
+  }
+
+  .machine-card-header {
+    background: #202832;
+    border-bottom-color: #2b3540;
+  }
+
+  .machine-card-name {
+    color: #eef2f6;
+  }
+
+  .machine-card-conn-row {
+    border-bottom-color: #2b3540;
+  }
+
+  .machine-card-upd {
+    border-top-color: #2b3540;
+    background: #171d23;
+  }
+
+  .machine-card-upd .upd-row {
+    background: transparent;
   }
 
   .machine-via-direct {

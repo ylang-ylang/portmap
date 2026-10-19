@@ -237,9 +237,14 @@ Neither publishes projects nor enables boot services automatically.
 
 Open a trusted server's catalog and select **Settings → Download portmap**,
 or run its installer below. **Settings** is the last tab after the machines;
-in the private portal it also contains **Connections**. Service empty states
-stay inside machine tabs. Machine tabs show the hostname and an SSH/direct badge
-for remote connections; full addresses remain in **Settings → Connections**.
+in the private portal it also contains **Machines**, combining connection management
+and version/update controls in one card per machine. Machine tabs show the hostname
+and an SSH/direct badge; full connection addresses remain in **Settings → Machines**.
+Known unreachable or disconnected remotes move behind the small unlink icon beside
+**Settings**; clicking it opens the disconnected-machine list. Settings keeps the
+same machines in a collapsed **Disconnected machines** group. Live connection checks
+run while the page is visible; unprobed machines are not treated as failed, and recovered machines return
+to the normal group. Multiple saved profiles for one domain share a machine card.
 The subtle bottom-right footer shows the running catalog service version,
 not the latest release or the selected remote machine's version. It refreshes
 when the page returns to the foreground and after a local managed update;
@@ -247,9 +252,9 @@ an unavailable version endpoint leaves the footer hidden instead of guessing.
 
 ### Web-managed updates
 
-The private portal's **Settings → Updates** lists this machine and its saved
-connections, including running version, installed version, build fingerprint,
-installation method and update readiness. **Check updates** checks the trusted
+The private portal's **Settings → Machines** lists this machine and its saved
+connections, including connection actions, running version, installed version,
+build fingerprint, installation method and update readiness. **Check updates** checks the trusted
 Portmap release source. Update one eligible machine or use **Update all eligible**;
 the machine serving the portal runs last, so restarting it does not interrupt
 the other targets.
