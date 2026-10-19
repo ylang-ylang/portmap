@@ -12,8 +12,8 @@ name: release
 #     Lowercase versions must be above 0.19.0; no alternate tags for legacy versions.
 #
 # Mode selection (never by event type): after trusted validation, the
-# pipeline asks GitHub whether a release already exists for the tag (a
-# genuine HTTP 404 is the ONLY absence; 403/5xx/network fail the run).
+# pipeline inspects the actual release state, including drafts visible only
+# with push access (403/5xx/network failures never mean absence).
 #   - no release -> mode=build for lowercase tags only: checkout/build/smoke
 #     the exact tagged commit, then publish (draft -> complete -> publish).
 #     A missing historical uppercase release is refused, never rebuilt.
@@ -24,15 +24,18 @@ name: release
 #
 # Trust bootstrap (validation BEFORE any event-tag code runs):
 #   * Orchestration (tools/release_pipeline.py) is NEVER taken from the event
-#     tag. Job 1 resolves the protected dev head SHA through the fixed GitHub
-#     API with inline stdlib code and checks out that revision (full clone,
-#     with tags) as the trusted checkout.
+#     tag. The plan job resolves the protected dev head SHA through the fixed
+#     GitHub API with inline stdlib code and checks out that revision (full
+#     clone, with tags) as the trusted checkout.
 #   * `plan-run` then peels the event tag on that trusted checkout and
 #     refuses it unless the peeled commit belongs to remote main history and
 #     the committed source versions (pyproject.toml, src/portmap/__init__.py
 #     and, when present, uv.lock) are exactly <major>.<minor>.<patch>. Only after
 #     that does the tagged source checkout (npm/pytest/docker) execute, in a
 #     read-only build job (contents: read) with no persisted credentials.
+#     Planning has contents: write only to read draft release metadata; it
+#     never checks out tagged source or executes tests/builds/artifacts.
+#     Build and publish reuse the same captured automation SHA.
 #   * The publish job revalidates the same tag identity against main history
 #     inside tools/release_pipeline.py before any mutation.
 #
@@ -57,10 +60,10 @@ name: release
 #     not drift during the build job (exact-tag-build), otherwise the run
 #     fails before the frozen build.
 #
-# Jobs: build (contents: read) -> publish (contents: write) -> distribution
-# (reusable Brew workflow, dedicated HOMEBREW_TAP_TOKEN secret). The workflow
-# only reports success after the Brew distribution job has finished; a failed
-# Brew run is retried by dispatching the same tag again.
+# Jobs: plan (contents: write, trusted metadata inspection only) -> build
+# (contents: read) -> publish (contents: write) -> distribution (reusable Brew
+# workflow, dedicated HOMEBREW_TAP_TOKEN secret). The workflow only reports
+# success after Brew finishes; retry failed distribution with the same tag.
 
 on:
   push:
@@ -86,9 +89,11 @@ env:
   PIPELINE: trusted/tools/release_pipeline.py
 
 jobs:
-  build:
-    name: Validate tag and plan the run (build only when unpublished)
+  plan:
+    name: Validate tag and plan the run
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write # GitHub only lists drafts for tokens with push access.
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
       version: ${{ steps.plan.outputs.version }}
@@ -157,9 +162,9 @@ jobs:
       # Bootstrap gate: peel the event tag, require the peeled commit to be
       # part of origin/main history and the committed source versions to be
       # exactly major.minor.patch — BEFORE the tagged source is ever checked out.
-      # The run mode then comes from the ACTUAL release state (404-only
-      # absence): build only when nothing is published yet, so re-runs of an
-      # already released tag never regenerate published bytes.
+      # The run mode then comes from the ACTUAL release state, including
+      # drafts: build only when no release exists, so retries of either
+      # draft or published releases never regenerate their bytes.
       - name: Validate the tag and select the run mode
         id: plan
         env:
@@ -181,20 +186,54 @@ jobs:
                   out.write(f"{key}={plan[key]}\n")
           PY
 
-      # Everything below only runs when NO release exists for the tag yet
-      # (mode=build): the exact tagged commit is built for the first time.
-      # Existing drafts/published releases skip straight to the publish job.
-      - name: Check out the validated tagged commit
-        if: steps.plan.outputs.mode == 'build'
+  build:
+    name: Build only when no release exists
+    needs: plan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ needs.plan.outputs.tag }}
+      version: ${{ needs.plan.outputs.version }}
+      commit: ${{ needs.plan.outputs.commit }}
+      historical: ${{ needs.plan.outputs.historical }}
+      mode: ${{ needs.plan.outputs.mode }}
+      automation_sha: ${{ needs.plan.outputs.automation_sha }}
+    steps:
+      # Keep this job successful in verify mode: publish still needs its
+      # aliased plan outputs even when every build-only step is skipped.
+      - name: Record the selected run mode
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+        run: echo "Release mode=$MODE"
+
+      # Reuse the exact approved orchestration revision captured by plan.
+      # No source, dependency, test or artifact code gets write permission.
+      - name: Check out trusted build orchestration
+        if: needs.plan.outputs.mode == 'build'
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: ylang-ylang/portmap
-          ref: ${{ steps.plan.outputs.commit }}
+          ref: ${{ needs.plan.outputs.automation_sha }}
+          path: trusted
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # Everything below only runs when NO release exists for the tag yet
+      # (mode=build): the exact validated commit is built for the first time.
+      # Existing drafts/published releases go straight to the publish job.
+      - name: Check out the validated tagged commit
+        if: needs.plan.outputs.mode == 'build'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ylang-ylang/portmap
+          ref: ${{ needs.plan.outputs.commit }}
           path: source
           persist-credentials: false
 
       - name: Set up Node
-        if: steps.plan.outputs.mode == 'build'
+        if: needs.plan.outputs.mode == 'build'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -202,7 +241,7 @@ jobs:
           cache-dependency-path: source/package-lock.json
 
       - name: Rebuild the catalog from the tagged source
-        if: steps.plan.outputs.mode == 'build'
+        if: needs.plan.outputs.mode == 'build'
         working-directory: source
         run: |
           npm ci
@@ -215,11 +254,11 @@ jobs:
       # bundle would ship a new UI while Brew/source installs silently ship
       # a stale one. Maintainers run npm ci && npm run build before tagging.
       - name: Require the rebuilt catalog to equal the tagged tree
-        if: steps.plan.outputs.mode == 'build'
+        if: needs.plan.outputs.mode == 'build'
         run: python3 "$PIPELINE" --repo-root source check-catalog
 
       - name: Run the full non-integration test suite
-        if: steps.plan.outputs.mode == 'build'
+        if: needs.plan.outputs.mode == 'build'
         working-directory: source
         run: |
           # Ubuntu 24.04 supplies Python 3.12 and Git; run tests as the runner,
@@ -232,15 +271,15 @@ jobs:
       # TRACKED file (untracked node_modules/dist stay usable); the frozen
       # archive is built from the exact tagged tree or not at all.
       - name: Reject tracked source drift before the frozen build
-        if: steps.plan.outputs.mode == 'build'
+        if: needs.plan.outputs.mode == 'build'
         run: python3 "$PIPELINE" --repo-root source check-source
 
       - name: Build the frozen linux-amd64 archive with provenance
-        if: steps.plan.outputs.mode == 'build'
+        if: needs.plan.outputs.mode == 'build'
         working-directory: source
         env:
-          TAG: ${{ steps.plan.outputs.tag }}
-          COMMIT: ${{ steps.plan.outputs.commit }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
         run: |
           # The Dockerfile only pins the build environment (no COPY), so the
           # build context is the small packaging directory.
@@ -255,18 +294,18 @@ jobs:
             --release-tag "$TAG" --source-commit "$COMMIT"
 
       - name: Validate the built manifest against the tag identity
-        if: steps.plan.outputs.mode == 'build'
+        if: needs.plan.outputs.mode == 'build'
         env:
-          TAG: ${{ steps.plan.outputs.tag }}
-          COMMIT: ${{ steps.plan.outputs.commit }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
         run: |
           python3 "$PIPELINE" --repo-root source check-build \
             --tag "$TAG" --commit "$COMMIT" --assets-dir source/dist
 
       - name: Runtime-gate the actual frozen artifact
-        if: steps.plan.outputs.mode == 'build'
+        if: needs.plan.outputs.mode == 'build'
         env:
-          VERSION: ${{ steps.plan.outputs.version }}
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           # Execute the built binary once on an owned loopback listener:
           # --version must match the plan and its catalog server must serve
@@ -280,7 +319,7 @@ jobs:
       # interrupted draft is completed from ITS OWN attempt's artifact, never
       # from a rebuild with different bytes.
       - name: Retain the release assets
-        if: steps.plan.outputs.mode == 'build'
+        if: needs.plan.outputs.mode == 'build'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
@@ -310,7 +349,7 @@ jobs:
       RUN_ID: ${{ github.run_id }}
       RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
-      # Same protected automation revision the build job resolved; the
+      # Same protected automation revision the plan job resolved; the
       # publication token is never exposed to source or artifact code.
       # tools/release_pipeline.py revalidates the tag against main history
       # and the committed source versions before any mutation below.

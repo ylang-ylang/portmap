@@ -231,3 +231,7 @@
 - Integrate release/v0.20.0 before its main merge, as required by the new graph.
   Frozen candidate/Skill HTTP and both workflow lint gates passed; the exact
   full regression result is 1337 passed, 2 deselected. No live deployment.
+- Correct draft discovery after run39280508837: a published-tag API404 does not
+  mean no draft exists. Use complete release-list discovery and isolate draft-aware
+  planning from the read-only source build job. Retry the existing v0.20.0 draft
+  and uploaded attachments without rebuilding, retagging or upgrading machines.

@@ -872,6 +872,14 @@ commit, not the latest main HEAD. Main may advance without invalidating a
 legitimate retry. CI never chooses/increments versions, commits generated files,
 merges branches, or creates/moves tags.
 
+Release planning is separate from source execution. GitHub hides draft releases
+from read-only callers, so the trusted orchestration-only planning job receives
+Contents write permission to inspect drafts; it never runs tagged source or
+build tools. Tests, Docker builds and frozen-binary smoke run in a separate
+Contents read-only job. A published-tag lookup returning 404 is not enough to
+declare a release absent: planning checks the paginated release list for a draft
+first, preserving its original attachments and build attempt on retry.
+
 `release.json` is generated **after** the archive is built and hashed. It is a
 Release attachment, not a generated file committed back into the tagged source.
 Its source identity binds the repository, tag and exact commit; its asset records
