@@ -191,3 +191,72 @@ def test_cold_resume_restores_private_relay_directory_before_engine_mount(monkey
     assert relay_socket_dir.stat().st_mode & 0o777 == 0o700
     # Exercise the real SSH forward ownership gate, including its owner record.
     assert http_socket_dir(tmp_path / "state") == relay_socket_dir
+
+
+def test_failed_reconfigure_preserves_compiled_ssh_route_without_old_port_allocation(
+    tmp_path, relay_socket_dir, monkeypatch,
+):
+    from pathlib import Path
+    from portmap.errors import PortmapError
+
+    state = stack_state(tmp_path, relay_socket_dir)
+    state.update(
+        phase="ready", relay_ports={"remote.portmap": 19001},
+        relay_revision="old-relay", dns_marker="old-dns",
+        dns_forward=["192.0.2.53"], containers={role: role for role in state["names"]},
+        ingress_backend="container",
+    )
+    profiles = {"remote.portmap": {
+        "domain": "remote.portmap", "via": "ssh", "target": "remote",
+        "available": True, "remote_http_port": 80,
+    }}
+    snapshot = infrastructure_config.access_snapshot(state, profiles, None)
+    backend = snapshot["machines"]["remote.portmap"]["backend_url"]
+    state["revision"], routes = infrastructure_config.routes_config(state, snapshot)
+    state["relay_ports"] = {}
+    state_dir = Path(state["state_dir"])
+    state_dir.mkdir(mode=0o700)
+    Path(state["instance_dir"]).mkdir(mode=0o700)
+    paths = infrastructure._configuration_paths(state)
+    for key, content in {
+        "access": json.dumps(snapshot).encode(),
+        "routes": json.dumps(routes).encode(),
+        "relay": b"previous relay configuration",
+        "dns": b"previous DNS configuration",
+    }.items():
+        paths[key].parent.mkdir(parents=True, exist_ok=True)
+        paths[key].write_bytes(content)
+
+    runtime = SimpleNamespace(
+        require_owned=lambda *args: {"State": {"Running": True}},
+        signal_owned=lambda *args: None,
+    )
+    monkeypatch.setattr(infrastructure, "resolver_status", lambda *args: {"installed": False})
+    monkeypatch.setattr(infrastructure, "resolver_environment", lambda: None)
+    monkeypatch.setattr(infrastructure, "teardown_resolver", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        infrastructure, "_reconcile_containers",
+        lambda current, runtime: current.update(containers={role: role for role in state["names"]}),
+    )
+    attempts = []
+
+    def readiness(current, candidate_routes, **kwargs):
+        attempts.append(current["revision"])
+        if len(attempts) == 1:
+            raise PortmapError("candidate not ready")
+
+    monkeypatch.setattr(infrastructure, "_wait_ready", readiness)
+    with pytest.raises(PortmapError):
+        infrastructure._sync_existing(
+            state, state_dir, runtime, {}, None, None,
+            host_dns=False, use_sudo=False, native={}, source_dir=state_dir,
+        )
+    restored = json.loads(paths["access"].read_bytes())
+    restored_routes = json.loads(paths["routes"].read_bytes())
+    assert restored["machines"]["remote.portmap"]["backend_url"] == backend
+    assert any(
+        server["url"] == backend
+        for service in restored_routes["http"]["services"].values()
+        for server in service.get("loadBalancer", {}).get("servers", [])
+    )
+    assert paths["relay"].read_bytes() == b"previous relay configuration"
