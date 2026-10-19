@@ -3,7 +3,8 @@
 
 Two operations, both driven by the release-distribution workflow:
 
-  verify-release   Confirm an immutable ``V<major>.<minor>`` tag exists, a
+  verify-release   Confirm an immutable ``v<major>.<minor>.<patch>`` tag
+                   above 0.19.0 (or historical V0.0..V0.19) exists, a
                    non-draft/non-prerelease Release is published for it, and
                    the expected ``release.json`` plus linux-amd64 archive
                    assets are present, uploaded, and consistent with the
@@ -54,7 +55,8 @@ REQUIRED_CHECK_DEFAULT = "tap-checks"
 GZIP_MAGIC = b"\x1f\x8b"
 MAX_PAGES = 20
 
-TAG_RE = re.compile(r"V(?P<major>[0-9]+)\.(?P<minor>[0-9]+)")
+TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+LEGACY_TAG_RE = re.compile(r"V0\.(0|[1-9]|1[0-9])")
 REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -101,13 +103,19 @@ def log(message: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def parse_tag(tag: str) -> tuple[int, int]:
+def parse_tag(tag: str) -> tuple[int, int, int]:
     match = TAG_RE.fullmatch(tag or "")
-    if not match:
-        raise InputError(
-            f"tag must be V<major>.<minor> (e.g. V0.19), got {tag!r}"
-        )
-    return int(match.group("major")), int(match.group("minor"))
+    if match:
+        version = tuple(int(part) for part in match.groups())
+        if version > (0, 19, 0):
+            return version
+    legacy = LEGACY_TAG_RE.fullmatch(tag or "")
+    if legacy:
+        return 0, int(legacy.group(1)), 0
+    raise InputError(
+        f"tag must be v<major>.<minor>.<patch> above 0.19.0 (e.g. v0.20.1) "
+        f"or historical V0.0..V0.19, got {tag!r}"
+    )
 
 
 def validate_repo(repo: str, label: str = "repo") -> str:
@@ -134,6 +142,7 @@ def validate_sha(value: str, label: str) -> str:
 
 
 def source_archive_url(source_repo: str, tag: str) -> str:
+    parse_tag(tag)
     return f"https://{GITHUB_HOST}/{source_repo}/archive/refs/tags/{tag}.tar.gz"
 
 
@@ -197,6 +206,8 @@ def parse_manifest_source(
     manifest bytes (see :func:`verify_manifest_identity`).
     """
     if "source" not in payload:
+        if not LEGACY_TAG_RE.fullmatch(tag):
+            raise InputError("new release.json requires source identity")
         return None
     source = payload["source"]
     if not isinstance(source, dict):
@@ -216,7 +227,7 @@ def parse_manifest_source(
             "release.json source commit must be a 40-hex git SHA, "
             f"got {commit!r}"
         )
-    if version != f"{parse_tag(tag)[0]}.{parse_tag(tag)[1]}.0":
+    if version != ".".join(str(part) for part in parse_tag(tag)):
         raise InputError(
             f"release.json version {version} does not match tag {tag}"
         )
@@ -224,7 +235,7 @@ def parse_manifest_source(
 
 
 def parse_release_manifest(document: str, *, source_repo: str, tag: str) -> dict[str, Any]:
-    major, minor = parse_tag(tag)
+    expected_version = ".".join(str(part) for part in parse_tag(tag))
     try:
         manifest = json.loads(document)
     except json.JSONDecodeError as exc:
@@ -235,10 +246,10 @@ def parse_release_manifest(document: str, *, source_repo: str, tag: str) -> dict
     version = manifest.get("version")
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise InputError(f"release.json version must be X.Y.Z, got {version!r}")
-    if version != f"{major}.{minor}.0":
+    if version != expected_version:
         raise InputError(
             f"release.json version {version} does not match tag {tag} "
-            "(tagged releases are exactly major.minor.0)"
+            f"(requires exactly {expected_version})"
         )
     source = parse_manifest_source(manifest, source_repo=source_repo, tag=tag, version=version)
 
@@ -820,7 +831,7 @@ def verify_tagged_source_version(
     declarations — pyproject.toml ``project.version`` and
     ``src/portmap/__init__.py`` ``__version__`` — are independently read at
     the immutable peeled commit and must equal the manifest version
-    (exactly ``major.minor.0`` for the tag).
+    (the full ``major.minor.patch`` tag version, including hotfix patches).
     """
     pyproject = tagged_file_text(github, repo, "pyproject.toml", commit_sha=commit_sha)
     try:
@@ -1619,7 +1630,7 @@ def build_parser() -> argparse.ArgumentParser:
         "verify-release", help="verify a published release and its assets"
     )
     verify.add_argument("--repo", required=True, help="source repository owner/name")
-    verify.add_argument("--tag", required=True, help="release tag, e.g. V0.19")
+    verify.add_argument("--tag", required=True, help="release tag, e.g. v0.20.1 (historical V0.0..V0.19 read-only)")
     verify.add_argument(
         "--asset-wait-minutes",
         type=float,

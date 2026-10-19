@@ -264,6 +264,21 @@ listeners. Brew uses the ordinary user's available service manager without
 escaping the package-install sandbox. Attempted activation failures propagate;
 unattempted activation leaves existing services untouched and claims no readiness.
 
+Exact-version release lookup preserves the immutable historical `V0.0` through
+`V0.19` tags for versions `0.0.0` through `0.19.0`. All newer normal releases
+and hotfixes use lowercase full-version `vX.Y.Z` tags; patch manifests and their
+generated source identity retain the complete version. New release versions
+must be greater than `0.19.0`; lowercase aliases for historical versions and
+invented older patch tags are rejected. Release builds accept only the paired
+full lowercase tag and exact HEAD commit and never write a manifest into
+source. The current updater understands both historical and new
+tags. Already-installed old binaries only recognize the old `V#.#` latest-tag
+format and cannot discover the first new-format release themselves: Brew users
+must explicitly run `brew update` and `brew upgrade ylang-ylang/tap/portmap`
+(standalone users must explicitly reinstall from the new official release).
+There are no compatibility aliases or bridge tags, and publishing a release
+does not automatically upgrade any machine.
+
 Source-snapshot SSH deployment is a separate controller operation:
 `tools/deploy_portmap.py` builds with the pinned builder and stages a pristine
 source snapshot (no generated manifest inside), the built release manifest,

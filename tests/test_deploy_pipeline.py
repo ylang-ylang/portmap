@@ -343,6 +343,48 @@ def test_preseed_download_cache_is_atomic_and_preserves_neighbors(tmp_path):
     }
 
 
+def test_preseeded_hotfix_manifest_is_read_offline_by_the_deployed_runtime(tmp_path, monkeypatch):
+    from portmap import downloads
+
+    version = "0.20.3"
+    filename = f"portmap-{version}-linux-amd64.tar.gz"
+    archive = tmp_path / filename
+    archive.write_bytes(b"verified deployed archive")
+    asset = {
+        "os": "linux",
+        "arch": "amd64",
+        "filename": filename,
+        "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "size": archive.stat().st_size,
+        "source_url": f"https://github.com/ylang-ylang/portmap/releases/download/v{version}/{filename}",
+    }
+    payload = {
+        "version": version,
+        "source": {"repository": "ylang-ylang/portmap", "tag": f"v{version}", "commit": "a" * 40},
+        "assets": [asset],
+    }
+    manifest = tmp_path / "release.json"
+    manifest.write_text(json.dumps(payload))
+    cache = tmp_path / "downloads"
+    report = deploy_apply.preseed_download_cache(cache, archive, asset, manifest)
+    assert report["archive"] == "seeded"
+    assert report["manifest"] == "seeded"
+    monkeypatch.setattr(downloads, "__version__", version)
+    monkeypatch.setattr(downloads, "frozen_manifest_sidecar_path", lambda: None)
+    monkeypatch.setenv("PORTMAP_DOWNLOAD_DIR", str(cache))
+
+    def no_network():
+        pytest.fail("a verified seeded exact-version manifest must serve offline")
+
+    monkeypatch.setattr(downloads, "trusted_opener", no_network)
+    message, release = downloads.release_state()
+    assert message == ""
+    assert release.version == version
+    assert release.assets[0].source_url == asset["source_url"]
+    assert downloads.resolve_archive(filename) == cache / filename
+    assert not (tmp_path / "src/portmap/release.json").exists()
+
+
 def test_unpack_source_flattens_and_reuses_identical_tar(source_tree, tmp_path):
     stage = tmp_path / "stage"
     (stage / "source").mkdir(parents=True)

@@ -837,22 +837,32 @@ publishing state is not exposed. Teardown retains cached release archives.
 
 Every shipped update uses `.github/workflows/release.yml`, followed by
 `.github/workflows/release-distribution.yml`. Only pushing an existing
-`V<major>.<minor>` version tag to GitHub starts automatic publication.
-Ordinary `main`, `dev`, and `feat/*` pushes do not publish; pushing to the
-internal Gitea mirror does not trigger GitHub Actions.
+`v<major>.<minor>.<patch>` version tag to GitHub starts automatic publication.
+Ordinary branch pushes, including `main`, `dev`, `feat/*`, `release/*` and
+`hotfix/*`, do not publish. Internal Gitea pushes do not trigger GitHub Actions.
 
 Maintainers choose the version, update `pyproject.toml`, `src/portmap/__init__.py`
 and `uv.lock`, and run `npm ci && npm run build` before committing the release
 source. Commit the generated catalog/Skill assets as well: Brew uses the tag's
 source archive, so CI rejects stale generated assets rather than silently
-shipping different source-install and standalone UIs. Integrate through
-`feat/*` → `dev` → the protected tagged merge into `main`.
+shipping different source-install and standalone UIs.
 
-For example, **after** the protected release merge and existing `V0.20` tag
-have been prepared locally with source version `0.20.0`, publish them with:
+The repository uses the `dev-feat-release-hotfix-case` policy:
+
+- Normal release: integrate `feat/*` into `dev`, branch `release/*` from `dev`,
+  merge that release branch into `dev` first and then into `main`, and tag the
+  main merge `vX.Y.0`.
+- Hotfix: branch `hotfix/*` from the released `main`, merge that hotfix branch
+  into `dev` first and then into `main`, and tag the main merge `vX.Y.Z`.
+  Git-guard's `v=.=.#` rule pins X/Y to the base release and advances the patch.
+- Existing uppercase two-part tags through `V0.19` remain immutable history.
+  They may be verified/retried, but are not a new-publication format.
+
+For example, **after** the protected release merge and `v0.20.0` tag have been
+prepared locally with source version `0.20.0`, publish them with:
 
 ```bash
-git push --atomic upstream main refs/tags/V0.20
+git push --atomic upstream main refs/tags/v0.20.0
 ```
 
 Here `upstream` is GitHub and `origin` is the internal Gitea remote.
@@ -880,7 +890,7 @@ tag or replace its assets.
 For a full-pipeline retry, supply the existing version tag explicitly:
 
 ```bash
-gh workflow run release.yml --repo ylang-ylang/portmap -f tag=V0.20
+gh workflow run release.yml --repo ylang-ylang/portmap -f tag=v0.20.0
 ```
 
 The retry verifies and reuses complete published assets even when temporary CI
@@ -898,12 +908,20 @@ Do not substitute the source repository's `GITHUB_TOKEN` or a broad personal tok
 The tap's `.github/workflows/check.yml` must be present before the first release;
 requiring its `tap-checks` status in tap branch protection is recommended.
 
-For small fixes use a `feat/hotfix-*` branch under the same protected graph.
-Hotfixes still build, verify, publish and update Brew; they are not live patches.
+For small fixes use the dedicated `hotfix/*` branch from `main`, not a
+`feat/hotfix-*` naming convention. Hotfixes still build, verify, publish and
+update Brew; they are not live patches.
 Never deploy by overwriting files inside an installed Portmap package.
 Publishing does not upgrade user machines. Users explicitly upgrade through
 Homebrew or the authenticated web updater after the release and Brew distribution
 are complete.
+
+Older installed versions that only recognize uppercase two-part GitHub tags
+cannot discover the new three-part tags in their web updater. Perform the
+first migration explicitly through Brew (`brew update` then
+`brew upgrade ylang-ylang/tap/portmap`), or the official standalone installer.
+The new updater understands both historical tags and exact new patch versions.
+Publication never performs this migration on users' behalf.
 
 
 ### Project Catalog and Compose Integration

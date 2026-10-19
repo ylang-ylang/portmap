@@ -10,10 +10,10 @@ Use packaging/portmap.Dockerfile on Linux for a glibc-2.31 build baseline. This
 script never publishes artifacts; the generated manifest is a build output
 only and is never committed to the source tree.
 
-Release identity: pass the paired ``--release-tag V<major>.<minor>`` and
-``--source-commit <40-hex>`` flags for a release build. The builder then
-verifies the tag matches the version (exactly ``<major>.<minor>.0``) and that
-the repository HEAD is exactly the requested source commit, and records the
+Release identity: pass the paired ``--release-tag v<major>.<minor>.<patch>``
+and ``--source-commit <40-hex>`` flags for a release build. The builder then
+verifies the tag matches the exact version and that the repository HEAD is
+exactly the requested source commit, and records the
 identity as a top-level manifest ``source`` block. Both flags may be omitted
 for a local candidate build, which emits no ``source`` block.
 """
@@ -35,7 +35,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_REPOSITORY = "ylang-ylang/portmap"
-TAG_RE = re.compile(r"V(?P<major>[0-9]+)\.(?P<minor>[0-9]+)")
+TAG_RE = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -79,17 +79,17 @@ def resolve_release_identity(
     """Return (asset tag, manifest source block) for the build.
 
     ``--release-tag`` and ``--source-commit`` are paired: a release build
-    proves the tag matches the version (exactly ``<major>.<minor>.0``) and
-    that HEAD is the exact source commit being released, then records the
+    proves the tag matches the exact version and that HEAD is the exact
+    source commit being released, then records the
     identity in the generated manifest. A local candidate build omits both
     flags and records nothing.
     """
     match = re.fullmatch(
-        r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)", version
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version
     )
     if match is None:
         raise ValueError("release version must be numeric major.minor.patch")
-    default_tag = f"V{match.group('major')}.{match.group('minor')}"
+    default_tag = f"v{version}"
     if (release_tag is None) != (source_commit is None):
         raise ValueError(
             "--release-tag and --source-commit are paired; pass both for a "
@@ -99,16 +99,11 @@ def resolve_release_identity(
         return default_tag, None
     tag_match = TAG_RE.fullmatch(release_tag)
     if tag_match is None:
-        raise ValueError("release tag must match repository V<major>.<minor> policy")
-    if (tag_match.group("major"), tag_match.group("minor")) != (
-        match.group("major"),
-        match.group("minor"),
-    ):
+        raise ValueError("release tag must match repository v<major>.<minor>.<patch> policy")
+    if release_tag != default_tag:
         raise ValueError(f"release tag {release_tag} does not match version {version}")
-    if version != f"{tag_match.group('major')}.{tag_match.group('minor')}.0":
-        raise ValueError(
-            f"tagged releases use exactly major.minor.0, got version {version}"
-        )
+    if tuple(map(int, version.split("."))) <= (0, 19, 0):
+        raise ValueError("new release versions must be greater than historical 0.19.0")
     if COMMIT_RE.fullmatch(source_commit) is None:
         raise ValueError("--source-commit must be a full 40-hex commit id")
     head = resolve_head()
@@ -128,7 +123,7 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument(
         "--release-tag",
-        help="release asset tag V<major>.<minor>; pairs with --source-commit",
+        help="release asset tag v<major>.<minor>.<patch>; pairs with --source-commit",
     )
     parser.add_argument(
         "--source-commit",

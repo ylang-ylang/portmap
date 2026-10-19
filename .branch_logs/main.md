@@ -114,3 +114,8 @@
 - Frozen archive SHA256:
   `cbf81910f6f42624ea24e91af0d4ac78d52a5cb99fefad748aa27f12fdae6813`.
 - Release `V0.19` (`portmap 0.19.0`): automated immutable distribution of the linux-amd64 archive, sha256 checksum and matching release manifest; the Brew tap is updated by the reusable release-distribution workflow in the same run.
+- Release v0.20.0 (portmap 0.20.0): adopt dedicated release/* and hotfix/* branches;
+  maintainers prepare protected main merges/tags; CI validates the exact commit,
+  publishes source-bound manifests and completes checked Brew distribution.
+  Remove dev-triggered publication and CI source/tag writes; preserve immutable
+  retries, source-install downloads, the project Skill URL and simplified UI.

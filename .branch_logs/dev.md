@@ -222,3 +222,9 @@
   Sync the existing main/V0.19 refs without changing their objects. Integrating
   this repair into dev does not publish: only an existing main-history version
   tag push (or explicit-tag manual retry) enters the release pipeline.
+- The isolated old-policy experiment rejected V0.20.0 and V0.20.1 with
+  TAG_TARGET_TAG_PATTERN_MISMATCH. At the user's subsequent request, migrate to
+  dev-feat-release-hotfix-case: release/* uses vX.Y.0; hotfix/* uses v=.=.#.
+- Prepare v0.20.0 (package 0.20.0), preserve historical V0.19 read-only retries,
+  and extend tag/source/manifest/updater validation to exact patch versions.
+  Publication remains tag-driven with checked Brew PRs and no machine upgrades.
