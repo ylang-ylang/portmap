@@ -525,7 +525,13 @@ def _sync_existing(
     # able to prove the restored revision of an older owned snapshot.
     old_snapshot = json.loads(before["access"])
     old_local = old_snapshot["local"] if old_snapshot["local"]["enabled"] else None
-    old_snapshot = access_snapshot(rollback, old_snapshot["machines"], old_local)
+    # Compiled machine rows already contain their historical backend URLs.
+    # They are not live profiles and must not be rebound through a newer
+    # relay-port allocation while preparing rollback.
+    old_snapshot = {
+        **access_snapshot(rollback, {}, old_local),
+        "machines": old_snapshot["machines"],
+    }
     rollback["revision"], old_routes = routes_config(rollback, old_snapshot)
     before["access"], before["routes"] = json_bytes(old_snapshot), json_bytes(old_routes)
     old_resolver = resolver_status(state_dir)

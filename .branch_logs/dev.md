@@ -164,3 +164,48 @@
   sudo execution instead of credential validation. Real collision/permission
   scenarios verified; no extra privileges granted. Regression: 991 passed,
   2 integration cases deselected; remove incidental argv/env echo assertions.
+- Integrate requested frontend hotfix: unobtrusive serving-version footer and
+  accurate SSH auto-pairing/unavailable labels. mj's 0.18 footer was deployed
+  and visually verified live; label corrections were verified with recorded
+  real responses but their mj transfer is blocked by lost SSH connectivity.
+- Integrate `feat/reconnect-snapshot`: preserve historical compiled SSH backend
+  URLs when upgrading rollback probe metadata, even after relay allocations retire.
+  Affected regression: 18 passed; real mj reconnects now succeed without dropping
+  saved profiles. Complete previously blocked UI deployment and live verification:
+  all four machines show 0.18.0 / UP TO DATE, footer correct, three project URLs200.
+- Integrate `feat/machine-connection-settings`: one Settings Machines area combines
+  connection controls and update/version facts per domain; duplicate profiles stay
+  editable within one card. Known failed remotes move behind an unlink icon beside
+  Settings and into a collapsed Settings group.
+- Real mj deployment verifies desktop/mobile same-row icon, disclosure actions,
+  four machine cards, duplicate dexgem profile preservation, Add/Cancel and mujoco
+  project access. Browser-only injections verify failure/recovery transitions and
+  recovery from an initial list502 through shared health data without manual Retry.
+- Restore official0.18 on mujoco and its mj connection; dexgem deployment remains
+  externally blocked by failed Coder workspace startup/no agents. No persistence
+  template changes or deferred Tailscale DNS redesign included.
+- Integrate `feat/http-project-skill` as the 0.19.0 release candidate: serve
+  versioned Markdown from `/skills/project-integration/SKILL.md`, maintain its
+  sole source under `skills/`, and expose a guide link/copyable agent prompt.
+- Flatten machine cards while preserving update/connection/error controls and
+  duplicate profiles. Candidate browser, public/private HTTP, wheel and actual
+  frozen-binary smoke passed; installed machines were not hot-patched.
+- Add push-to-GitHub-dev immutable build/release automation and checked Brew
+  formula PR distribution, including protected merge graph, retry identity,
+  artifact/manifest verification, source trust and no user-machine upgrades.
+- Corrected release-tool regression: 139 passed; Actionlint clean; the actual
+  frozen0.19 HTTP smoke passed. Initial full-suite failures were confined to the
+  new release tools/fixtures; the automatic release reruns the full suite.
+- Bootstrap tap CI merged only after its real GitHub check passed (tap PR1).
+  Dedicated `HOMEBREW_TAP_TOKEN` is persisted in source-repository Actions Secrets.
+  Formal publication is complete only after the automatic release and tap jobs.
+- Integrate `feat/hotfix-release-environment`: the first automatic release run
+  stopped before tests/tagging because live Bullseye security packages returned
+  HTTP404. Run source tests on the unprivileged Ubuntu runner and pin frozen
+  builder APT dependencies to the signed 2025-07-01 Debian snapshot. Keep the
+  Python image/glibc baseline and all publication gates unchanged.
+- Synchronize V0.18 main ancestry and its release logs via
+  `case/release/history-sync` -> `feat/hotfix-release-environment` -> dev.
+  Full CI tests/build/HTTP gates passed in run39237869253; the sync resolves
+  the subsequent pre-push merge obstruction without altering existing tags.
+- Release V0.19 (portmap 0.19.0) from dev 9d5262a8d8 via the automated pipeline: compiled catalog UI/skill rebuilt, frozen linux-amd64 archive, checksum and matching manifest published to the immutable GitHub release; non-integration suite green.

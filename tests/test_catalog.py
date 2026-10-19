@@ -727,6 +727,45 @@ def test_catalog_http_rejects_missing_public_root_static_assets() -> None:
     assert body == b"not found\n"
 
 
+@pytest.mark.parametrize("scope", ["public", "private"])
+def test_project_skill_is_versioned_and_available_without_control_state(tmp_path, monkeypatch, scope) -> None:
+    monkeypatch.setenv("PORTMAP_ACCESS_CONFIG", str(tmp_path / "missing-access.json"))
+    monkeypatch.setattr("portmap.catalog.__version__", "99.7.0")
+    path = "/skills/project-integration/SKILL.md"
+    status, headers, body = request_catalog(
+        path + "?token=private-query-canary&machine=private-machine-canary",
+        scope=scope,
+        host="private-host-canary.example",
+    )
+    assert status == 200
+    assert headers["content-type"] == "text/markdown; charset=utf-8"
+    assert headers["cache-control"] == "no-cache"
+    assert headers["x-content-type-options"] == "nosniff"
+    assert int(headers["content-length"]) == len(body)
+    metadata = body.decode("utf-8").split("---", 2)[1]
+    assert 'portmap-version: "99.7.0"' in metadata
+    assert b"{{PORTMAP_VERSION}}" not in body
+    assert b"private-query-canary" not in body
+    assert b"private-machine-canary" not in body
+    assert b"private-host-canary" not in body
+    head_status, head_headers, head_body = request_catalog(path, method="HEAD", scope=scope)
+    assert head_status == 200
+    assert head_body == b""
+    assert head_headers["content-length"] == headers["content-length"]
+
+
+@pytest.mark.parametrize("path", [
+    "/skills/",
+    "/skills/project-integration/../SKILL.md",
+    "/skills/project-integration/%2e%2e/catalog.py",
+    "/skills/unknown/SKILL.md",
+])
+def test_project_skill_does_not_expose_arbitrary_paths(path) -> None:
+    status, _, body = request_catalog(path, scope="public")
+    assert status == 404
+    assert body == b"not found\n"
+
+
 def test_host_worktrees_includes_running_worktree_and_writes_history(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "sample@dev"
     history = tmp_path / "history.json"

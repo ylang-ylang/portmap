@@ -500,6 +500,41 @@ const CONN_STATUS_LABEL = {
   error: "error",
 };
 
+// Build a per-domain health summary from a list of connection objects.
+// Any reachable profile wins; configured/unprobed alone is not a failure.
+function buildConnHealth(connections) {
+  const map = new Map();
+  for (const conn of (connections || [])) {
+    const domain = text(conn.domain);
+    if (!domain) continue;
+    const isReachable = conn.status === "reachable";
+    const isFailed = ["unreachable", "error", "disconnected"].includes(conn.status);
+    const existing = map.get(domain);
+    if (!existing) {
+      map.set(domain, { status: conn.status, last_checked_at: conn.last_checked_at, isReachable, isFailed });
+    } else if (isReachable && !existing.isReachable) {
+      // Any reachable profile makes the machine reachable
+      map.set(domain, { ...existing, status: "reachable", last_checked_at: conn.last_checked_at || existing.last_checked_at, isReachable: true, isFailed: false });
+    } else if (!existing.isReachable && isFailed && !existing.isFailed) {
+      // Upgrade certainty of failure
+      map.set(domain, { ...existing, status: conn.status, isFailed: true, last_checked_at: conn.last_checked_at || existing.last_checked_at });
+    }
+    const health = map.get(domain);
+    if (!health.profiles) health.profiles = [];
+    health.profiles.push(conn);
+  }
+  return map;
+}
+
+// Explicitly disconnected or failed probes are grouped; the serving host stays local.
+function isMachineKnownFailed(machine, connHealth) {
+  if (!machine) return false;
+  if (machine.via === "local" || machine.id === "local") return false;
+  if (machine.available === false) return true;
+  const h = connHealth.get(text(machine.domain || machine.id));
+  return h ? h.isFailed : false;
+}
+
 function actionLabel(action) {
   if (action === "restart") return "Restart";
   if (action === "up") return "Start";
@@ -560,7 +595,7 @@ function OpenLink({ href, children }) {
   );
 }
 
-function CopyButton({ targetId }) {
+function CopyButton({ targetId, label = "Copy" }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
@@ -575,7 +610,7 @@ function CopyButton({ targetId }) {
       }}
     >
       <Copy className="button-icon" aria-hidden="true" />
-      {copied ? "Copied" : "Copy"}
+      {copied ? "Copied" : label}
     </button>
   );
 }
@@ -930,11 +965,15 @@ function CatalogTree({ catalog, onAction, onStart }) {
   );
 }
 
-function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelectSettings }) {
+function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelectSettings, connHealth }) {
   const tabRefs = useRef([]);
 
+  const available = machines.filter((m) => !isMachineKnownFailed(m, connHealth));
+  const disconnected = machines.filter((m) => isMachineKnownFailed(m, connHealth));
+  const allMachines = available;
+  const count = allMachines.length + 1;
+
   function handleTabKeyDown(e, index) {
-    const count = machines.length + 1;
     let next = -1;
     if (e.key === "ArrowRight") next = (index + 1) % count;
     else if (e.key === "ArrowLeft") next = (index - 1 + count) % count;
@@ -943,45 +982,55 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
     if (next === -1) return;
     e.preventDefault();
     tabRefs.current[next]?.focus();
-    if (next === machines.length) onSelectSettings();
-    else onSelect(machines[next].id);
+    if (next === allMachines.length) onSelectSettings();
+    else onSelect(allMachines[next].id);
+  }
+
+  function renderTab(machine, index) {
+    const isSelected = !settingsSelected && machine.id === selectedId;
+    const failed = isMachineKnownFailed(machine, connHealth);
+    const h = connHealth.get(text(machine.domain || machine.id));
+    const title = failed
+      ? (h?.status === "unreachable" ? "Unreachable — connection probe failed" : "Machine unavailable")
+      : undefined;
+    return (
+      <button
+        key={machine.id}
+        id={`machine-tab-${machine.id}`}
+        ref={(el) => { if (!failed) tabRefs.current[index] = el; }}
+        role={failed ? undefined : "tab"}
+        aria-selected={failed ? undefined : isSelected}
+        aria-controls="page-panel-catalog"
+        tabIndex={failed || isSelected ? 0 : -1}
+        type="button"
+        title={title}
+        className={[
+          "machine-tab",
+          isSelected ? "machine-tab-active" : "",
+          failed ? "machine-tab-unavailable" : "",
+        ].filter(Boolean).join(" ")}
+        onClick={() => onSelect(machine.id)}
+        onKeyDown={failed ? undefined : (e) => handleTabKeyDown(e, index)}
+      >
+        <span className="machine-tab-name">{machine.label || machine.domain || machine.id}</span>
+        {(machine.via === "ssh" || machine.via === "direct") && (
+          <span className={`machine-via-badge machine-via-${machine.via}`}>
+            {machine.via}
+          </span>
+        )}
+        {failed && <span className="machine-tab-failed-dot" aria-hidden="true" />}
+      </button>
+    );
   }
 
   return (
     <nav className="machine-nav" aria-label="Portmap navigation">
-      <div className="machine-nav-scroll" role="tablist" aria-label="Machines and settings">
-        {machines.map((machine, index) => {
-          const isSelected = !settingsSelected && machine.id === selectedId;
-          return (
-            <button
-              key={machine.id}
-              id={`machine-tab-${machine.id}`}
-              ref={(el) => { tabRefs.current[index] = el; }}
-              role="tab"
-              aria-selected={isSelected}
-              aria-controls="page-panel-catalog"
-              tabIndex={isSelected ? 0 : -1}
-              type="button"
-              title={!machine.available ? "Machine is offline" : undefined}
-              className={[
-                "machine-tab",
-                isSelected ? "machine-tab-active" : "",
-                !machine.available ? "machine-tab-unavailable" : "",
-              ].filter(Boolean).join(" ")}
-              onClick={() => onSelect(machine.id)}
-              onKeyDown={(e) => handleTabKeyDown(e, index)}
-            >
-              <span className="machine-tab-name">{machine.label || machine.domain || machine.id}</span>
-              {(machine.via === "ssh" || machine.via === "direct") && (
-                <span className={`machine-via-badge machine-via-${machine.via}`}>
-                  {machine.via}
-                </span>
-              )}
-            </button>
-          );
-        })}
+      <div className="machine-nav-tabs" role="tablist" aria-label="Machines and settings">
+        <div className="machine-nav-scroll">
+          {available.map((machine, index) => renderTab(machine, index))}
+        </div>
         <button
-          ref={(el) => { tabRefs.current[machines.length] = el; }}
+          ref={(el) => { tabRefs.current[allMachines.length] = el; }}
           id="page-tab-settings"
           role="tab"
           aria-selected={settingsSelected}
@@ -990,11 +1039,23 @@ function CatalogTabs({ machines, selectedId, settingsSelected, onSelect, onSelec
           type="button"
           className={`machine-tab machine-tab-settings${settingsSelected ? " machine-tab-active" : ""}`}
           onClick={onSelectSettings}
-          onKeyDown={(e) => handleTabKeyDown(e, machines.length)}
+          onKeyDown={(e) => handleTabKeyDown(e, allMachines.length)}
         >
           Settings
         </button>
       </div>
+      {disconnected.length > 0 && (
+        <details className="machine-nav-disconnected" onKeyDown={(event) => {
+          if (event.key === "Escape") event.currentTarget.open = false;
+        }}>
+          <summary title={`Disconnected machines (${disconnected.length})`} aria-label={`Disconnected machines (${disconnected.length})`}>
+            <Unlink2 size={16} aria-hidden="true" />
+          </summary>
+          <div className="machine-disconnected-items">
+            {disconnected.map((machine) => renderTab(machine))}
+          </div>
+        </details>
+      )}
     </nav>
   );
 }
@@ -1054,6 +1115,8 @@ function DownloadPanel({ catalog }) {
   const platforms = release?.platforms || [];
   const detected = detectPlatform();
   const suggested = platforms.find((p) => p.os === detected.os && p.arch === detected.arch) || null;
+  const skillUrl = new URL("/skills/project-integration/SKILL.md", window.location.origin).href;
+  const agentPrompt = `请先用 curl -fsS ${shellSingleQuote(skillUrl)} 获取并阅读 Portmap 项目接入指南。\n按指南和项目现有规则，将当前项目/worktree 接入运行该项目的机器上的 Portmap。复用已有安装与 Compose 配置，验证实际应用访问后给我真实 URL。\n如果指南地址不可达或缺少权限，请明确报告，不要自行修改系统 DNS、安装第二套网关或清理其他项目。`;
 
   return (
     <section className="utility-panel" aria-label="Download portmap">
@@ -1063,6 +1126,14 @@ function DownloadPanel({ catalog }) {
           {" "}Download portmap / 获取 portmap
         </summary>
         <div className="quick-setup-body">
+          <div className="quick-command" data-agent-skill>
+            <div className="quick-setup-actions">
+              <p><OpenLink href={skillUrl}>Agent 接入指南</OpenLink></p>
+              <CopyButton targetId="portmap-agent-prompt" label="复制提示词" />
+            </div>
+            <p>Version-matched Markdown for your agent; read it, do not pipe it into a shell.</p>
+            <pre className="agent-skill-prompt"><code id="portmap-agent-prompt">{agentPrompt}</code></pre>
+          </div>
           {releaseLoading && <p>Loading…</p>}
           {!releaseLoading && releaseError && (
             <p className="portmap-download-notice portmap-download-error">{releaseError}</p>
@@ -1213,96 +1284,6 @@ function ConnectionStatusBadge({ status }) {
   );
 }
 
-function ConnectionRow({ conn, onConnect, onDisconnect, onEdit, onDelete, mutating }) {
-  const active = conn.has_connection === true;
-  // Show actual_via when known (what's really used), fall back to requested via
-  const via = conn.actual_via || conn.via;
-  return (
-    <div className="conn-row" role="listitem">
-      <div className="conn-row-body">
-        <div className="conn-row-main">
-          <ConnectionStatusBadge status={conn.status} />
-          <span className="conn-row-target">{conn.target}</span>
-          {via && (
-            <span
-              className={`machine-via-badge machine-via-${
-                via === "direct" || via === "ssh" ? via : "auto"
-              }`}
-            >
-              {via}
-            </span>
-          )}
-          {conn.domain && conn.domain !== conn.target && (
-            <span className="conn-row-domain">{conn.domain}</span>
-          )}
-        </div>
-        <div className="conn-row-meta">
-          <span className="conn-latency" title="HTTP latency from last check">
-            {formatLatency(conn.latency_ms)}
-          </span>
-          {conn.last_checked_at && (
-            <span className="conn-checked">
-              {"· checked "}
-              {formatCheckedAt(conn.last_checked_at)}
-            </span>
-          )}
-          {conn.error && (
-            <span className="conn-error-inline" title={conn.error}>
-              {conn.error}
-            </span>
-          )}
-        </div>
-      </div>
-      <div className="conn-row-actions">
-        {active ? (
-          <button
-            className="action-button conn-disconnect-btn"
-            type="button"
-            onClick={() => onDisconnect(conn.id)}
-            disabled={mutating}
-          >
-            <Unlink2 className="button-icon" aria-hidden="true" />
-            {" "}Disconnect
-          </button>
-        ) : (
-          <button
-            className="action-button conn-connect-btn"
-            type="button"
-            onClick={() => onConnect(conn.id)}
-            disabled={mutating}
-          >
-            <Link2 className="button-icon" aria-hidden="true" />
-            {" "}Connect
-          </button>
-        )}
-        <button
-          className="action-button"
-          type="button"
-          onClick={() => onEdit(conn)}
-          disabled={mutating}
-          title={active ? "Disconnect before editing" : `Edit ${conn.target || conn.id}`}
-          aria-label={
-            active
-              ? `Edit ${conn.target || conn.id} — disconnect first`
-              : `Edit ${conn.target || conn.id}`
-          }
-        >
-          <Pencil className="button-icon" aria-hidden="true" />
-        </button>
-        <button
-          className="action-button conn-delete-btn"
-          type="button"
-          onClick={() => onDelete(conn.id, conn.target)}
-          disabled={mutating}
-          aria-label={`Delete ${conn.target || conn.id}`}
-        >
-          <Trash2 className="button-icon" aria-hidden="true" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function ConnectionForm({ formState, onChange, onSave, onCancel, formError, mutating }) {
   const isEdit = Boolean(formState.id);
   function handleKeyDown(e) {
@@ -1367,246 +1348,6 @@ function ConnectionForm({ formState, onChange, onSave, onCancel, formError, muta
   );
 }
 
-function ConnectionManager({ canManageConnections, onMachinesRefresh }) {
-  // null = not yet loaded; [] or [...] = loaded
-  const [connections, setConnections] = useState(null);
-  const [connectionsError, setConnectionsError] = useState("");
-  const [checkLoading, setCheckLoading] = useState(false);
-  // formState: null (hidden) | { id?, target, via }
-  const [formState, setFormState] = useState(null);
-  const [formError, setFormError] = useState("");
-  // panelError: connect/disconnect/delete failures or edit-blocked messages
-  const [panelError, setPanelError] = useState("");
-  const [mutating, setMutating] = useState(false);
-
-  // Load connection list once the private portal confirms management capability.
-  useEffect(() => {
-    if (!canManageConnections) return;
-    loadConnections();
-  }, [canManageConnections]);
-
-  async function loadConnections({ check = false } = {}) {
-    if (check) setCheckLoading(true);
-    setConnectionsError("");
-    try {
-      const res = await fetch(check ? "/api/connections?check=1" : "/api/connections");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setConnections(Array.isArray(data.connections) ? data.connections : []);
-    } catch (err) {
-      setConnectionsError(`${err.message || err}`);
-    } finally {
-      if (check) setCheckLoading(false);
-    }
-  }
-
-  // POST a connection action. On non-2xx, refetch the list (so any saved-but-failed
-  // entry remains visible) then return the error for the caller to surface.
-  async function postAction(payload) {
-    setMutating(true);
-    try {
-      const res = await fetch("/api/connections", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      let data;
-      try { data = await res.json(); } catch { data = {}; }
-      if (!res.ok) {
-        const errMsg = text(data.error) || `HTTP ${res.status}`;
-        // Refetch so any saved-but-failed row is visible.
-        await loadConnections();
-        await onMachinesRefresh();
-        return { failed: true, error: errMsg };
-      }
-      // Success: server returns updated list payload.
-      setConnections(Array.isArray(data.connections) ? data.connections : []);
-      setConnectionsError("");
-      await onMachinesRefresh();
-      return { failed: false };
-    } catch (err) {
-      // Network/parse error: refetch to show current state.
-      await loadConnections();
-      await onMachinesRefresh();
-      return { failed: true, error: `${err.message || err}` };
-    } finally {
-      setMutating(false);
-    }
-  }
-
-  async function handleSave() {
-    if (!formState) return;
-    const { id, target, via } = formState;
-    const trimmed = target.trim();
-    if (!trimmed) {
-      setFormError("Host or IP address is required.");
-      return;
-    }
-    const payload = { action: "save", target: trimmed, via };
-    if (id) payload.id = id;
-    const result = await postAction(payload);
-    if (!result.failed) {
-      setFormState(null);
-      setFormError("");
-    } else {
-      setFormError(result.error);
-    }
-  }
-
-  async function handleConnect(id) {
-    setPanelError("");
-    // Capture id before any async gap.
-    const result = await postAction({ action: "connect", id });
-    if (result.failed) setPanelError(result.error);
-    else setPanelError("");
-  }
-
-  async function handleDisconnect(id) {
-    setPanelError("");
-    const result = await postAction({ action: "disconnect", id });
-    if (result.failed) setPanelError(result.error);
-    else setPanelError("");
-  }
-
-  async function handleDelete(id, target) {
-    // Capture id and label before the async confirm gap.
-    const label = target || id;
-    if (
-      !window.confirm(
-        `Delete connection "${label}"?\nThis will disconnect it first if currently active.`,
-      )
-    ) return;
-    setPanelError("");
-    const result = await postAction({ action: "delete", id });
-    if (result.failed) setPanelError(result.error);
-    else setPanelError("");
-  }
-
-  function startEdit(conn) {
-    // Contract: editing an active entry requires explicit disconnect first.
-    const active = conn.has_connection === true || conn.status === "connecting";
-    if (active) {
-      setPanelError(`Disconnect "${text(conn.target || conn.id)}" before editing.`);
-      return;
-    }
-    // Prefer explicit via for the form; auto/unknown defaults to direct.
-    const via =
-      conn.via === "direct" || conn.via === "ssh" ? conn.via
-      : conn.actual_via === "direct" || conn.actual_via === "ssh" ? conn.actual_via
-      : "direct";
-    setFormState({ id: conn.id, target: text(conn.target), via });
-    setFormError("");
-    setPanelError("");
-  }
-
-  function startAdd() {
-    setFormState({ target: "", via: "direct" });
-    setFormError("");
-    setPanelError("");
-  }
-
-  function cancelForm() {
-    setFormState(null);
-    setFormError("");
-  }
-
-  if (!canManageConnections) return null;
-
-  return (
-    <section className="utility-panel" aria-label="Connection management">
-      <details className="quick-setup conn-section" open>
-        <summary>
-          <Link2 className="button-icon" aria-hidden="true" />
-          {" "}Connections
-        </summary>
-        <div className="quick-setup-body conn-body">
-          <div className="conn-toolbar">
-            <button
-              className="action-button"
-              type="button"
-              onClick={() => loadConnections({ check: true })}
-              disabled={checkLoading || mutating}
-              title="Probe all connections and measure HTTP latency"
-            >
-              <RefreshCw className="button-icon" aria-hidden="true" />
-              {" "}{checkLoading ? "Checking\u2026" : "Check"}
-            </button>
-            <button
-              className="action-button conn-add-btn"
-              type="button"
-              onClick={startAdd}
-              disabled={mutating || formState !== null}
-              aria-label="Add new connection"
-            >
-              <Plus className="button-icon" aria-hidden="true" />
-              {" "}Add
-            </button>
-          </div>
-          {connectionsError && (
-            <div className="empty load-error" role="alert">
-              {connectionsError}{" "}
-              <button
-                className="action-button"
-                type="button"
-                onClick={() => loadConnections()}
-              >
-                Retry
-              </button>
-            </div>
-          )}
-          {panelError && (
-            <div className="conn-panel-error" role="alert">
-              {panelError}
-            </div>
-          )}
-          {connections === null && !connectionsError && (
-            <div className="empty">Loading connections\u2026</div>
-          )}
-          {connections !== null && connections.length === 0 && !formState && (
-            <div className="empty">
-              No saved connections.{" "}
-              <button
-                className="action-button"
-                type="button"
-                onClick={startAdd}
-                disabled={mutating}
-              >
-                Add a host
-              </button>{" "}
-              to connect to a remote machine.
-            </div>
-          )}
-          {connections !== null && connections.length > 0 && (
-            <div className="conn-list" role="list">
-              {connections.map((conn) => (
-                <ConnectionRow
-                  key={conn.id ?? conn.target}
-                  conn={conn}
-                  onConnect={handleConnect}
-                  onDisconnect={handleDisconnect}
-                  onEdit={startEdit}
-                  onDelete={handleDelete}
-                  mutating={mutating}
-                />
-              ))}
-            </div>
-          )}
-          {formState !== null && (
-            <ConnectionForm
-              formState={formState}
-              onChange={setFormState}
-              onSave={handleSave}
-              onCancel={cancelForm}
-              formError={formError}
-              mutating={mutating}
-            />
-          )}
-        </div>
-      </details>
-    </section>
-  );
-}
-
 const JOB_TERMINAL_STATES = new Set(["succeeded", "failed", "interrupted"]);
 const BATCH_TERMINAL_STATES = new Set(["succeeded", "failed", "partial"]);
 const JOB_POLL_MS = 2000;
@@ -1662,9 +1403,9 @@ function machineStatus(machine) {
     return { label: text(machine.active_job.state) || "updating", title: text(machine.active_job.message) || "" };
   }
   if (machine.supported === false) {
-    return { label: "unsupported", title: text(machine.reason) || "remote version too old for managed updates" };
+    return { label: "unavailable", title: text(machine.reason) || "update service unavailable" };
   }
-  if (machine.authorized === false) {
+  if (machine.authorized === false && machine.via !== "ssh") {
     return { label: "needs authorization", title: text(machine.reason) || "management capability missing" };
   }
   if (machine.update_available === true) {
@@ -1678,40 +1419,13 @@ function machineStatus(machine) {
 
 function machineStatusClass(machine) {
   if (machineHasActiveJob(machine)) return "upd-state-active";
-  if (machine.supported === false || machine.authorized === false) return "upd-state-warn";
+  if (machine.supported === false || (machine.authorized === false && machine.via !== "ssh")) return "upd-state-warn";
   if (machine.update_available === true) {
     return machine.can_update === true ? "upd-state-info" : "upd-state-warn";
   }
   if (machine.error) return "upd-state-error";
   if (!machine.latest_version) return "upd-state-info";
   return "upd-state-ok";
-}
-
-function VersionFacts({ machine }) {
-  const current = text(machine.current_version);
-  const installed = text(machine.installed_version);
-  const build = text(machine.build_id);
-  const latest = text(machine.latest_version);
-  const mismatch = installed && installed !== current;
-  return (
-    <span className="upd-row-meta">
-      <span className="upd-ver">running <b>{current || "unknown"}</b></span>
-      {installed ? (
-        <span
-          className={mismatch ? "upd-ver upd-ver-mismatch" : "upd-ver"}
-          title={mismatch
-            ? `The installed package (${installed}) differs from the running process (${current || "unknown"}); a restart or in-flight update is pending.`
-            : "installed package version"}
-        >
-          installed <b>{installed}</b>{mismatch ? " · restart pending" : ""}
-        </span>
-      ) : null}
-      {build ? <span className="upd-build" title={build}>build {shortIdentity(build)}</span> : null}
-      {latest
-        ? <span className="upd-ver">latest <b>{latest}</b></span>
-        : <span className="upd-muted">latest unknown — use Check</span>}
-    </span>
-  );
 }
 
 function JobLogTail({ job, label }) {
@@ -1725,84 +1439,308 @@ function JobLogTail({ job, label }) {
   );
 }
 
-function UpdateMachineRow({ machine, onUpdate, onAuthorized, submitting, batchActive }) {
-  const via = text(machine.via);
-  const status = machineStatus(machine);
-  const eligible = machineUpdateEligible(machine) && !submitting && !batchActive;
-  const reason = text(machine.reason);
-  const lastJob = machine.last_job || null;
-  const activeJob = machine.active_job || null;
-  const disabledTitle = batchActive
-    ? "another update batch is already active; follow it below"
-    : machineHasActiveJob(machine)
-      ? "an update is already running on this machine"
-      : reason || (machine.update_available !== true ? "no update available" : "this machine cannot be updated right now");
+function ConnectionActions({ conn, mutating, onConnect, onDisconnect, onEdit, onDelete }) {
+  const active = conn.has_connection === true;
   return (
-    <div className="upd-row" role="listitem" data-upd-machine={machine.id}>
-      <div className="upd-row-body">
-        <div className="upd-row-main">
-          <span className={`upd-badge ${machineStatusClass(machine)}`} title={status.title} data-upd-status={status.label}>
-            {status.label}
-          </span>
-          <span className="upd-row-name">{machineLabel(machine)}</span>
-          {via && via !== "local" ? (
-            <span className={`machine-via-badge machine-via-${via === "direct" || via === "ssh" ? via : "auto"}`}>{via}</span>
-          ) : null}
-          {machine.id === "local" ? <span className="machine-via-badge machine-via-auto">local</span> : null}
-          {text(machine.install_method) ? (
+    <>
+      {active ? (
+        <button
+          className="action-button conn-disconnect-btn"
+          type="button"
+          onClick={() => onDisconnect(conn.id)}
+          disabled={mutating}
+        >
+          <Unlink2 className="button-icon" aria-hidden="true" />
+          {" "}Disconnect
+        </button>
+      ) : (
+        <button
+          className="action-button conn-connect-btn"
+          type="button"
+          onClick={() => onConnect(conn.id)}
+          disabled={mutating}
+        >
+          <Link2 className="button-icon" aria-hidden="true" />
+          {" "}Connect
+        </button>
+      )}
+      <button
+        className="action-button"
+        type="button"
+        onClick={() => onEdit(conn)}
+        disabled={mutating}
+        title={active ? "Disconnect before editing" : `Edit ${conn.target || conn.id}`}
+        aria-label={
+          active
+            ? `Edit ${conn.target || conn.id} — disconnect first`
+            : `Edit ${conn.target || conn.id}`
+        }
+      >
+        <Pencil className="button-icon" aria-hidden="true" />
+      </button>
+      <button
+        className="action-button conn-delete-btn"
+        type="button"
+        onClick={() => onDelete(conn.id, conn.target)}
+        disabled={mutating}
+        aria-label={`Delete ${conn.target || conn.id}`}
+      >
+        <Trash2 className="button-icon" aria-hidden="true" />
+      </button>
+    </>
+  );
+}
+
+// One line per saved connection profile, shown only when a machine has several
+// profiles: the compact target keeps every profile identifiable and
+// independently actionable; the full address lives in the card's Details.
+function ConnectionProfileLine({ conn, mutating, onConnect, onDisconnect, onEdit, onDelete }) {
+  // Show actual_via when known (what's really used), fall back to requested via
+  const via = text(conn.actual_via || conn.via);
+  const requested = text(conn.via);
+  const modeLabel = requested && requested !== via ? `${requested} → ${via}` : via;
+  return (
+    <div className="machine-profile" data-conn-profile={conn.id}>
+      <ConnectionStatusBadge status={conn.status} />
+      <span className="machine-profile-target" title={text(conn.target)}>{text(conn.target)}</span>
+      {modeLabel ? (
+        <span className={`machine-via-badge machine-via-${via === "direct" || via === "ssh" ? via : "auto"}`}>{modeLabel}</span>
+      ) : null}
+      {conn.error ? <span className="conn-error-inline" title={text(conn.error)}>{text(conn.error)}</span> : null}
+      <div className="conn-row-actions">
+        <ConnectionActions
+          conn={conn}
+          mutating={mutating}
+          onConnect={onConnect}
+          onDisconnect={onDisconnect}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+      </div>
+    </div>
+  );
+}
+
+// MachineCard: one flattened Settings card per machine. The always-visible
+// summary carries a single identity, transport, status and current-version line
+// with the existing connect/edit/delete/update actions. Full target addresses,
+// latency, last-check time, build fingerprint, install method, detailed update
+// reason and previous-job logs sit behind one unobtrusive Details disclosure —
+// no separate nested connection/update header panels.
+function MachineCard({
+  cardKey,
+  label,
+  conns,
+  machine,
+  updatesAvailable,
+  mutating,
+  submitting,
+  batchActive,
+  formState,
+  formError,
+  onFormChange,
+  onFormSave,
+  onFormCancel,
+  onConnect,
+  onDisconnect,
+  onEdit,
+  onDelete,
+  onUpdate,
+  onAuthorized,
+}) {
+  const showUpdate = Boolean(updatesAvailable && machine);
+  const multi = conns.length > 1;
+  const single = conns.length === 1 ? conns[0] : null;
+  const vias = Array.from(new Set(conns.map((conn) => text(conn.actual_via || conn.via)).filter(Boolean)));
+  const status = showUpdate ? machineStatus(machine) : null;
+  const eligible = showUpdate && machineUpdateEligible(machine) && !submitting && !batchActive;
+  const reason = showUpdate ? text(machine.reason) : "";
+  const activeJob = showUpdate ? machine.active_job || null : null;
+  const lastJob = showUpdate ? machine.last_job || null : null;
+  const current = showUpdate ? text(machine.current_version) : "";
+  const installed = showUpdate ? text(machine.installed_version) : "";
+  // Installed version is only surfaced at all when it differs from the running
+  // one — the mismatch means a restart or in-flight update is pending.
+  const mismatch = Boolean(installed && installed !== current);
+  const editing = Boolean(formState && formState.id) && conns.some((conn) => conn.id === formState.id);
+  const disabledTitle = !showUpdate
+    ? ""
+    : batchActive
+      ? "another update batch is already active; follow it below"
+      : machineHasActiveJob(machine)
+        ? "an update is already running on this machine"
+        : reason || (machine.update_available !== true ? "no update available" : "this machine cannot be updated right now");
+
+  return (
+    <div
+      className="machine-card"
+      role="listitem"
+      data-machine-card={cardKey}
+      data-upd-machine={showUpdate ? machine.id : undefined}
+    >
+      <div className="machine-card-summary">
+        <div className="machine-card-main">
+          <span className="machine-card-name">{label}</span>
+          {machine?.id === "local" ? <span className="machine-via-badge machine-via-auto">local</span> : null}
+          {vias.map((via) => (
             <span
-              className={`upd-method-badge ${machine.install_method === "unsupported" ? "upd-state-warn" : ""}`}
-              title="how portmap is installed on this machine"
+              key={via}
+              className={`machine-via-badge machine-via-${via === "direct" || via === "ssh" ? via : "auto"}`}
             >
-              {text(machine.install_method)}
+              {via}
+            </span>
+          ))}
+          {single ? <ConnectionStatusBadge status={single.status} /> : null}
+          {showUpdate ? (
+            <span
+              className={`upd-badge ${machineStatusClass(machine)}`}
+              title={status.title}
+              data-upd-status={status.label}
+            >
+              {status.label}
             </span>
           ) : null}
+          {showUpdate ? (
+            <span
+              className="upd-ver"
+              title={mismatch ? `running ${current || "unknown"}, installed package ${installed}` : "running version"}
+            >
+              {current ? `v${current}` : "version unknown"}
+            </span>
+          ) : null}
+          {mismatch ? (
+            <span
+              className="upd-ver upd-ver-mismatch"
+              title={`The installed package (${installed}) differs from the running process (${current || "unknown"}); a restart or in-flight update is pending.`}
+            >
+              installed {installed} · restart pending
+            </span>
+          ) : null}
+          {single || showUpdate ? (
+            <div className="machine-card-actions">
+              {single ? (
+                <ConnectionActions
+                  conn={single}
+                  mutating={mutating}
+                  onConnect={onConnect}
+                  onDisconnect={onDisconnect}
+                  onEdit={onEdit}
+                  onDelete={onDelete}
+                />
+              ) : null}
+              {showUpdate ? (
+                <button
+                  className="action-button conn-connect-btn"
+                  type="button"
+                  disabled={!eligible}
+                  title={eligible
+                    ? `Update ${label} to ${text(machine.latest_version) || "the latest release"}`
+                    : disabledTitle}
+                  onClick={() => onUpdate(machine)}
+                >
+                  <Play className="button-icon" aria-hidden="true" />
+                  {" "}{machineHasActiveJob(machine) ? "Updating…" : "Update"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
-        <VersionFacts machine={machine} />
-        {reason ? <div className="upd-reason" title={reason}>{reason}</div> : null}
-        {machine.error ? <div className="upd-error-inline" title={text(machine.error)}>{text(machine.error)}</div> : null}
+        {multi
+          ? conns.map((conn) => (
+              <ConnectionProfileLine
+                key={conn.id}
+                conn={conn}
+                mutating={mutating}
+                onConnect={onConnect}
+                onDisconnect={onDisconnect}
+                onEdit={onEdit}
+                onDelete={onDelete}
+              />
+            ))
+          : null}
+        {single && single.error ? (
+          <div className="machine-card-flag">
+            <span className="conn-error-inline" title={text(single.error)}>{text(single.error)}</span>
+          </div>
+        ) : null}
+        {showUpdate && machine.error ? (
+          <div className="machine-card-flag">
+            <span className="upd-error-inline" title={text(machine.error)}>{text(machine.error)}</span>
+          </div>
+        ) : null}
         {activeJob ? (
-          <div className="upd-job-line" data-upd-active-job>
+          <div className="machine-card-flag" data-upd-active-job>
             <StateBadge state={activeJob.state} />
             <span className="upd-muted">{text(activeJob.message) || "update in progress"}</span>
             <JobLogTail job={activeJob} label="log" />
           </div>
         ) : null}
-        {lastJob ? (
-          <div className="upd-job-line" data-upd-last-job>
-            <span className="upd-muted">
-              last update {text(lastJob.state)}
-              {text(lastJob.version_after) ? ` → ${text(lastJob.version_after)}` : ""}
-              {text(lastJob.updated_at) ? ` · ${formatCheckedAt(lastJob.updated_at)}` : ""}
-            </span>
-            {text(lastJob.error) ? <span className="upd-error-inline" title={text(lastJob.error)}>{text(lastJob.error)}</span> : null}
-            <JobLogTail job={lastJob} label="log" />
-          </div>
+        {showUpdate && text(machine.via) === "direct" && machine.authorized === false ? (
+          <CredentialEnrollment machineId={machine.id} machineName={label} onAuthorized={onAuthorized} />
         ) : null}
-        {via === "direct" && machine.authorized === false ? (
-          <CredentialEnrollment machineId={machine.id} machineName={machineLabel(machine)} onAuthorized={onAuthorized} />
-        ) : null}
-        {via === "ssh" && machine.authorized === false ? (
-          <p className="upd-reason">
-            SSH machines are authorized by the server over the existing connection when an update runs;
-            no token entry is needed here.
-          </p>
+        {editing ? (
+          <ConnectionForm
+            formState={formState}
+            onChange={onFormChange}
+            onSave={onFormSave}
+            onCancel={onFormCancel}
+            formError={formError}
+            mutating={mutating}
+          />
         ) : null}
       </div>
-      <div className="upd-row-actions">
-        <button
-          className="action-button conn-connect-btn"
-          type="button"
-          disabled={!eligible}
-          title={eligible
-            ? `Update ${machineLabel(machine)} to ${text(machine.latest_version) || "the latest release"}`
-            : disabledTitle}
-          onClick={() => onUpdate(machine)}
-        >
-          <Play className="button-icon" aria-hidden="true" />
-          {" "}{machineHasActiveJob(machine) ? "Updating…" : "Update"}
-        </button>
-      </div>
+      <details className="machine-card-details">
+        <summary>Details</summary>
+        <div className="machine-card-details-body">
+          {conns.map((conn) => {
+            const via = text(conn.actual_via || conn.via);
+            return (
+              <div className="machine-detail-row" key={conn.id}>
+                <code className="machine-detail-target">{text(conn.target)}</code>
+                {via ? (
+                  <span className={`machine-via-badge machine-via-${via === "direct" || via === "ssh" ? via : "auto"}`}>{via}</span>
+                ) : null}
+                <span className="conn-latency" title="HTTP latency from last check">
+                  {formatLatency(conn.latency_ms)}
+                </span>
+                <span className="conn-checked">checked {formatCheckedAt(conn.last_checked_at)}</span>
+              </div>
+            );
+          })}
+          {showUpdate ? (
+            <div className="machine-detail-row">
+              {text(machine.latest_version) ? (
+                <span className="upd-ver">latest <b>{text(machine.latest_version)}</b></span>
+              ) : (
+                <span className="upd-muted">latest unknown — use Check</span>
+              )}
+              {text(machine.build_id) ? <span className="upd-build">build {text(machine.build_id)}</span> : null}
+              {text(machine.install_method) ? (
+                <span
+                  className={`upd-method-badge ${machine.install_method === "unsupported" ? "upd-state-warn" : ""}`}
+                  title="how portmap is installed on this machine"
+                >
+                  {text(machine.install_method)}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          {reason ? <p className="upd-reason" title={reason}>{reason}</p> : null}
+          {lastJob ? (
+            <div className="machine-detail-row" data-upd-last-job>
+              <span className="upd-muted">
+                last update {text(lastJob.state)}
+                {text(lastJob.version_after) ? ` → ${text(lastJob.version_after)}` : ""}
+                {text(lastJob.updated_at) ? ` · ${formatCheckedAt(lastJob.updated_at)}` : ""}
+              </span>
+              {text(lastJob.error) ? (
+                <span className="upd-error-inline" title={text(lastJob.error)}>{text(lastJob.error)}</span>
+              ) : null}
+              <JobLogTail job={lastJob} label="log" />
+            </div>
+          ) : null}
+        </div>
+      </details>
     </div>
   );
 }
@@ -1817,7 +1755,7 @@ function CredentialEnrollment({ machineId, machineName, onAuthorized }) {
     const token = draft.trim();
     setOk(false);
     if (!token) {
-      setError(`Paste the management token revealed on ${machineName} itself (its own portal: Settings → Updates → Reveal local token).`);
+      setError(`Paste the management token revealed on ${machineName} itself (its own portal: Settings → Machines → Reveal local token).`);
       return;
     }
     setBusy(true);
@@ -1887,8 +1825,25 @@ function BatchTargets({ batch }) {
     </div>
   );
 }
+// MachineManager: single Settings section combining connection management and update controls.
+// Each domain maps to ONE machine card. Multiple saved connection profiles for the same domain
+// appear as separate connection rows within that card. Update state (from /api/updates) is
+// shown in the same card if available — no separate duplicate machine list.
+//
+// Props:
+//   canManageConnections  — from /api/machines, gates connection CRUD
+//   onMachinesRefresh     — callback: reload /api/machines (keepSelection=true) and version
+//   onConnectionsChecked  — callback(connections) after any probe or mutation; caller updates connHealth
+function MachineManager({ active, canManageConnections, onMachinesRefresh, onConnectionsChecked, connHealth, connections }) {
+  // --- Connection state ---
+  const [connectionsError, setConnectionsError] = useState("");
+  const [checkLoading, setCheckLoading] = useState(false);
+  const [formState, setFormState] = useState(null); // null | { id?, target, via }
+  const [formError, setFormError] = useState("");
+  const [panelError, setPanelError] = useState("");
+  const [mutating, setMutating] = useState(false);
 
-function UpdatesPanel({ active, onMachinesRefresh }) {
+  // Update jobs share the same machine cards as connection controls.
   const [updatesData, setUpdatesData] = useState(null);
   const [updatesAvailable, setUpdatesAvailable] = useState(true);
   const [updatesError, setUpdatesError] = useState("");
@@ -1896,7 +1851,7 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
   const [batch, setBatch] = useState(null);
   const [batchError, setBatchError] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
-  const [panelError, setPanelError] = useState("");
+  const [updPanelError, setUpdPanelError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [tokenBox, setTokenBox] = useState(null);
   const [pollEpoch, setPollEpoch] = useState(0);
@@ -1905,33 +1860,141 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
   const tokenRequestRef = useRef(null);
 
   useEffect(() => { batchRef.current = batch; }, [batch]);
-
-  // Load persisted machines/batches whenever the Settings tab becomes active.
-  // The manager API is private; public portals answer 401/403/404 and the
-  // section hides itself. No fetch happens while Settings is closed.
   useEffect(() => {
-    if (!active) {
+    if (connections !== null) setConnectionsError("");
+  }, [connections]);
+
+  // Load connection list on mount. Do NOT probe (?check=1) here — CatalogApp already
+  // fires the initial probe as soon as canManageConnections is confirmed, avoiding a
+  // duplicate parallel request. Subsequent user-initiated checks go through loadConnections({check:true}).
+  useEffect(() => {
+    if (!canManageConnections) return;
+    loadConnections();
+  }, [canManageConnections]);
+
+  async function loadConnections({ check = false } = {}) {
+    if (check) setCheckLoading(true);
+    setConnectionsError("");
+    try {
+      const res = await fetch(check ? "/api/connections?check=1" : "/api/connections");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const list = Array.isArray(data.connections) ? data.connections : [];
+      onConnectionsChecked(list);
+    } catch (err) {
+      setConnectionsError(`${err.message || err}`);
+    } finally {
+      if (check) setCheckLoading(false);
+    }
+  }
+
+  async function postAction(payload) {
+    setMutating(true);
+    try {
+      const res = await fetch("/api/connections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      let data;
+      try { data = await res.json(); } catch { data = {}; }
+      if (!res.ok) {
+        const errMsg = text(data.error) || `HTTP ${res.status}`;
+        await loadConnections();
+        await onMachinesRefresh();
+        return { failed: true, error: errMsg };
+      }
+      const list = Array.isArray(data.connections) ? data.connections : [];
+      setConnectionsError("");
+      onConnectionsChecked(list);
+      await onMachinesRefresh();
+      if (active) await refreshUpdates();
+      return { failed: false };
+    } catch (err) {
+      await loadConnections();
+      await onMachinesRefresh();
+      return { failed: true, error: `${err.message || err}` };
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!formState) return;
+    const { id, target, via } = formState;
+    const trimmed = target.trim();
+    if (!trimmed) { setFormError("Host or IP address is required."); return; }
+    const payload = { action: "save", target: trimmed, via };
+    if (id) payload.id = id;
+    const result = await postAction(payload);
+    if (!result.failed) { setFormState(null); setFormError(""); }
+    else setFormError(result.error);
+  }
+
+  async function handleConnect(id) {
+    setPanelError("");
+    const result = await postAction({ action: "connect", id });
+    if (result.failed) setPanelError(result.error);
+    else setPanelError("");
+  }
+
+  async function handleDisconnect(id) {
+    setPanelError("");
+    const result = await postAction({ action: "disconnect", id });
+    if (result.failed) setPanelError(result.error);
+    else setPanelError("");
+  }
+
+  async function handleDelete(id, target) {
+    const label = target || id;
+    if (!window.confirm(`Delete connection "${label}"?\nThis will disconnect it first if currently active.`)) return;
+    setPanelError("");
+    const result = await postAction({ action: "delete", id });
+    if (result.failed) setPanelError(result.error);
+    else setPanelError("");
+  }
+
+  function startEdit(conn) {
+    const active = conn.has_connection === true || conn.status === "connecting";
+    if (active) {
+      setPanelError(`Disconnect "${text(conn.target || conn.id)}" before editing.`);
+      return;
+    }
+    const via =
+      conn.via === "direct" || conn.via === "ssh" ? conn.via
+      : conn.actual_via === "direct" || conn.actual_via === "ssh" ? conn.actual_via
+      : "direct";
+    setFormState({ id: conn.id, target: text(conn.target), via });
+    setFormError("");
+    setPanelError("");
+  }
+
+  function startAdd() {
+    setFormState({ target: "", via: "direct" });
+    setFormError("");
+    setPanelError("");
+  }
+
+  function cancelForm() { setFormState(null); setFormError(""); }
+
+  // --- Updates section ---
+  useEffect(() => {
+    if (!active || !canManageConnections) {
       setTokenBox(null);
       return;
     }
     void refreshUpdates({ resume: true });
     return () => tokenRequestRef.current?.abort();
-  }, [active]);
+  }, [active, canManageConnections]);
 
   async function refreshUpdates({ check = false, resume = false } = {}) {
     if (check) setChecking(true);
     try {
       const res = await fetch(`/api/updates${check ? "?check=1" : ""}`);
-      if (res.status === 401 || res.status === 403 || res.status === 404) {
-        setUpdatesAvailable(false);
-        return;
-      }
+      if (res.status === 401 || res.status === 403 || res.status === 404) { setUpdatesAvailable(false); return; }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      if (data?.update_api === false) {
-        setUpdatesAvailable(false);
-        return;
-      }
+      if (data?.update_api === false) { setUpdatesAvailable(false); return; }
       setUpdatesAvailable(true);
       setUpdatesError("");
       const machines = Array.isArray(data?.machines) ? data.machines : [];
@@ -1951,11 +2014,7 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
     }
   }
 
-
-  // Poll the watched batch job while it is non-terminal and Settings is open.
-  // One serialized request chain: no overlapping polls, cleanup on unmount/tab
-  // leave, escalating backoff, and a long retry window while a local update
-  // restarts the very server this page is served from.
+  // Poll the active batch.
   useEffect(() => {
     const id = text(batch?.id);
     if (!active || !id) return;
@@ -1982,21 +2041,21 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
         setBatch(job);
         if (BATCH_TERMINAL_STATES.has(text(job.state))) {
           done = true;
-          try { await refreshUpdates(); } catch { /* listing refresh is best-effort */ }
-          if ((job.targets || []).some((target) => target.machine_id === "local")) onMachinesRefresh();
+          try { await refreshUpdates(); } catch { /* best effort */ }
+          if ((job.targets || []).some((t) => t.machine_id === "local")) onMachinesRefresh();
           return;
         }
       } catch (err) {
         if (!stopped) {
           failures += 1;
-          const includesLocal = (batchRef.current?.targets || []).some((target) => target.machine_id === "local");
+          const includesLocal = (batchRef.current?.targets || []).some((t) => t.machine_id === "local");
           const limit = includesLocal ? JOB_POLL_MAX_FAILURES_LOCAL : JOB_POLL_MAX_FAILURES;
           delay = Math.min(JOB_POLL_MS * failures, JOB_POLL_MAX_DELAY_MS);
           if (failures > limit) {
             done = true;
             setReconnecting(false);
             setBatchError(includesLocal
-              ? `Lost contact while ${batchLocalName} updated itself (it restarts its catalog server). The update continues server-side; reload later. Last error: ${err.message || err}`
+              ? `Lost contact while ${batchLocalName} updated itself. Reload later. Last error: ${err.message || err}`
               : `Lost contact with the update job: ${err.message || err}`);
             return;
           }
@@ -2009,17 +2068,14 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
     }
 
     void tick();
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
+    return () => { stopped = true; clearTimeout(timer); };
   }, [active, batch?.id, pollEpoch]);
 
   async function startUpdate(machineIds) {
     const ids = Array.from(new Set(machineIds.map(text).filter(Boolean)));
     if (!ids.length) return;
     setSubmitting(true);
-    setPanelError("");
+    setUpdPanelError("");
     setNotice("");
     try {
       const res = await fetch("/api/updates", {
@@ -2030,8 +2086,6 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
       let data = {};
       try { data = await res.json(); } catch { data = {}; }
       if (res.status === 409 && data && typeof data.job === "object" && data.job) {
-        // One active batch per manager: follow the existing batch instead of
-        // surfacing a failure — never start a second concurrent batch.
         setBatch(data.job);
         setBatchError("");
         setNotice(`An update batch is already active — following batch ${shortIdentity(data.job.id, 8)} instead.`);
@@ -2044,7 +2098,7 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
       setBatchError("");
       await refreshUpdates();
     } catch (err) {
-      setPanelError(`Update request failed: ${err.message || err}`);
+      setUpdPanelError(`Update request failed: ${err.message || err}`);
       await refreshUpdates();
     } finally {
       setSubmitting(false);
@@ -2054,15 +2108,15 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
   function requestSingleUpdate(machine) {
     const label = machineLabel(machine);
     const from = text(machine.current_version) || "unknown";
-    const to = text(machine.latest_version) || "the latest release (resolved on the machine)";
+    const to = text(machine.latest_version) || "latest";
     const lines = [`Update ${label}: ${from} → ${to}?`];
     if (text(machine.installed_version) && machine.installed_version !== machine.current_version) {
       lines.push(`Installed package ${text(machine.installed_version)} differs from the running ${from}.`);
     }
     if (machine.id === "local") {
-      lines.push(`${label} updates last: its catalog service restarts, this page reconnects automatically, and existing connections and DNS are preserved.`);
+      lines.push(`${label} updates last; catalog service restarts and page reconnects automatically.`);
     } else if (text(machine.via) === "ssh") {
-      lines.push("Runs over the existing SSH connection; the server authorizes the remote updater.");
+      lines.push("Runs over the existing SSH connection.");
     } else {
       lines.push("Runs over the direct connection using the enrolled management capability.");
     }
@@ -2074,15 +2128,15 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
   function requestUpdateAll() {
     const eligible = (updatesData?.machines || []).filter(machineUpdateEligible).sort(compareUpdateMachines);
     if (!eligible.length) return;
-    const lines = eligible.map((machine) => `• ${machineLabel(machine)}: ${text(machine.current_version) || "unknown"} → ${text(machine.latest_version) || "latest"}`);
+    const lines = eligible.map((m) => `• ${machineLabel(m)}: ${text(m.current_version) || "unknown"} → ${text(m.latest_version) || "latest"}`);
     const notes = [];
-    if (eligible.some((machine) => machine.id === "local")) {
+    if (eligible.some((m) => m.id === "local")) {
       notes.push(`Remote machines update first; ${localName} (this portal's host) updates last and this page reconnects automatically.`);
     }
-    notes.push("One machine failing does not stop the others; failures are reported per machine.");
+    notes.push("One machine failing does not stop the others.");
     notes.push("Updates continue in the background if this page closes.");
     if (!window.confirm(`Update ${eligible.length} machine(s) to the latest release?\n${lines.join("\n")}\n\n${notes.join(" ")}`)) return;
-    void startUpdate(eligible.map((machine) => machine.id));
+    void startUpdate(eligible.map((m) => m.id));
   }
 
   async function revealLocalToken() {
@@ -2100,12 +2154,9 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
       let data = {};
       try { data = await res.json(); } catch { data = {}; }
       if (!res.ok) throw new Error(text(data.error) || `HTTP ${res.status}`);
-      // Held in component state only: never persisted, logged, or echoed elsewhere.
       if (!controller.signal.aborted) setTokenBox({ token: text(data.token) });
     } catch (err) {
-      if (err.name !== "AbortError") {
-        setTokenBox({ error: `Could not reveal local token: ${err.message || err}` });
-      }
+      if (err.name !== "AbortError") setTokenBox({ error: `Could not reveal local token: ${err.message || err}` });
     } finally {
       if (tokenRequestRef.current === controller) tokenRequestRef.current = null;
     }
@@ -2126,79 +2177,137 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
     }
   }
 
-  const machines = (updatesData?.machines || []).slice().sort(compareUpdateMachines);
-  const eligibleCount = machines.filter(machineUpdateEligible).length;
+  const updMachines = (updatesData?.machines || []).slice().sort(compareUpdateMachines);
+  const eligibleCount = updMachines.filter(machineUpdateEligible).length;
   const history = (updatesData?.batches || []).filter((item) => text(item.id) !== text(batch?.id)).slice(0, 5);
-  // One active batch per manager: while any batch is queued/running, no new
-  // update can start (the server answers 409 with the active job; the UI
-  // disables the start controls up front and follows the running batch).
   const batchActive = (batch && !BATCH_TERMINAL_STATES.has(text(batch.state)))
     || (updatesData?.batches || []).some((item) => !BATCH_TERMINAL_STATES.has(text(item.state)));
-  // Always name the machine with id='local' from the updates API: it is the host
-  // serving this portal (e.g. ylangsmj), which may differ from the browser URL
-  // host (e.g. dexgem-server.portmap) or the currently selected machine tab.
-  const localMachine = machines.find((machine) => machine.id === "local") || null;
+  const localMachine = updMachines.find((m) => m.id === "local") || null;
   const localName = localMachine ? machineLabel(localMachine) : "the host machine";
   const batchLocalName = text(
-    (batch?.targets || []).find((target) => target.machine_id === "local")?.label,
+    (batch?.targets || []).find((t) => t.machine_id === "local")?.label,
   ) || localName;
 
-  if (!active || !updatesAvailable) return null;
+  // Build a map of update machine info keyed by id for merging into machine cards.
+  const updByMachineId = useMemo(() => {
+    const map = new Map();
+    for (const m of updMachines) map.set(m.id, m);
+    return map;
+  }, [updMachines]);
+
+  // Group connections by domain — one card per domain. Preserve both profiles when duplicate.
+  const connsByDomain = useMemo(() => {
+    const map = new Map(); // domain -> [conn, ...]
+    for (const conn of (connections || [])) {
+      const domain = text(conn.domain || conn.id || conn.target);
+      if (!map.has(domain)) map.set(domain, []);
+      map.get(domain).push(conn);
+    }
+    return map;
+  }, [connections]);
+
+  // Union of all known machine identities for the card list.
+  // Domains from connections + machine ids from updates that are not purely local.
+  const allMachineKeys = useMemo(() => {
+    const keys = new Set();
+    for (const [domain] of connsByDomain) keys.add(domain);
+    for (const m of updMachines) {
+      if (m.id !== "local") {
+        // Try to match updates machine to connection domain
+        const matched = [...connsByDomain.keys()].find((d) => d === m.id);
+        keys.add(matched || m.id);
+      }
+    }
+    return Array.from(keys);
+  }, [connsByDomain, updMachines]);
+
+  if (!canManageConnections) return null;
+
   return (
-    <section className="utility-panel" aria-label="Portmap updates" data-updates-panel>
-      <details className="quick-setup upd-section" open>
+    <section className="utility-panel" aria-label="Machine management">
+      <details className="quick-setup conn-section" open>
         <summary>
-          <RefreshCw className="button-icon" aria-hidden="true" />
-          {" "}Updates
+          <Link2 className="button-icon" aria-hidden="true" />
+          {" "}Machines
         </summary>
-        <div className="quick-setup-body">
-          <div className="upd-toolbar">
+        <div className="quick-setup-body machine-mgr-body">
+          {/* Toolbar: connections and updates controls combined */}
+          <div className="machine-mgr-toolbar">
             <button
               className="action-button"
               type="button"
-              onClick={() => void refreshUpdates({ check: true })}
-              disabled={checking || submitting}
-              title="Check every machine against the trusted release source"
+              onClick={() => loadConnections({ check: true })}
+              disabled={checkLoading || mutating}
+              title="Probe all connections and measure HTTP latency"
             >
               <RefreshCw className="button-icon" aria-hidden="true" />
-              {" "}{checking ? "Checking…" : "Check updates"}
+              {" "}{checkLoading ? "Checking…" : "Check connections"}
             </button>
+            {updatesAvailable && (
+              <button
+                className="action-button"
+                type="button"
+                onClick={() => void refreshUpdates({ check: true })}
+                disabled={checking || submitting}
+                title="Check every machine against the trusted release source"
+              >
+                <RefreshCw className="button-icon" aria-hidden="true" />
+                {" "}{checking ? "Checking…" : "Check updates"}
+              </button>
+            )}
+            {updatesAvailable && (
+              <button
+                className="action-button conn-connect-btn"
+                type="button"
+                onClick={requestUpdateAll}
+                disabled={!eligibleCount || submitting || checking || batchActive}
+                title={batchActive
+                  ? "An update batch is already active"
+                  : eligibleCount
+                    ? `Update every eligible machine (${eligibleCount})`
+                    : "No machine currently has an available update"}
+              >
+                <Play className="button-icon" aria-hidden="true" />
+                {" "}Update all eligible{eligibleCount ? ` (${eligibleCount})` : ""}
+              </button>
+            )}
+            {updatesAvailable && (
+              <button
+                className="action-button upd-token-btn"
+                type="button"
+                onClick={() => (tokenBox?.token ? setTokenBox(null) : void revealLocalToken())}
+                disabled={tokenBox?.loading}
+                title={`Reveal ${localName}'s local management token`}
+              >
+                <Copy className="button-icon" aria-hidden="true" />
+                {" "}{tokenBox?.loading ? `Revealing…` : tokenBox?.token ? `Hide ${localName} token` : `Reveal ${localName} token`}
+              </button>
+            )}
             <button
-              className="action-button conn-connect-btn"
+              className="action-button conn-add-btn"
               type="button"
-              onClick={requestUpdateAll}
-              disabled={!eligibleCount || submitting || checking || batchActive}
-              title={batchActive
-                ? "An update batch is already active; only one batch runs at a time"
-                : eligibleCount
-                  ? `Update every eligible machine (${eligibleCount}); ${localName} updates last`
-                  : "No machine currently has an available update it can perform"}
+              onClick={startAdd}
+              disabled={mutating || formState !== null}
+              aria-label="Add new connection"
             >
-              <Play className="button-icon" aria-hidden="true" />
-              {" "}Update all eligible{eligibleCount ? ` (${eligibleCount})` : ""}
-            </button>
-            <button
-              className="action-button upd-token-btn"
-              type="button"
-              onClick={() => (tokenBox?.token ? setTokenBox(null) : void revealLocalToken())}
-              disabled={tokenBox?.loading}
-              title={`Reveal ${localName}'s local management token (the machine serving this portal) for authorizing another manager`}
-            >
-              <Copy className="button-icon" aria-hidden="true" />
-              {" "}{tokenBox?.loading ? `Revealing ${localName} token…` : tokenBox?.token ? `Hide ${localName} token` : `Reveal ${localName} token`}
+              <Plus className="button-icon" aria-hidden="true" />
+              {" "}Add connection
             </button>
           </div>
-          <p className="upd-muted" data-upd-manager-note>
-            Updates are managed by <b>{localName}</b> (id <code>local</code>) — the machine serving this
-            portal — regardless of which machine tab is selected.
-          </p>
+
+          {/* Updates manager note */}
+          {updatesAvailable && localMachine && (
+            <p className="upd-muted" data-upd-manager-note>
+              Updates are managed by <b>{localName}</b> (the machine serving this portal).
+            </p>
+          )}
+
+          {/* Token reveal */}
           {tokenBox?.token ? (
             <div className="upd-token-reveal" data-upd-local-token>
               <p className="upd-token-warning">
-                Treat this token like a password — it authorizes managing updates on
-                {" "}<b>{localName}</b>{" "} (the machine with id <code>local</code> serving this portal,
-                not the currently selected machine).
-                It is shown only here; this page does not store it.
+                Treat this token like a password — it authorizes managing updates on{" "}
+                <b>{localName}</b>. It is shown only here; this page does not store it.
               </p>
               <div className="upd-token-value-row">
                 <code className="upd-token-value" id="upd-local-token-value">{tokenBox.token}</code>
@@ -2207,32 +2316,119 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
             </div>
           ) : null}
           {tokenBox?.error ? <div className="conn-panel-error" role="alert">{tokenBox.error}</div> : null}
-          {panelError ? <div className="conn-panel-error" role="alert">{panelError}</div> : null}
+          {updPanelError ? <div className="conn-panel-error" role="alert">{updPanelError}</div> : null}
           {notice ? <p className="upd-reconnect" role="status" data-upd-notice>{notice}</p> : null}
-          {updatesError ? (
+
+          {/* Errors */}
+          {connectionsError && (
+            <div className="empty load-error" role="alert">
+              {connectionsError}{" "}
+              <button className="action-button" type="button" onClick={() => loadConnections()}>Retry</button>
+            </div>
+          )}
+          {panelError && <div className="conn-panel-error" role="alert">{panelError}</div>}
+          {updatesError && (
             <div className="empty load-error" role="alert">
               {updatesError}{" "}
               <button className="action-button" type="button" onClick={() => void refreshUpdates({ resume: true })}>Retry</button>
             </div>
-          ) : null}
-          {updatesData === null && !updatesError ? <div className="empty">Loading updates…</div> : null}
-          {updatesData !== null && machines.length === 0 ? (
-            <div className="empty">No machines reported by the updates API.</div>
-          ) : null}
-          {machines.length > 0 ? (
-            <div className="upd-list" role="list">
-              {machines.map((machine) => (
-                <UpdateMachineRow
-                  key={machine.id}
-                  machine={machine}
-                  onUpdate={requestSingleUpdate}
-                  onAuthorized={() => refreshUpdates()}
-                  submitting={submitting}
-                  batchActive={batchActive}
-                />
-              ))}
+          )}
+
+          {/* Loading states */}
+          {connections === null && !connectionsError && <div className="empty">Loading connections…</div>}
+
+          {/* Add form (no existing domain yet) */}
+          {formState !== null && !formState.id && (
+            <ConnectionForm
+              formState={formState}
+              onChange={setFormState}
+              onSave={handleSave}
+              onCancel={cancelForm}
+              formError={formError}
+              mutating={mutating}
+            />
+          )}
+
+          {/* Empty state */}
+          {connections !== null && connections.length === 0 && !formState && (
+            <div className="empty">
+              No saved connections.{" "}
+              <button className="action-button" type="button" onClick={startAdd} disabled={mutating}>
+                Add a host
+              </button>{" "}
+              to connect to a remote machine.
             </div>
-          ) : null}
+          )}
+
+          {/* Local machine card (no connection profiles) */}
+          {updatesAvailable && localMachine && (
+            <MachineCard
+              cardKey="local"
+              label={machineLabel(localMachine)}
+              conns={[]}
+              machine={localMachine}
+              updatesAvailable={updatesAvailable}
+              mutating={mutating}
+              submitting={submitting}
+              batchActive={batchActive}
+              onUpdate={requestSingleUpdate}
+              onAuthorized={() => refreshUpdates()}
+            />
+          )}
+          {/* Machine cards: one per domain — all connection profiles plus update state */}
+          {connections !== null && [false, true].map((failed) => {
+            const keys = allMachineKeys.filter((key) => {
+              const health = connHealth.get(key);
+              const profiles = connsByDomain.get(key) || [];
+              const offline = health?.isFailed || (profiles.length > 0 && profiles.every((conn) => conn.has_connection === false));
+              return Boolean(offline) === failed;
+            });
+            if (!keys.length) return null;
+            const Group = failed ? "details" : "section";
+            return (
+              <Group key={String(failed)} className={failed ? "machine-settings-disconnected" : undefined}>
+                {failed && <summary>Disconnected machines ({keys.length})</summary>}
+                <div className="machine-card-list" role="list">
+                  {keys.map((domainKey) => {
+                    const conns = (connsByDomain.get(domainKey) || []).map((conn) =>
+                      connHealth.get(domainKey)?.profiles?.find((profile) => profile.id === conn.id) || conn);
+                    // Match update machine: prefer domain match, then id match
+                    const updMachine = updByMachineId.get(domainKey)
+                      || updMachines.find((m) => m.id === domainKey || (conns[0] && m.id === conns[0]?.id))
+                      || null;
+                    const label = conns[0]?.domain || (updMachine ? machineLabel(updMachine) : "") || domainKey;
+                    return (
+                      <MachineCard
+                        key={domainKey}
+                        cardKey={domainKey}
+                        label={label}
+                        conns={conns}
+                        machine={updMachine}
+                        updatesAvailable={updatesAvailable}
+                        mutating={mutating}
+                        submitting={submitting}
+                        batchActive={batchActive}
+                        formState={formState}
+                        formError={formError}
+                        onFormChange={setFormState}
+                        onFormSave={handleSave}
+                        onFormCancel={cancelForm}
+                        onConnect={handleConnect}
+                        onDisconnect={handleDisconnect}
+                        onEdit={startEdit}
+                        onDelete={handleDelete}
+                        onUpdate={requestSingleUpdate}
+                        onAuthorized={() => refreshUpdates()}
+                      />
+                    );
+                  })}
+                </div>
+              </Group>
+            );
+          })}
+
+
+          {/* Batch progress */}
           {batch ? (
             <section className="upd-batch" data-updates-batch data-batch-state={text(batch.state)} aria-label="Update batch">
               <div className="upd-batch-header">
@@ -2251,7 +2447,7 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
               {batchError ? (
                 <div className="conn-panel-error" role="alert">
                   {batchError}{" "}
-                  <button className="action-button" type="button" onClick={() => { setBatchError(""); setPollEpoch((epoch) => epoch + 1); }}>
+                  <button className="action-button" type="button" onClick={() => { setBatchError(""); setPollEpoch((e) => e + 1); }}>
                     Retry
                   </button>
                 </div>
@@ -2262,6 +2458,8 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
               </p>
             </section>
           ) : null}
+
+          {/* Batch history */}
           {history.length > 0 ? (
             <div className="upd-history" aria-label="Recent update batches">
               <div className="upd-history-label">Recent batches</div>
@@ -2284,6 +2482,8 @@ function UpdatesPanel({ active, onMachinesRefresh }) {
   );
 }
 
+
+
 function CatalogApp() {
   const [activePage, setActivePage] = useState("catalog");
   // null = not yet fetched (loading or failed); [] or [...] = loaded
@@ -2297,6 +2497,103 @@ function CatalogApp() {
   const [actionMessage, setActionMessage] = useState(null);
   const [actionLog, setActionLog] = useState([]);
   const [canManageConnections, setCanManageConnections] = useState(false);
+  // connHealth: per-domain health map updated by connection probes.
+  // Starts empty — machines start as "unknown" until probed (shown as available tabs).
+  // CatalogApp runs the initial probe (?check=1) as soon as canManageConnections is true
+  // so nav tabs reflect live reachability from the very first page load without needing
+  // a Settings visit. MachineManager also calls back here on any subsequent check/mutation.
+  const [connHealth, setConnHealth] = useState(() => new Map());
+  const [connectionsSnapshot, setConnectionsSnapshot] = useState(null);
+
+  // Merge new connection probe results into connHealth.
+  // A checked result (last_checked_at non-null) always wins over an unchecked one.
+  // This prevents the fast unchecked /api/connections response from overwriting
+  // a previously obtained /api/connections?check=1 result.
+  function handleConnectionsChecked(connections) {
+    setConnectionsSnapshot(connections);
+    const incoming = buildConnHealth(connections);
+    setConnHealth((prev) => {
+      // Unchecked listings must not erase a known result for the same domain.
+      const merged = new Map(incoming);
+      for (const [domain, existing] of prev) {
+        const next = merged.get(domain);
+        // Preserve existing probed result if incoming is unprobed for same domain.
+        if (existing.last_checked_at && next && !next.last_checked_at && next.status === "configured") {
+          merged.set(domain, existing);
+        }
+      }
+      return merged;
+    });
+  }
+
+  // Serialized, visible-only health checks also detect failures after page load.
+  useEffect(() => {
+    if (!canManageConnections) return;
+    let stopped = false;
+    let running = false;
+    let timer;
+    const controller = new AbortController();
+    async function refreshHealth() {
+      clearTimeout(timer);
+      if (stopped || running || document.visibilityState !== "visible") return;
+      running = true;
+      try {
+        const response = await fetch("/api/connections?check=1", { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (!stopped) handleConnectionsChecked(Array.isArray(data.connections) ? data.connections : []);
+      } catch {
+        // A failed manager request is not evidence that every remote went offline.
+      } finally {
+        running = false;
+        if (!stopped && document.visibilityState === "visible") timer = setTimeout(refreshHealth, 15000);
+      }
+    }
+    function onVisibility() {
+      if (document.visibilityState === "visible") void refreshHealth();
+      else clearTimeout(timer);
+    }
+    void refreshHealth();
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onVisibility);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      controller.abort();
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onVisibility);
+    };
+  }, [canManageConnections]);
+  const [serviceVersion, setServiceVersion] = useState("");
+  const versionAbortRef = useRef(null);
+
+  async function loadServiceVersion() {
+    versionAbortRef.current?.abort();
+    const controller = new AbortController();
+    versionAbortRef.current = controller;
+    try {
+      const response = await fetch("/api/version", { signal: controller.signal, cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (!controller.signal.aborted) setServiceVersion(text(data.catalog_version));
+    } catch {
+      if (!controller.signal.aborted) setServiceVersion("");
+    }
+  }
+
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") void loadServiceVersion();
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      versionAbortRef.current?.abort();
+    };
+  }, []);
   // Shared abort ref: the controller stored here is the authoritative catalog request.
   // Both the useEffect and reloadCatalog write to this ref after aborting the prior value,
   // so whichever started last is the one that may apply its result.
@@ -2521,7 +2818,12 @@ function CatalogApp() {
   const selectedMachine = machines ? machines.find((m) => m.id === selectedMachineId) : null;
   const machineDisappeared = machines !== null && machines.length > 0
     && selectedMachineId !== null && !selectedMachine;
-  const machineUnavailable = selectedMachine && !selectedMachine.available;
+  // machineUnavailable: declared unavailable by machines API OR live probe confirms failure.
+  // available:false is conservative (backend-saved); connHealth catches live SSH tunnel failures
+  // where the backend still reports available:true (AccessSnapshot is stale on catalog path).
+  const machineUnavailable = selectedMachine && (
+    !selectedMachine.available || isMachineKnownFailed(selectedMachine, connHealth)
+  );
 
   let catalogContent;
   if (machines === null) {
@@ -2555,7 +2857,15 @@ function CatalogApp() {
           {selectedMachine.via && selectedMachine.via !== "local"
             ? ` (${selectedMachine.via}${selectedMachine.target ? ` → ${selectedMachine.target}` : ""})`
             : ""}
-          {" "}is not currently connected. Choose another machine or reconnect.
+          {" "}is not currently reachable.{" "}
+          <button
+            className="action-button"
+            type="button"
+            onClick={() => setActivePage("settings")}
+          >
+            Go to Settings
+          </button>{" "}
+          to reconnect or check connection status.
         </div>
       </section>
     );
@@ -2593,6 +2903,7 @@ function CatalogApp() {
           settingsSelected={activePage === "settings"}
           onSelect={handleSelectMachine}
           onSelectSettings={() => setActivePage("settings")}
+          connHealth={connHealth}
         />
       </header>
       <section
@@ -2622,16 +2933,24 @@ function CatalogApp() {
         hidden={activePage !== "settings"}
         tabIndex={0}
       >
-        <ConnectionManager
-          canManageConnections={canManageConnections}
-          onMachinesRefresh={() => loadMachines({ keepSelection: true })}
-        />
-        <UpdatesPanel
+        <MachineManager
           active={activePage === "settings"}
-          onMachinesRefresh={() => loadMachines({ keepSelection: true })}
+          connHealth={connHealth}
+          connections={connectionsSnapshot}
+          canManageConnections={canManageConnections}
+          onMachinesRefresh={() => {
+            void loadMachines({ keepSelection: true });
+            void loadServiceVersion();
+          }}
+          onConnectionsChecked={handleConnectionsChecked}
         />
         <DownloadPanel catalog={catalog?.client_access ? null : catalog} />
       </section>
+      {serviceVersion && (
+        <footer className="meta app-version" title="Version of the Portmap service serving this page">
+          Portmap v{serviceVersion}
+        </footer>
+      )}
     </main>
   );
 }
