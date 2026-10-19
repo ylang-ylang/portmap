@@ -208,3 +208,4 @@
   `case/release/history-sync` -> `feat/hotfix-release-environment` -> dev.
   Full CI tests/build/HTTP gates passed in run39237869253; the sync resolves
   the subsequent pre-push merge obstruction without altering existing tags.
+- Release V0.19 (portmap 0.19.0) from dev 9d5262a8d8 via the automated pipeline: compiled catalog UI/skill rebuilt, frozen linux-amd64 archive, checksum and matching manifest published to the immutable GitHub release; non-integration suite green.
