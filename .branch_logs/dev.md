@@ -228,3 +228,6 @@
 - Prepare v0.20.0 (package 0.20.0), preserve historical V0.19 read-only retries,
   and extend tag/source/manifest/updater validation to exact patch versions.
   Publication remains tag-driven with checked Brew PRs and no machine upgrades.
+- Integrate release/v0.20.0 before its main merge, as required by the new graph.
+  Frozen candidate/Skill HTTP and both workflow lint gates passed; the exact
+  full regression result is 1337 passed, 2 deselected. No live deployment.
