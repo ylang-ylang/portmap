@@ -199,3 +199,8 @@
 - Bootstrap tap CI merged only after its real GitHub check passed (tap PR1).
   Dedicated `HOMEBREW_TAP_TOKEN` is persisted in source-repository Actions Secrets.
   Formal publication is complete only after the automatic release and tap jobs.
+- Integrate `feat/hotfix-release-environment`: the first automatic release run
+  stopped before tests/tagging because live Bullseye security packages returned
+  HTTP404. Run source tests on the unprivileged Ubuntu runner and pin frozen
+  builder APT dependencies to the signed 2025-07-01 Debian snapshot. Keep the
+  Python image/glibc baseline and all publication gates unchanged.

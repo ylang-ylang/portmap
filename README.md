@@ -791,8 +791,11 @@ already enabled.
 
 ### Building and Hosting the Unified Package
 
-The pinned builder targets Debian 11's glibc 2.31 baseline. Docker is used for
-this build; the installed command can use Docker or rootless Podman at runtime:
+The pinned builder targets Debian 11's glibc 2.31 baseline and installs build
+dependencies from the signed Debian snapshot dated 2025-07-01, rather than
+moving live mirrors. Release tests run separately as the unprivileged Ubuntu
+24.04 runner using Python 3.12 and Git. Docker is used for the frozen build;
+the installed command can use Docker or rootless Podman at runtime:
 
 ```bash
 npm ci
