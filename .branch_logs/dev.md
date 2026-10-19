@@ -235,3 +235,8 @@
   mean no draft exists. Use complete release-list discovery and isolate draft-aware
   planning from the read-only source build job. Retry the existing v0.20.0 draft
   and uploaded attachments without rebuilding, retagging or upgrading machines.
+- v0.20.0 is now formally published; workflow39289657900 succeeded and tap PR4
+  merged. Recovery did not rebuild or replace anything: Release417475653 and
+  archive SHA25681488dd8369c83acd13ce68342f3bba950f23d79ce28290268166c7fa9d97dcc
+  match the original build. Brew now serves0.20.0. This is completed publication,
+  not the old failed/waiting run39280508837. No user-machine upgrades performed.
