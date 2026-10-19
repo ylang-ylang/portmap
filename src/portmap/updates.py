@@ -54,12 +54,15 @@ from .client_runtime import _disposable_user_scope, frozen, process_identity, wo
 from .downloads import (
     MANIFEST_TIMEOUT_SECONDS,
     RELEASE_MANIFEST_CACHE_NAME,
+    VERSION_RE,
     ReleaseAsset,
     Release,
     _parse_asset,
+    _parse_manifest_source,
     fetch_archive,
     trusted_opener,
     validate_manifest_source_url,
+    version_for_tag,
 )
 from .errors import PortmapError
 from .permissions import ensure_private_directory, ensure_private_file
@@ -86,7 +89,6 @@ BREW_PATH_RE = re.compile(
 )
 BREW_FORMULA = "ylang-ylang/tap/portmap"
 JOB_ID_RE = re.compile(r"job-\d{8}T\d{6}Z-[0-9a-f]{8}\Z")
-VERSION_RE = re.compile(r"\d+\.\d+\.\d+\Z")
 REQUEST_ID_MAX = 128
 LOG_TAIL_BYTES = 16 * 1024
 CHECK_TTL_SECONDS = 300.0
@@ -103,7 +105,7 @@ WORKER_KINDS = frozenset({"local", "batch"})
 # project's GitHub release downloads and validated by the same rules the
 # catalog uses for its own published downloads.
 RELEASES_LATEST_URL = "https://github.com/ylang-ylang/portmap/releases/latest"
-RELEASE_TAG_RE = re.compile(r"^/ylang-ylang/portmap/releases/tag/(V\d+\.\d+)$")
+RELEASE_TAG_PATH_PREFIX = "/ylang-ylang/portmap/releases/tag/"
 RELEASES_PATH_PREFIX = "/ylang-ylang/portmap/releases"
 
 SUDO_PROBE_TIMEOUT = 10.0
@@ -463,12 +465,11 @@ def build_fingerprint(executable: Path | None = None, *, package_dir: Path | Non
 # ---------------------------------------------------------------------------
 
 
-RELEASE_TAG_VALUE_RE = re.compile(r"V\d+\.\d+\Z")
-
-
 def _release_manifest_url(tag: str) -> str:
-    if RELEASE_TAG_VALUE_RE.fullmatch(tag) is None:
-        raise UpdateError(f"refusing malformed release tag: {tag!r}")
+    try:
+        version_for_tag(tag)
+    except ValueError as exc:
+        raise UpdateError(f"refusing malformed release tag: {tag!r}") from exc
     url = f"https://github.com{RELEASES_PATH_PREFIX}/download/{tag}/{RELEASE_MANIFEST_CACHE_NAME}"
     try:
         validate_manifest_source_url(url, filename=RELEASE_MANIFEST_CACHE_NAME)
@@ -492,6 +493,10 @@ def parse_update_manifest(payload: Any, *, expected_version: str | None = None) 
         raise UpdateError(f"release manifest version is malformed: {version!r}")
     if expected_version is not None and version != expected_version:
         raise UpdateError(f"release manifest describes {version}, not the requested {expected_version}")
+    try:
+        _parse_manifest_source(payload, version=version)
+    except ValueError as exc:
+        raise UpdateError(f"release manifest is invalid: {exc}") from exc
     assets_payload = payload.get("assets")
     if not isinstance(assets_payload, list) or not assets_payload:
         raise UpdateError("release manifest assets must be a non-empty list")
@@ -516,6 +521,9 @@ def parse_update_manifest(payload: Any, *, expected_version: str | None = None) 
 def fetch_release_manifest(tag: str, *, expected_version: str | None = None) -> Release:
     """Fetch and strictly validate the official manifest for ``tag``."""
     url = _release_manifest_url(tag)
+    tag_version = tag[1:] + ".0" if tag.startswith("V") else tag[1:]
+    if expected_version is not None and expected_version != tag_version:
+        raise UpdateError(f"release tag {tag} does not match the requested {expected_version}")
     import urllib.request
 
     request = urllib.request.Request(url, headers={"user-agent": f"portmap-updates/{__version__}"})
@@ -530,7 +538,7 @@ def fetch_release_manifest(tag: str, *, expected_version: str | None = None) -> 
         payload = json.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise UpdateError(f"official release manifest is not valid JSON: {exc}") from exc
-    return parse_update_manifest(payload, expected_version=expected_version)
+    return parse_update_manifest(payload, expected_version=tag_version)
 
 
 def fetch_latest_tag() -> str:
@@ -547,14 +555,20 @@ def fetch_latest_tag() -> str:
     except OSError as exc:
         raise UpdateError(f"could not resolve the latest official release: {exc}") from exc
     parsed = urllib.parse.urlsplit(final_url)
-    match = RELEASE_TAG_RE.fullmatch(parsed.path) if parsed.path else None
-    if (parsed.hostname or "").lower() != "github.com" or match is None:
+    tag = parsed.path.removeprefix(RELEASE_TAG_PATH_PREFIX)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc.lower() != "github.com"
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith(RELEASE_TAG_PATH_PREFIX)
+    ):
         raise UpdateError(f"the latest-release pointer resolved outside the project tags: {final_url}")
-    return match.group(1)
-
-
-def tag_for_version(version: str) -> str:
-    return "V" + ".".join(version.split(".")[:2])
+    try:
+        version_for_tag(tag)
+    except ValueError as exc:
+        raise UpdateError(f"the latest-release pointer resolved outside the project tags: {final_url}") from exc
+    return tag
 
 
 def platform_asset(release: Release) -> ReleaseAsset | None:

@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .downloads import tag_for_version
 from .errors import PortmapError
 from .updates import (
     RECOVERY_TIMEOUT,
@@ -53,7 +54,6 @@ from .updates import (
     probe_installation,
     process_identity,
     refresh_brew_metadata,
-    tag_for_version,
     updates_dir,
     version_tuple,
 )

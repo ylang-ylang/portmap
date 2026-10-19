@@ -20,12 +20,28 @@
       "target": "case/*/*",
       "target_ref": "refs/heads/case/*/*",
       "target_ref_regex": "^refs/heads/case/.+/.+$"
+    },
+    {
+      "source": "dev",
+      "source_ref": "refs/heads/dev",
+      "target": "release/*",
+      "target_ref": "refs/heads/release/*",
+      "target_ref_regex": "^refs/heads/release/.+$"
+    },
+    {
+      "source": "main",
+      "source_ref": "refs/heads/main",
+      "target": "hotfix/*",
+      "target_ref": "refs/heads/hotfix/*",
+      "target_ref_regex": "^refs/heads/hotfix/.+$"
     }
   ],
   "branches": {
     "families": [
       "feat/*",
-      "case/*/*"
+      "case/*/*",
+      "release/*",
+      "hotfix/*"
     ],
     "long_lived": [
       "main",
@@ -42,6 +58,16 @@
       "name": "feat/*",
       "ref": "refs/heads/feat/*",
       "ref_regex": "^refs/heads/feat/.+$"
+    },
+    {
+      "name": "release/*",
+      "ref": "refs/heads/release/*",
+      "ref_regex": "^refs/heads/release/.+$"
+    },
+    {
+      "name": "hotfix/*",
+      "ref": "refs/heads/hotfix/*",
+      "ref_regex": "^refs/heads/hotfix/.+$"
     }
   ],
   "merge_rules": [
@@ -75,16 +101,53 @@
       "target_ref_regex": "^refs/heads/dev$"
     },
     {
-      "id": "dev to main",
-      "source": "dev",
-      "source_ref": "refs/heads/dev",
-      "source_ref_regex": "^refs/heads/dev$",
-      "tag_pattern": "V#.#",
-      "tag_ref": "refs/tags/V#.#",
-      "tag_ref_regex": "^refs/tags/V[0-9]+\\.[0-9]+$",
+      "id": "release/* to dev",
+      "source": "release/*",
+      "source_ref": "refs/heads/release/*",
+      "source_ref_regex": "^refs/heads/release/.+$",
+      "target": "dev",
+      "target_ref": "refs/heads/dev",
+      "target_ref_regex": "^refs/heads/dev$"
+    },
+    {
+      "id": "release/* to main",
+      "source": "release/*",
+      "source_ref": "refs/heads/release/*",
+      "source_ref_regex": "^refs/heads/release/.+$",
+      "tag_pattern": "v#.#.0",
+      "tag_ref": "refs/tags/v#.#.0",
+      "tag_ref_regex": "^refs/tags/v[0-9]+\\.[0-9]+\\.0$",
       "tag_required": true,
       "tag_tokens": [
         "#",
+        "#",
+        "0"
+      ],
+      "target": "main",
+      "target_ref": "refs/heads/main",
+      "target_ref_regex": "^refs/heads/main$"
+    },
+    {
+      "id": "hotfix/* to dev",
+      "source": "hotfix/*",
+      "source_ref": "refs/heads/hotfix/*",
+      "source_ref_regex": "^refs/heads/hotfix/.+$",
+      "target": "dev",
+      "target_ref": "refs/heads/dev",
+      "target_ref_regex": "^refs/heads/dev$"
+    },
+    {
+      "id": "hotfix/* to main",
+      "source": "hotfix/*",
+      "source_ref": "refs/heads/hotfix/*",
+      "source_ref_regex": "^refs/heads/hotfix/.+$",
+      "tag_pattern": "v=.=.#",
+      "tag_ref": "refs/tags/v=.=.#",
+      "tag_ref_regex": "^refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "tag_required": true,
+      "tag_tokens": [
+        "=",
+        "=",
         "#"
       ],
       "target": "main",
@@ -120,13 +183,28 @@
       ]
     },
     {
-      "source": "dev",
-      "source_ref": "refs/heads/dev",
-      "source_ref_regex": "^refs/heads/dev$",
+      "source": "release/*",
+      "source_ref": "refs/heads/release/*",
+      "source_ref_regex": "^refs/heads/release/.+$",
       "target_refs": [
+        "refs/heads/dev",
         "refs/heads/main"
       ],
       "targets": [
+        "dev",
+        "main"
+      ]
+    },
+    {
+      "source": "hotfix/*",
+      "source_ref": "refs/heads/hotfix/*",
+      "source_ref_regex": "^refs/heads/hotfix/.+$",
+      "target_refs": [
+        "refs/heads/dev",
+        "refs/heads/main"
+      ],
+      "targets": [
+        "dev",
         "main"
       ]
     }
@@ -138,13 +216,28 @@
   },
   "tag_rules": [
     {
-      "source": "dev",
-      "tag_pattern": "V#.#",
-      "tag_ref": "refs/tags/V#.#",
-      "tag_ref_regex": "^refs/tags/V[0-9]+\\.[0-9]+$",
+      "source": "release/*",
+      "tag_pattern": "v#.#.0",
+      "tag_ref": "refs/tags/v#.#.0",
+      "tag_ref_regex": "^refs/tags/v[0-9]+\\.[0-9]+\\.0$",
       "tag_required": true,
       "tag_tokens": [
         "#",
+        "#",
+        "0"
+      ],
+      "target": "main",
+      "target_ref": "refs/heads/main"
+    },
+    {
+      "source": "hotfix/*",
+      "tag_pattern": "v=.=.#",
+      "tag_ref": "refs/tags/v=.=.#",
+      "tag_ref_regex": "^refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "tag_required": true,
+      "tag_tokens": [
+        "=",
+        "=",
         "#"
       ],
       "target": "main",

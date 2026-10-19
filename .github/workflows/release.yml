@@ -3,17 +3,20 @@ name: release
 # Tag-driven immutable release pipeline.
 #
 # Triggers:
-#   - push of a V<major>.<minor> tag: first publication of the exact tagged
+#   - push of a v<major>.<minor>.<patch> tag: first publication of the exact tagged
 #     commit (branch-only pushes NEVER publish).
 #   - workflow_dispatch with an existing tag: retry — completes an
 #     interrupted draft, verifies a published release, finishes the Brew
-#     distribution, or performs the first publication when none exists yet.
+#     distribution, or performs first publication for lowercase tags only.
+#     Historical V0.0..V0.19 tags require an existing release and explicit dispatch.
+#     Lowercase versions must be above 0.19.0; no alternate tags for legacy versions.
 #
 # Mode selection (never by event type): after trusted validation, the
 # pipeline asks GitHub whether a release already exists for the tag (a
 # genuine HTTP 404 is the ONLY absence; 403/5xx/network fail the run).
-#   - no release  -> mode=build: checkout/build/smoke the exact tagged
-#     commit, then publish (draft -> complete -> publish).
+#   - no release -> mode=build for lowercase tags only: checkout/build/smoke
+#     the exact tagged commit, then publish (draft -> complete -> publish).
+#     A missing historical uppercase release is refused, never rebuilt.
 #   - release exists (draft or published) -> mode=verify: NO build, NO
 #     rebuild of published bytes; verify/complete from the manifest anchor
 #     and, for an unfinished draft, the original attempt's retained
@@ -27,7 +30,7 @@ name: release
 #   * `plan-run` then peels the event tag on that trusted checkout and
 #     refuses it unless the peeled commit belongs to remote main history and
 #     the committed source versions (pyproject.toml, src/portmap/__init__.py
-#     and, when present, uv.lock) are exactly <major>.<minor>.0. Only after
+#     and, when present, uv.lock) are exactly <major>.<minor>.<patch>. Only after
 #     that does the tagged source checkout (npm/pytest/docker) execute, in a
 #     read-only build job (contents: read) with no persisted credentials.
 #   * The publish job revalidates the same tag identity against main history
@@ -62,11 +65,11 @@ name: release
 on:
   push:
     tags:
-      - "V[0-9]*.[0-9]*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing V<major>.<minor> tag to publish, complete or retry"
+        description: "Existing vX.Y.Z tag to publish/retry; V0.0..V0.19 only retries an existing release"
         required: true
         type: string
 
@@ -153,7 +156,7 @@ jobs:
 
       # Bootstrap gate: peel the event tag, require the peeled commit to be
       # part of origin/main history and the committed source versions to be
-      # exactly major.minor.0 — BEFORE the tagged source is ever checked out.
+      # exactly major.minor.patch — BEFORE the tagged source is ever checked out.
       # The run mode then comes from the ACTUAL release state (404-only
       # absence): build only when nothing is published yet, so re-runs of an
       # already released tag never regenerate published bytes.

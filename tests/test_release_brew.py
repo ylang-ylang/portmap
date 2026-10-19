@@ -3,9 +3,8 @@
 Covers the behaviors the release-distribution workflow depends on:
 formula mutation (class-level only), idempotent and identity-preserving tap
 update decisions, strict release/asset verification, branch/PR provenance
-validation, pre-merge race guards, and bounded check gating. Additional
-regressions pin the workflow file's security boundary (tag validated before
-use, trusted-revision checkout, token contract, global tap concurrency).
+validation, pre-merge race guards, and bounded check gating. The same release
+verification and tap publication flows cover normal, hotfix and historical tags.
 All tests run without network access.
 """
 
@@ -121,9 +120,34 @@ def legacy_manifest_document(mutate: Any = None) -> str:
 
 
 def target_formula(
-    url: str = ARCHIVE_URL, version: str = VERSION, sha256: str = ARCHIVE_SHA
+    url: str | None = None, version: str | None = None, sha256: str = ARCHIVE_SHA
 ) -> str:
-    return release_brew.mutate_formula(FORMULA, url=url, version=version, sha256=sha256)
+    return release_brew.mutate_formula(
+        FORMULA, url=ARCHIVE_URL if url is None else url,
+        version=VERSION if version is None else version, sha256=sha256,
+    )
+
+
+@pytest.fixture(params=[("V0.19", "0.19.0"), ("v0.20.0", "0.20.0"), ("v0.20.1", "0.20.1")])
+def release_identity(request, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise existing REST routes with exact normal/hotfix/legacy identity."""
+    tag, version = request.param
+    manifest = json.loads(manifest_document())
+    manifest["version"] = version
+    manifest["source"]["tag"] = tag
+    asset = manifest["assets"][0]
+    asset["filename"] = f"portmap-{version}-linux-amd64.tar.gz"
+    asset["source_url"] = (
+        f"https://github.com/{SOURCE_REPO}/releases/download/{tag}/{asset['filename']}"
+    )
+    for key, value in {
+        "TAG": tag,
+        "VERSION": version,
+        "ARCHIVE_URL": f"https://github.com/{SOURCE_REPO}/archive/refs/tags/{tag}.tar.gz",
+        "BRANCH": f"brew/portmap-{tag}",
+        "MANIFEST": manifest,
+    }.items():
+        monkeypatch.setitem(globals(), key, value)
 
 
 # ---------------------------------------------------------------------------
@@ -227,14 +251,22 @@ def test_parse_formula_version() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("tag", ["V0.19", "V1.2", "V0.0"])
-def test_parse_tag_accepts_project_tags(tag: str) -> None:
-    assert release_brew.parse_tag(tag) == tuple(int(part) for part in tag[1:].split("."))
+@pytest.mark.parametrize(
+    "tag,version",
+    [("V0.19", (0, 19, 0)), ("V0.0", (0, 0, 0)),
+     ("v0.19.1", (0, 19, 1)),
+     ("v0.20.0", (0, 20, 0)), ("v0.20.1", (0, 20, 1)), ("v1.2.3", (1, 2, 3))],
+)
+def test_parse_tag_accepts_project_tags(tag: str, version: tuple[int, int, int]) -> None:
+    assert release_brew.parse_tag(tag) == version
 
 
 @pytest.mark.parametrize(
     "tag",
-    ["v0.19", "V0.19.0", "V0.19.0.1", "0.19", "../../etc", "refs/pull/1/head", "V0_19", "", "V0.19 ", "V0.19\nx=1"],
+    ["v0.19", "V0.20", "V1.2", "V0.019", "V0.19.0", "V0.19.0.1", "v00.20.0", "v0.020.1",
+     "v0.19.0", "v0.18.1", "v0.0.0",
+     "v0.20.01", "v0.20.1.2", "v0.20.1-rc1", "v0.20.1+build", "0.19", "../../etc",
+     "refs/pull/1/head", "V0_19", "", "V0.19 ", "V0.19\nx=1"],
 )
 def test_parse_tag_rejects_other_tags(tag: str) -> None:
     with pytest.raises(release_brew.InputError):
@@ -280,6 +312,7 @@ def test_validate_archive_url_requires_exact_form() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("release_identity")
 def test_parse_release_manifest_accepts_project_manifest() -> None:
     manifest = release_brew.parse_release_manifest(
         manifest_document(), source_repo=SOURCE_REPO, tag=TAG
@@ -910,6 +943,7 @@ def run_update_tap(
     return release_brew.update_tap(**params)
 
 
+@pytest.mark.usefixtures("release_identity")
 def test_update_tap_merges_pr_after_green_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     tap = FakeGitHub(default_branch="main", formula=FORMULA)
     tap.check_runs = [
@@ -931,6 +965,7 @@ def test_update_tap_merges_pr_after_green_checks(monkeypatch: pytest.MonkeyPatch
     assert tap.pull is not None and tap.pull["merged_at"]
 
 
+@pytest.mark.usefixtures("release_identity")
 def test_update_tap_retry_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     tap = FakeGitHub(default_branch="main", formula=FORMULA)
     tap.check_runs = [[run(REQUIRED_CHECK, "completed", "success")]]
@@ -1219,6 +1254,7 @@ def test_update_tap_fails_when_asset_digest_differs_from_manifest(
     assert tap.calls == [], "asset digest mismatch must fail before any tap access"
 
 
+@pytest.mark.usefixtures("release_identity")
 def test_verify_release_binds_full_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         release_brew, "download_bytes", lambda url: manifest_document().encode()
@@ -1292,6 +1328,7 @@ def test_verify_release_rejects_legacy_tag_commit_outside_main_history(
         verify_with_document(monkeypatch, legacy_manifest_document(), source)
 
 
+@pytest.mark.usefixtures("release_identity")
 def test_verify_release_rejects_mismatched_tagged_pyproject_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1358,6 +1395,7 @@ def test_update_tap_distributes_legacy_release_anchored_to_tag_committed_manifes
     assert tap.merged is True
 
 
+@pytest.mark.usefixtures("release_identity")
 def test_update_tap_binds_expected_release_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1482,3 +1520,65 @@ def test_load_tap_token_requires_secret(monkeypatch: pytest.MonkeyPatch) -> None
     assert release_brew.load_tap_token() == "github_pat_example"
 
 
+
+@pytest.mark.usefixtures("release_identity")
+def test_verify_release_rejects_patch_only_source_version_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = FakeSourceGitHub()
+    major, minor, patch = release_brew.parse_tag(TAG)
+    source.source_pyproject_version = f"{major}.{minor}.{patch + 1}"
+    with pytest.raises(release_brew.ReleaseError, match="pyproject.toml declares version"):
+        verify_with_document(monkeypatch, manifest_document(), source)
+    source.source_pyproject_version = VERSION
+    source.source_init_version = f"{major}.{minor}.{patch + 1}"
+    with pytest.raises(release_brew.ReleaseError, match="__version__"):
+        verify_with_document(monkeypatch, manifest_document(), source)
+
+
+@pytest.mark.usefixtures("release_identity")
+@pytest.mark.parametrize("field", ["version", "source_tag", "source_url"])
+def test_parse_release_manifest_rejects_patch_only_identity_drift(field: str) -> None:
+    payload = json.loads(manifest_document())
+    major, minor, patch = release_brew.parse_tag(TAG)
+    other_version = f"{major}.{minor}.{patch + 1}"
+    other_tag = f"v{other_version}"
+    if field == "version":
+        payload["version"] = other_version
+    elif field == "source_tag":
+        payload["source"]["tag"] = other_tag
+    else:
+        asset = payload["assets"][0]
+        asset["source_url"] = asset["source_url"].replace(f"/{TAG}/", f"/{other_tag}/")
+    with pytest.raises(release_brew.InputError):
+        release_brew.parse_release_manifest(json.dumps(payload), source_repo=SOURCE_REPO, tag=TAG)
+
+
+@pytest.mark.usefixtures("release_identity")
+def test_source_archive_url_preserves_exact_full_tag() -> None:
+    assert release_brew.source_archive_url(SOURCE_REPO, TAG) == ARCHIVE_URL
+    assert release_brew.validate_archive_url(ARCHIVE_URL, SOURCE_REPO, TAG) == ARCHIVE_URL
+
+
+@pytest.mark.parametrize("tag", ["v0.20.0", "v0.20.1"])
+def test_new_manifest_requires_source_identity(tag: str) -> None:
+    payload = json.loads(legacy_manifest_document())
+    payload["version"] = tag[1:]
+    with pytest.raises(release_brew.InputError, match="requires source identity"):
+        release_brew.parse_release_manifest(json.dumps(payload), source_repo=SOURCE_REPO, tag=tag)
+
+
+def test_missing_legacy_release_refuses_distribution_without_tap_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingLegacyRelease(FakeSourceGitHub):
+        def request(self, method: str, path: str, **kwargs: Any) -> Any:
+            if method == "GET" and path == f"/repos/{SOURCE_REPO}/releases/tags/{TAG}":
+                raise release_brew.ApiError("GitHub API failed with HTTP 404: Not Found")
+            return super().request(method, path, **kwargs)
+
+    tap = FakeGitHub(default_branch="main", formula=FORMULA)
+    with pytest.raises(release_brew.ReleaseError, match="no published release"):
+        run_update_tap(
+            monkeypatch, tap, formula_on_main=FORMULA, source=MissingLegacyRelease(),
+        )
+    assert tap.calls == []
+    assert tap.writes == 0

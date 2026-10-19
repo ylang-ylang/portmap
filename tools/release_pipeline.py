@@ -3,13 +3,17 @@
 
 Driven by ``.github/workflows/release.yml`` from exactly two entrances:
 
-* **push of a ``V<major>.<minor>`` tag** — the full first publication:
+* **push of a ``v<major>.<minor>.<patch>`` tag** — the full first publication:
   validate the tag, rebuild and test the exact tagged commit, build the
   frozen archive with paired provenance flags, runtime-smoke the real
   binary and publish the GitHub release (draft, complete, publish).
 * **``workflow_dispatch`` with an existing tag** — verify/complete/retry of
   an already tagged release. Publication is idempotent: complete published
   releases verify to a no-op and the run finishes the Brew distribution.
+  Historical ``V0.0`` through ``V0.19`` tags are accepted only here, and
+  only when the release already exists; they are never built or newly published.
+  New lowercase versions must be above 0.19.0; older immutable package
+  versions cannot be republished under alternate lowercase tags.
 
 The pipeline NEVER allocates versions, bumps files, writes branches,
 commits, merges or tags. Tags are created and pushed by maintainers from
@@ -24,7 +28,7 @@ Security model
   ``origin/main`` and all tags.
 * ``validate-tag`` peels the event tag and refuses it unless the peeled
   commit is part of ``origin/main`` history and the ``pyproject.toml``
-  committed at that commit is exactly ``<major>.<minor>.0``. This runs
+  committed at that commit is exactly ``<major>.<minor>.<patch>``. This runs
   BEFORE any tag-sourced code (npm/pytest/docker) is checked out or
   executed.
 * Source code executes only in the read-only build job (``contents: read``,
@@ -122,19 +126,28 @@ def parse_version(text: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
 
 
-def parse_tag(tag: str) -> tuple[int, int] | None:
-    match = re.fullmatch(r"V(\d+)\.(\d+)", tag)
-    if not match:
-        return None
-    return int(match.group(1)), int(match.group(2))
+def is_legacy_tag(tag: str) -> bool:
+    """Only the immutable historical V0.0 through V0.19 namespace."""
+    return re.fullmatch(r"V0\.(?:0|[1-9]|1[0-9])", tag) is not None
+
+
+def parse_tag(tag: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag)
+    if match:
+        version = tuple(int(part) for part in match.groups())
+        return version if version > (0, 19, 0) else None
+    if is_legacy_tag(tag):
+        return 0, int(tag[3:]), 0
+    return None
 
 
 def version_for_tag(tag: str) -> str:
-    pair = parse_tag(tag)
-    if pair is None:
-        raise ReleaseError(f"tag {tag!r} is not V<major>.<minor>")
-    major, minor = pair
-    return f"{major}.{minor}.0"
+    version = parse_tag(tag)
+    if version is None:
+        raise ReleaseError(
+            f"tag {tag!r} must be v<major>.<minor>.<patch> above 0.19.0 or historical V0.0..V0.19"
+        )
+    return ".".join(str(part) for part in version)
 
 
 def load_manifest(path: Path) -> dict:
@@ -175,15 +188,17 @@ def checksum_companion_name(filename: str) -> str:
     return f"{filename}.sha256"
 
 
-def validate_manifest(manifest: dict, version: str, assets_dir: Path, *, require_files: bool = True) -> list[str]:
+def validate_manifest(
+    manifest: dict, version: str, assets_dir: Path, *, tag: str, require_files: bool = True
+) -> list[str]:
     """Validate a manifest against the release version and asset directory.
 
     With ``require_files`` the referenced archive and its checksum companion
     must exist as safe regular files whose bytes match the manifest exactly.
     """
     errors: list[str] = []
-    tag_major_minor = ".".join(version.split(".")[:2])
-    tag = f"V{tag_major_minor}"
+    if version_for_tag(tag) != version:
+        errors.append(f"tag {tag!r} does not match expected version {version!r}")
     if manifest.get("version") != version:
         errors.append(f"manifest version {manifest.get('version')!r} != expected {version!r}")
     assets = manifest.get("assets")
@@ -327,12 +342,17 @@ def validate_tag(
     Runs on the trusted automation checkout (protected dev revision, full
     clone with tags). The tag must peel to a commit that is already part of
     ``origin/main`` history and the pyproject version committed at that
-    commit must be exactly ``<major>.<minor>.0``. Push events additionally
-    require the event sha to be the peeled commit.
+    commit must be exactly the full ``major.minor.patch`` tag version.
+    Historical uppercase tags are retry-only through explicit dispatch.
+    Push events additionally require the event sha to be the peeled commit.
     """
-    tag = (event_tag or "").strip()
+    tag = event_tag or ""
     if parse_tag(tag) is None:
-        raise ReleaseError(f"event tag {tag!r} is not V<major>.<minor>; refusing to release")
+        raise ReleaseError(
+            f"event tag {tag!r} must be v<major>.<minor>.<patch> or historical V0.0..V0.19; refusing to release"
+        )
+    if is_legacy_tag(tag) and event_name != "workflow_dispatch":
+        raise ReleaseError(f"historical tag {tag} is retry-only through workflow_dispatch")
     if not tag_exists(repo, tag):
         raise ReleaseError(
             f"tag {tag} does not exist at the trusted automation revision; there is nothing to release"
@@ -361,7 +381,7 @@ def validate_tag(
             f"source version metadata at {commit[:12]} disagrees with tag {tag}, which "
             f"requires exactly {version!r}: " + "; ".join(problems)
         )
-    historical = committed_manifest_text(repo, tag) is not None
+    historical = is_legacy_tag(tag) and committed_manifest_text(repo, tag) is not None
     return {
         "tag": tag,
         "version": version,
@@ -387,7 +407,8 @@ def plan_run(
     * ``build``  — no release exists yet (genuine HTTP 404 only): the exact
       tagged commit is built, smoked and published for the first time. This
       covers both the tag push and an initial dispatch of a valid existing
-      main tag whose first publication never completed.
+      lowercase main tag whose first publication never completed. An absent
+      historical uppercase release is always refused, never rebuilt.
     * ``verify`` — a release (draft or published) already exists: no source
       checkout or build; the publish job verifies/completes it from the
       anchor manifest and the original attempt's retained artifact.
@@ -401,6 +422,11 @@ def plan_run(
     )
     document = gh_release_document(str(validated["tag"]), repo, runner)
     release_present = document is not None
+    if not release_present and is_legacy_tag(str(validated["tag"])):
+        raise ReleaseError(
+            f"historical tag {validated['tag']} has no existing release; "
+            "refusing new publication or rebuild of legacy tags"
+        )
     return {
         **validated,
         "mode": "verify" if release_present else "build",
@@ -647,8 +673,13 @@ def _anchor_state(
     validated = validate_tag(repo, event_name="workflow_dispatch", event_tag=tag)
     commit = str(validated["commit"])
     version = str(validated["version"])
-    historical_text = committed_manifest_text(repo, tag)
+    historical_text = committed_manifest_text(repo, tag) if is_legacy_tag(tag) else None
     document = gh_release_document(tag, repo, runner)
+    if document is None and is_legacy_tag(tag):
+        raise ReleaseError(
+            f"historical tag {tag} has no existing release; "
+            "refusing new publication or rebuild of legacy tags"
+        )
     published = _published_assets(document)
     is_draft = bool(document is not None and document.get("draft"))
     marker = (
@@ -742,7 +773,7 @@ def _anchor_state(
         raise TagConflictError(f"manifest anchor for {tag} is not valid JSON: {error}") from error
     if not isinstance(anchor, dict):
         raise TagConflictError(f"manifest anchor for {tag} is not a JSON object")
-    errors = validate_manifest(anchor, version, assets_dir or Path("."), require_files=False)
+    errors = validate_manifest(anchor, version, assets_dir or Path("."), tag=tag, require_files=False)
     if errors:
         raise ReleaseError(
             f"the manifest anchor for {tag} fails release validation: " + "; ".join(errors)
@@ -1157,14 +1188,14 @@ def check_build(assets_dir: Path, *, tag: str, commit: str) -> dict[str, object]
     here against the tag identity and the actual built files — never
     against a tag-committed generated checksum.
     """
-    if parse_tag(tag) is None:
-        raise ReleaseError(f"tag {tag!r} is not V<major>.<minor>")
+    if parse_tag(tag) is None or is_legacy_tag(tag):
+        raise ReleaseError(f"new builds require v<major>.<minor>.<patch>, got {tag!r}")
     if not COMMIT_HEX.fullmatch(commit or ""):
         raise ReleaseError(f"source commit {commit!r} is not a full 40-hex commit id")
     version = version_for_tag(tag)
     manifest = load_manifest(assets_dir / MANIFEST_NAME)
     validate_source_identity(manifest, tag, commit)
-    errors = validate_manifest(manifest, version, assets_dir)
+    errors = validate_manifest(manifest, version, assets_dir, tag=tag)
     if errors:
         raise ReleaseError("built release failed validation: " + "; ".join(errors))
     return {"tag": tag, "version": version, "commit": commit, "assets": manifest["assets"]}
@@ -1177,7 +1208,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate = sub.add_parser("validate-tag", help="validate the event tag against remote main before any tag code runs")
     validate.add_argument("--event-name", required=True, choices=["push", "workflow_dispatch"])
-    validate.add_argument("--event-tag", required=True)
+    validate.add_argument("--event-tag", required=True, help="vX.Y.Z above 0.19.0; historical V0.0..V0.19 only with explicit dispatch")
     validate.add_argument("--event-sha", default=None, help="push events pin the exact event commit")
     validate.set_defaults(func=cmd_validate_tag)
 
@@ -1186,7 +1217,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate the tag and select build vs verify from the actual release state (404-only absence)",
     )
     plan.add_argument("--event-name", required=True, choices=["push", "workflow_dispatch"])
-    plan.add_argument("--event-tag", required=True)
+    plan.add_argument("--event-tag", required=True, help="vX.Y.Z above 0.19.0; historical V0.0..V0.19 requires an existing release")
     plan.add_argument("--event-sha", default=None, help="push events pin the exact event commit")
     plan.set_defaults(func=cmd_plan_run)
 
@@ -1200,7 +1231,7 @@ def build_parser() -> argparse.ArgumentParser:
     catalog.set_defaults(func=cmd_check_catalog)
 
     check = sub.add_parser("check-build", help="validate the build-generated manifest and assets against the tag identity")
-    check.add_argument("--tag", required=True)
+    check.add_argument("--tag", required=True, help="new lowercase vX.Y.Z tag above 0.19.0 (legacy builds forbidden)")
     check.add_argument("--commit", required=True)
     check.add_argument("--assets-dir", default="dist")
     check.set_defaults(func=cmd_check_build)

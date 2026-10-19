@@ -2,12 +2,12 @@
 #
 # Entry points (all converge on one idempotent flow):
 #   - workflow_call:     invoked as the final job of the main release pipeline
-#                        with the published tag (V<major>.<minor>) and the
+#                        with the published tag (v<major>.<minor>.<patch>) and the
 #                        dedicated HOMEBREW_TAP_TOKEN secret.
 #   - workflow_dispatch: manual retry for a specific published tag.
 #
 # Trust model:
-#   * The tag input is regex-validated (V<major>.<minor>) BEFORE it is
+#   * The tag input is regex-validated (vX.Y.Z or historical V0.0..V0.19) BEFORE it is
 #     written to GITHUB_OUTPUT or used anywhere; it is DATA ONLY and can
 #     only address an existing immutable tag.
 #   * The automation code (this workflow's checkout of tools/release_brew.py)
@@ -53,7 +53,7 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: "Published release tag to distribute (e.g. V0.19)"
+        description: "Published release tag to distribute (e.g. v0.20.1; historical V0.0..V0.19)"
         required: true
         type: string
     secrets:
@@ -63,7 +63,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Published release tag to distribute (e.g. V0.19)"
+        description: "Published release tag to distribute (e.g. v0.20.1; historical V0.0..V0.19)"
         required: true
         type: string
 
@@ -149,9 +149,13 @@ jobs:
             exit 1
           fi
           # Validate BEFORE any output or checkout use: the tag is data only
-          # and can only name an immutable V<major>.<minor> tag.
-          if [[ ! "$tag" =~ ^V[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::tag must match V<major>.<minor> (e.g. V0.19); got: $tag"
+          # and can only name a canonical tag or immutable historical tag.
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ && ! "$tag" =~ ^V0\.(0|[1-9]|1[0-9])$ ]]; then
+            echo "::error::tag must match v<major>.<minor>.<patch> or historical V0.0..V0.19; got: $tag"
+            exit 1
+          fi
+          if [[ "$tag" =~ ^v0\.(0|[1-9]|1[0-8])\. || "$tag" == "v0.19.0" ]]; then
+            echo "::error::new lowercase release versions must be above 0.19.0; historical versions use their existing uppercase tags"
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"

@@ -13,8 +13,9 @@ order — (1) a ``release.json`` sidecar next to the frozen executable,
 written atomically by the installer from already-validated ``/api/downloads``
 metadata or by the build for bundle smoke tests; (2) the exact official
 published manifest for the running version on the project's GitHub release
-(``V<major>.<minor>`` tag), bootstrapped once over bounded HTTPS and cached
-in the download cache. Source and Brew installs have no packaged manifest:
+(``v<major>.<minor>.<patch>`` or historical ``V0.0``–``V0.19`` tags),
+bootstrapped once over bounded HTTPS and cached in the download cache.
+Source and Brew installs have no packaged manifest:
 they resolve the official published manifest for their exact version, so no
 generated manifest is ever committed to the source tree.
 """
@@ -58,8 +59,8 @@ TRUSTED_SOURCE_PATH_PREFIX = "/ylang-ylang/portmap/releases/download/"
 
 SUPPORTED_PLATFORM_OS = frozenset({"linux", "darwin"})
 SUPPORTED_PLATFORM_ARCH = frozenset({"amd64", "arm64"})
-VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
-RELEASE_TAG_RE = re.compile(r"V\d+\.\d+")
+VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+RELEASE_TAG_RE = re.compile(rf"(?:v{VERSION_RE.pattern}|V0\.(?:[0-9]|1[0-9]))")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -147,6 +148,28 @@ def unavailable_payload(message: str) -> dict[str, Any]:
         "platforms": [],
         "install_script": None,
     }
+
+
+def tag_for_version(version: str) -> str:
+    """Pin an exact version, preserving only the immutable historical tags."""
+    if VERSION_RE.fullmatch(version) is None:
+        raise ValueError(f"release version is malformed: {version!r}")
+    major, minor, patch = version.split(".")
+    if major == "0" and int(minor) <= 19 and patch == "0":
+        return f"V0.{minor}"
+    if tuple(map(int, (major, minor, patch))) <= (0, 19, 0):
+        raise ValueError(f"release version has no historical tag: {version!r}")
+    return f"v{version}"
+
+
+def version_for_tag(tag: str) -> str:
+    """Read only canonical new tags or the immutable historical tag set."""
+    if RELEASE_TAG_RE.fullmatch(tag) is None:
+        raise ValueError(f"release tag is malformed: {tag!r}")
+    version = tag[1:] + ".0" if tag.startswith("V") else tag[1:]
+    if tag != tag_for_version(version):
+        raise ValueError(f"release tag is not canonical: {tag!r}")
+    return version
 
 
 def validate_trusted_source_url(url: str) -> None:
@@ -247,10 +270,9 @@ def _parse_manifest_source(payload: dict[str, Any], *, version: str) -> dict[str
         raise ValueError(
             f"manifest source repository must be {SOURCE_REPOSITORY}: {repository!r}"
         )
-    major, minor, _patch = version.split(".")
     if not isinstance(tag, str) or RELEASE_TAG_RE.fullmatch(tag) is None:
         raise ValueError(f"manifest source tag is malformed: {tag!r}")
-    if tag != f"V{major}.{minor}":
+    if tag != tag_for_version(version):
         raise ValueError(f"manifest source tag {tag} does not match version {version}")
     if not isinstance(commit, str) or COMMIT_RE.fullmatch(commit) is None:
         raise ValueError(f"manifest source commit is malformed: {commit!r}")
@@ -286,8 +308,8 @@ def parse_release(payload: Any) -> Release:
 
 
 def published_manifest_url() -> str:
-    """The pinned published manifest for the running version (V<major>.<minor> tag)."""
-    tag = "V" + ".".join(__version__.split(".")[:2])
+    """The canonical published manifest pinned to the running exact version."""
+    tag = tag_for_version(__version__)
     return f"https://github.com/{SOURCE_REPOSITORY}/releases/download/{tag}/{RELEASE_MANIFEST_CACHE_NAME}"
 
 
