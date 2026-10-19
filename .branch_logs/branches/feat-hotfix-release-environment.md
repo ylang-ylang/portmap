@@ -8,3 +8,5 @@
   stopped before pushing at the main merge. Preserve the prior release ancestry
   and 72 missing release-log lines via `case/release/history-sync`, following
   the configured main -> case -> feat -> dev graph without bypassing hooks.
+- Record this second integration in dev's log; main is now an ancestor of the
+  prepared feature history, verified with `git merge-base --is-ancestor`.

@@ -204,3 +204,7 @@
   HTTP404. Run source tests on the unprivileged Ubuntu runner and pin frozen
   builder APT dependencies to the signed 2025-07-01 Debian snapshot. Keep the
   Python image/glibc baseline and all publication gates unchanged.
+- Synchronize V0.18 main ancestry and its release logs via
+  `case/release/history-sync` -> `feat/hotfix-release-environment` -> dev.
+  Full CI tests/build/HTTP gates passed in run39237869253; the sync resolves
+  the subsequent pre-push merge obstruction without altering existing tags.
