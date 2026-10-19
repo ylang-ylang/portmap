@@ -56,18 +56,10 @@ def platform_key() -> str:
 
 
 def resolve_head() -> str:
-    """Exact HEAD commit of the source tree being built.
-
-    The pinned builder container runs as root over a read-only source mount
-    owned by the CI runner user, so the invocation pins safe.directory to
-    exactly this repository root: no global git config is written and no
-    other repository is made readable.
-    """
+    """Read source HEAD as its owner; the container uses the host runner UID."""
     result = subprocess.run(
         [
             "git",
-            "-c",
-            f"safe.directory={ROOT}",
             "-C",
             str(ROOT),
             "rev-parse",

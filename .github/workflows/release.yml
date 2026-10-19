@@ -246,7 +246,7 @@ jobs:
           # The build tool stages its own static tree under the out dir; the
           # source mount stays read-only. Paired provenance flags make the
           # builder verify HEAD/version and embed the source identity block.
-          docker run --rm -e HOME=/tmp \
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
             -v "$PWD:/src:ro" -v "$PWD/dist:/out" \
             "$BUILDER_IMAGE" --out-dir /out \
             --release-tag "$TAG" --source-commit "$COMMIT"

@@ -14,3 +14,8 @@
 - Update contributor/release documentation and retain existing UI/Skill behavior.
   The provenance-capable Docker image built successfully; independent final
   regression and actual frozen-binary validation follow before integration.
+- Independent runtime verification confirmed real V0.19 tag/manifest/assets and
+  no-artifact retry inspection. It exposed pinned Git's rejection of root reading
+  runner-owned source: run the release container as the runner UID/GID, matching
+  the documented/local deployment build, and remove ineffective safe.directory
+  command-line configuration. Actual frozen build verification resumes with this fix.
