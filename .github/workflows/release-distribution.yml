@@ -5,7 +5,6 @@
 #                        with the published tag (V<major>.<minor>) and the
 #                        dedicated HOMEBREW_TAP_TOKEN secret.
 #   - workflow_dispatch: manual retry for a specific published tag.
-#   - release/published: safety net for externally published releases.
 #
 # Trust model:
 #   * The tag input is regex-validated (V<major>.<minor>) BEFORE it is
@@ -18,11 +17,16 @@
 #     check out repository ylang-ylang/portmap at that SAME captured SHA.
 #   * The verify job binds the whole release identity (tag object SHA, peeled
 #     commit SHA, release id, release.json body SHA256, manifest/archive
-#     asset ids, archive digest/size); the update job re-verifies that
-#     identity on entry and re-fetches the published release and manifest
-#     immediately before merge, rejecting any replacement (even one with an
-#     identical archive hash), draft/prerelease flips included.
-#
+#     asset ids, archive digest/size) and the manifest's generated source
+#     identity: repository, tag, and the exact peeled tag commit, which must
+#     belong to the repository's main history (not necessarily its head).
+#     Legacy manifests without a source block (published through V0.19) are
+#     accepted only when the published release.json is byte-for-byte the
+#     historical src/portmap/release.json committed at that tag. The update
+#     job re-verifies that identity on entry and re-fetches the published
+#     release and manifest immediately before merge, rejecting any
+#     replacement (even one with an identical archive hash), draft/prerelease
+#     flips included.
 # Scope and limits:
 #   * This automation never creates, moves, or rewrites tags, releases, or
 #     assets. Writes by repository admins OUTSIDE this automation cannot be
@@ -62,8 +66,6 @@ on:
         description: "Published release tag to distribute (e.g. V0.19)"
         required: true
         type: string
-  release:
-    types: [published]
 
 permissions:
   contents: read
@@ -139,12 +141,11 @@ jobs:
         id: resolve
         env:
           INPUT_TAG: ${{ inputs.tag }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          tag="${INPUT_TAG:-${RELEASE_TAG:-}}"
+          tag="$INPUT_TAG"
           if [[ -z "$tag" ]]; then
-            echo "::error::no tag: pass the 'tag' input (workflow_call/workflow_dispatch) or use the release event"
+            echo "::error::no tag: pass the required 'tag' input"
             exit 1
           fi
           # Validate BEFORE any output or checkout use: the tag is data only
@@ -167,7 +168,6 @@ jobs:
           persist-credentials: false
 
       - name: Verify immutable tag, published release, and required assets
-        id: verify
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TAG: ${{ steps.resolve.outputs.tag }}

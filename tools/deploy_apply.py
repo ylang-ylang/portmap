@@ -6,8 +6,8 @@ user. Verifies every staged artifact checksum, unpacks the source snapshot,
 creates or updates only the tool-owned portmap-local/snapshot tap (substituting
 source URL/version/SHA and the two helper resource URL/SHA values in the
 staged Formula template), installs through the existing Homebrew, preseeds
-the portmap download cache with the verified archive, invokes the installed
-Brew setup helper outside any Homebrew sandbox via the installed libexec
+the portmap download cache with the verified archive and its exact staged
+manifest, invokes the installed
 Python -- the installed ``portmap setup`` itself verifies and, when needed,
 repairs the container runtime before creating any portmap container -- and
 finally checks the real ``portmap status --check`` plus
@@ -321,18 +321,42 @@ def download_cache_dir_for(portmap_state_dir: Path, environment: dict) -> Path:
     return Path(explicit).expanduser() if explicit else portmap_state_dir / "downloads"
 
 
-def preseed_download_cache(cache_dir: Path, archive_path: Path, asset: dict) -> dict:
-    """Place the verified archive at its manifest-pinned cache name; never
-    remove or rewrite any other cache entry."""
+def preseed_download_cache(
+    cache_dir: Path, archive_path: Path, asset: dict, manifest_path: Path
+) -> dict:
+    """Seed the snapshot's exact release state into the download cache.
+
+    The verified archive lands at its manifest-pinned cache name and the
+    staged manifest becomes the cached release.json, so the installed source
+    resolves and serves exactly this verified snapshot offline instead of
+    bootstrapping the official published manifest. Never removes or rewrites
+    any other cache entry; the installed portmap re-validates both on use.
+    """
+    report: dict = {}
     target = cache_dir / asset["filename"]
     if target.is_file() and target.stat().st_size == asset["size"] and digest(target) == asset["sha256"]:
-        return {"cache_dir": str(cache_dir), "action": "present", "archive": str(target)}
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    handle, temporary = tempfile.mkstemp(dir=str(cache_dir), prefix=f".{asset['filename']}.", suffix=".part")
-    with os.fdopen(handle, "wb") as output, archive_path.open("rb") as source:
-        shutil.copyfileobj(source, output)
-    os.replace(temporary, target)
-    return {"cache_dir": str(cache_dir), "action": "seeded", "archive": str(target)}
+        report["archive"] = "present"
+    else:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        handle, temporary = tempfile.mkstemp(dir=str(cache_dir), prefix=f".{asset['filename']}.", suffix=".part")
+        with os.fdopen(handle, "wb") as output, archive_path.open("rb") as source:
+            shutil.copyfileobj(source, output)
+        os.replace(temporary, target)
+        report["archive"] = "seeded"
+    manifest_document = manifest_path.read_bytes()
+    cached_manifest = cache_dir / "release.json"
+    if cached_manifest.is_file() and cached_manifest.read_bytes() == manifest_document:
+        report["manifest"] = "present"
+    else:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        handle, temporary = tempfile.mkstemp(dir=str(cache_dir), prefix=".release.json.", suffix=".part")
+        with os.fdopen(handle, "wb") as output:
+            output.write(manifest_document)
+        os.replace(temporary, cached_manifest)
+        report["manifest"] = "seeded"
+    report["cache_dir"] = str(cache_dir)
+    report["archive_path"] = str(target)
+    return report
 
 
 # --- setup invocation and readiness checks ---------------------------------------
@@ -508,6 +532,7 @@ def main(argv: list | None = None) -> int:
             download_cache_dir_for(Path(server_state), os.environ),
             stage_dir / "archive" / snapshot["asset"]["filename"],
             snapshot["asset"],
+            stage_dir / "release.json",
         )
 
         completed = run_setup_helper(formula_prefix, brew_prefix)

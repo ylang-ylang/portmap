@@ -209,3 +209,10 @@
   Full CI tests/build/HTTP gates passed in run39237869253; the sync resolves
   the subsequent pre-push merge obstruction without altering existing tags.
 - Release V0.19 (portmap 0.19.0) from dev 9d5262a8d8 via the automated pipeline: compiled catalog UI/skill rebuilt, frozen linux-amd64 archive, checksum and matching manifest published to the immutable GitHub release; non-integration suite green.
+- Correct the release contract in `feat/hotfix-tag-release`: maintainers prepare
+  the protected main merge and matching version tag; CI only validates, builds
+  and distributes the existing tag. Remove dev-triggered publication and all
+  CI version allocation, source commits, branch merges and tag creation.
+- Build-generated manifests bind the exact source identity and artifact checksums
+  without post-build source writes. Preserve published V0.19, checked formula-only
+  Brew distribution, explicit-tag retries and user-controlled machine upgrades.

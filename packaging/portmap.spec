@@ -27,10 +27,12 @@ analysis = Analysis(
         (str(static_root), "portmap/catalog_static"),
         (str(package_root / "demo_assets"), "portmap/demo_assets"),
         (str(package_root / "scaffold_templates"), "portmap/scaffold_templates"),
-        # No release.json here: the frozen archive cannot embed the manifest
-        # that pins the archive's own checksum. The installer writes the
-        # canonical sidecar next to the installed executable; raw-archive
-        # bundles bootstrap the pinned published manifest remotely.
+        # No release.json anywhere in the package: the frozen archive cannot
+        # embed the manifest that pins the archive's own checksum, and no
+        # generated manifest is committed to the source. The installer writes
+        # the canonical sidecar next to the installed executable; source and
+        # raw-archive installs bootstrap their exact version's official
+        # published manifest remotely.
         (str(package_root / "download_assets"), "portmap/download_assets"),
         (str(root / "LICENSE"), "licenses/portmap"),
         (str(Path(sysconfig.get_path("stdlib")) / "LICENSE.txt"), "licenses/python"),
