@@ -1,9 +1,41 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 
 const catalogTarget = process.env.PORTMAP_CATALOG_TARGET || "http://127.0.0.1:80";
 const mockCatalog = process.env.PORTMAP_CATALOG_MOCK === "1";
+
+function projectSkillPlugin() {
+  const path = "/skills/project-integration/SKILL.md";
+  const source = new URL("./skills/project-integration/SKILL.md", import.meta.url);
+  return {
+    name: "portmap-project-skill",
+    writeBundle() {
+      const destination = new URL("./src/portmap/catalog_static/skills/project-integration/", import.meta.url);
+      mkdirSync(destination, { recursive: true });
+      copyFileSync(source, new URL("SKILL.md", destination));
+    },
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        if ((request.url || "").split("?")[0] !== path) return next();
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          response.statusCode = 405;
+          response.end();
+          return;
+        }
+        const project = readFileSync(new URL("./pyproject.toml", import.meta.url), "utf8");
+        const version = project.match(/^version = "([^"]+)"/m)?.[1];
+        if (!version) throw new Error("Portmap project version is missing");
+        const body = readFileSync(source, "utf8").replaceAll("{{PORTMAP_VERSION}}", version);
+        response.setHeader("content-type", "text/markdown; charset=utf-8");
+        response.setHeader("content-length", Buffer.byteLength(body));
+        response.setHeader("cache-control", "no-cache");
+        response.setHeader("x-content-type-options", "nosniff");
+        response.end(request.method === "HEAD" ? undefined : body);
+      });
+    },
+  };
+}
 
 function mockCatalogPlugin() {
   // Mock state for the Settings updates panel. Fixture data comes from
@@ -224,7 +256,7 @@ function mockCatalogPlugin() {
 export default defineConfig({
   root: "frontend",
   publicDir: "public",
-  plugins: [react(), ...(mockCatalog ? [mockCatalogPlugin()] : [])],
+  plugins: [react(), projectSkillPlugin(), ...(mockCatalog ? [mockCatalogPlugin()] : [])],
   build: {
     outDir: "../src/portmap/catalog_static",
     cssMinify: false,

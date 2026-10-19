@@ -1,5 +1,13 @@
 # portmap
 
+**Agent 接入指南与维护入口：[`skills/project-integration/SKILL.md`](skills/project-integration/SKILL.md)**。
+这是项目接入 Skill 的唯一维护源；修改 CLI、Compose 接入或访问边界时同步维护它。
+运行 `npm run build` 会更新打包副本 `src/portmap/catalog_static/skills/project-integration/SKILL.md`，
+不要直接编辑副本；wheel 和标准独立包构建也直接从维护源打包，避免发布陈旧副本。
+门户通过 `/skills/project-integration/SKILL.md` 提供带当前服务版本的 Markdown；
+Settings 下载区域提供指南链接和可复制的 Agent 提示词。内容在公开/私有门户均可读取，
+不依赖更新授权，不包含 token 或项目私有状态，也不会执行脚本。
+
 Are you tired of changing, checking, and remembering local ports every time you
 run more than one Docker Compose branch?
 
@@ -412,7 +420,7 @@ adopt the same standard entry in its own startup path - a Makefile target, a
 dev-container service command, or a wrapper script:
 
 ```bash
-portmap setup && portmap compose up -d
+portmap setup && portmap docker-compose -- up -d
 ```
 
 `setup` reports success only when the container infrastructure, DNS and the
@@ -800,9 +808,9 @@ docker run --rm --cpus=1 --memory=1g \
 `tools/build_portmap.py` freezes the unified CLI, host agent, access/publishing
 modules, infrastructure/demo/scaffold assets, and frontend. DNS and HTTP
 engines come from the pinned container images, not host binaries. The builder
-emits the archive, SHA-256 sidecar, and `release.json`. Only after real runtime
-acceptance, copy that manifest to `src/portmap/release.json` for source/Brew
-publication and upload the archive and manifest to the versioned release.
+emits the archive, SHA-256 sidecar, and `release.json`. The commands above are
+for local artifact verification, not an alternative production release path.
+Production publishing is owned by the Actions workflow below.
 
 The archive deliberately cannot contain its own checksum manifest. The
 builder writes a sidecar next to the unpacked executable after hashing; the
@@ -819,6 +827,49 @@ server fetches and checks the pinned upstream archive once. Clients download
 from the catalog's own origin.
 Only that cache directory is mounted into the catalog; the rest of the
 publishing state is not exposed. Teardown retains cached release archives.
+
+### Automated releases and hotfixes
+
+Every shipped update must use `.github/workflows/release.yml`, followed by
+`.github/workflows/release-distribution.yml`. Push integrated changes to GitHub's
+`dev` branch to trigger the release pipeline; ordinary `feat/*` pushes do not publish.
+In the maintainer checkout, `upstream` is GitHub and `origin` is the internal Gitea
+remote: after the normal feature-to-dev merge, use `git push upstream dev`.
+Pushing only to the internal mirror does not trigger GitHub Actions.
+The pipeline builds and verifies the package, commits the exact generated assets
+and manifest on a release-preparation feature branch, merges through `dev` into
+`main`, and creates the immutable `V<major>.<minor>` release tag. It must refuse
+concurrent branch changes rather than force-push over them.
+
+The final job downloads the **source archive actually used by the Brew formula**,
+computes its SHA-256, and opens or reuses a formula-only PR in
+`ylang-ylang/homebrew-tap`. The PR must pass `tap-checks` and the other applicable
+checks before normal merging. A queued PR is not a completed release: absent
+credentials, failed checks, timeouts or merge failures keep the workflow failed.
+Retry the failed Actions jobs to complete distribution; never rewrite a published
+tag or replace its assets.
+For a full-pipeline retry, the `source_sha` dispatch input identifies the original
+dev commit; leaving it empty selects current dev. A published release whose only
+remaining step is Brew can be retried with the distribution workflow's `tag` input.
+The publisher uploads assets to a draft before publishing. GitHub's optional
+repository-level release immutability setting adds protection against out-of-band
+administrator edits; this automation itself never overwrites tags or assets.
+
+Configure `HOMEBREW_TAP_TOKEN` as an Actions secret in `ylang-ylang/portmap`:
+use a dedicated fine-grained credential restricted to **only**
+`ylang-ylang/homebrew-tap`, with Contents and Pull requests read/write, Checks and
+Commit statuses read, and the automatically required Metadata read permission.
+Do not substitute the source repository's `GITHUB_TOKEN` or a broad personal token.
+The tap's `.github/workflows/check.yml` must be present before the first release;
+requiring its `tap-checks` status in tap branch protection is recommended.
+
+For small fixes use a `feat/hotfix-*` branch under the same protected graph.
+Hotfixes still build, verify, publish and update Brew; they are not live patches.
+Never deploy by overwriting files inside an installed Portmap package.
+Publishing does not upgrade user machines. Users explicitly upgrade through
+Homebrew or the authenticated web updater after the release and Brew distribution
+are complete.
+
 
 ### Project Catalog and Compose Integration
 

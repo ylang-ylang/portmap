@@ -1,4 +1,5 @@
 # PyInstaller one-directory build of the unified portmap executable.
+import os
 # Runtime data stays relative to the executable.
 import sysconfig
 from importlib.metadata import distribution
@@ -6,6 +7,7 @@ from pathlib import Path
 
 root = Path(SPECPATH).parent
 package_root = root / "src" / "portmap"
+static_root = Path(os.environ.get("PORTMAP_BUILD_STATIC_ROOT", package_root / "catalog_static"))
 freezer = distribution("pyinstaller")
 freezer_license = next(item for item in freezer.files if item.name == "COPYING.txt")
 
@@ -22,7 +24,7 @@ analysis = Analysis(
     [str(root / "packaging" / "portmap_entry.py")],
     pathex=[str(root / "src")],
     datas=[
-        (str(package_root / "catalog_static"), "portmap/catalog_static"),
+        (str(static_root), "portmap/catalog_static"),
         (str(package_root / "demo_assets"), "portmap/demo_assets"),
         (str(package_root / "scaffold_templates"), "portmap/scaffold_templates"),
         # No release.json here: the frozen archive cannot embed the manifest

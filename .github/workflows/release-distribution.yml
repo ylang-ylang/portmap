@@ -1,0 +1,254 @@
+# Homebrew tap distribution for published portmap releases.
+#
+# Entry points (all converge on one idempotent flow):
+#   - workflow_call:     invoked as the final job of the main release pipeline
+#                        with the published tag (V<major>.<minor>) and the
+#                        dedicated HOMEBREW_TAP_TOKEN secret.
+#   - workflow_dispatch: manual retry for a specific published tag.
+#   - release/published: safety net for externally published releases.
+#
+# Trust model:
+#   * The tag input is regex-validated (V<major>.<minor>) BEFORE it is
+#     written to GITHUB_OUTPUT or used anywhere; it is DATA ONLY and can
+#     only address an existing immutable tag.
+#   * The automation code (this workflow's checkout of tools/release_brew.py)
+#     is NEVER taken from the event/caller ref or the target tag. Job 1
+#     resolves the protected ylang-ylang/portmap dev branch head SHA through
+#     the fixed GitHub API (inline stdlib, no repository code) and both jobs
+#     check out repository ylang-ylang/portmap at that SAME captured SHA.
+#   * The verify job binds the whole release identity (tag object SHA, peeled
+#     commit SHA, release id, release.json body SHA256, manifest/archive
+#     asset ids, archive digest/size); the update job re-verifies that
+#     identity on entry and re-fetches the published release and manifest
+#     immediately before merge, rejecting any replacement (even one with an
+#     identical archive hash), draft/prerelease flips included.
+#
+# Scope and limits:
+#   * This automation never creates, moves, or rewrites tags, releases, or
+#     assets. Writes by repository admins OUTSIDE this automation cannot be
+#     prevented by a workflow; GitHub's immutable Releases (optional,
+#     recommended) harden that boundary. The main pipeline publishes
+#     draft -> attach all assets -> publish to support those native
+#     settings. Verification intentionally does NOT require any provider
+#     immutability flag, so historical releases (e.g. V0.18) remain
+#     verifiable.
+#   * ALL distribution runs share ONE concurrency key, so no two tags can
+#     race the tap/formula into a downgrade. Retries are idempotent: an
+#     already-merged or superseded formula is a successful no-op.
+#   * Any failure (missing secret, incomplete release, red or missing
+#     checks, merge error, identity drift) fails the run loudly; nothing is
+#     silently skipped or queued as done.
+#
+# GITHUB_TOKEN is only used for read access to the source repository
+# (contents: read). Every tap write uses the least-privilege
+# HOMEBREW_TAP_TOKEN secret, which is scoped to the tap repository only.
+
+name: release-distribution
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Published release tag to distribute (e.g. V0.19)"
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        description: "Dedicated least-privilege token for ylang-ylang/homebrew-tap"
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag to distribute (e.g. V0.19)"
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+# One global key: distribution runs serialize against the tap regardless of
+# tag, so concurrent releases cannot race a downgrade into the formula.
+concurrency:
+  group: release-distribution-tap
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: ylang-ylang/portmap
+  TAP_REPO: ylang-ylang/homebrew-tap
+  FORMULA_PATH: Formula/portmap.rb
+  REQUIRED_CHECK: tap-checks
+
+jobs:
+  verify-release:
+    name: Verify published release and assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      automation_sha: ${{ steps.trust.outputs.automation_sha }}
+      tag_object_sha: ${{ steps.verify.outputs.tag_object_sha }}
+      commit_sha: ${{ steps.verify.outputs.commit_sha }}
+      release_id: ${{ steps.verify.outputs.release_id }}
+      manifest_sha256: ${{ steps.verify.outputs.manifest_sha256 }}
+      manifest_asset_id: ${{ steps.verify.outputs.manifest_asset_id }}
+      archive_asset_id: ${{ steps.verify.outputs.archive_asset_id }}
+      archive_sha256: ${{ steps.verify.outputs.archive_sha256 }}
+      archive_size: ${{ steps.verify.outputs.archive_size }}
+      version: ${{ steps.verify.outputs.version }}
+    steps:
+      # The automation revision is resolved FIRST, before any checkout, from
+      # the fixed repository through the GitHub API (inline stdlib only).
+      # The event ref, the caller ref, and the target tag are never trusted
+      # as a source of automation code.
+      - name: Resolve protected automation revision
+        id: trust
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          automation_sha="$(python3 - <<'PY'
+          import json, os, urllib.request
+          token = os.environ.get("GITHUB_TOKEN")
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "portmap-release-distribution",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+          request = urllib.request.Request(
+              "https://api.github.com/repos/ylang-ylang/portmap/git/ref/heads/dev",
+              headers=headers,
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              ref = json.load(response)
+          sha = (ref.get("object") or {}).get("sha")
+          if not isinstance(sha, str) or len(sha) != 40 or any(
+              character not in "0123456789abcdef" for character in sha
+          ):
+              raise SystemExit("resolved automation SHA is not a 40-hex string")
+          print(sha)
+          PY
+          )"
+          echo "automation_sha=$automation_sha" >> "$GITHUB_OUTPUT"
+          echo "automation revision: ylang-ylang/portmap@dev $automation_sha"
+
+      - name: Resolve and validate release tag
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-${RELEASE_TAG:-}}"
+          if [[ -z "$tag" ]]; then
+            echo "::error::no tag: pass the 'tag' input (workflow_call/workflow_dispatch) or use the release event"
+            exit 1
+          fi
+          # Validate BEFORE any output or checkout use: the tag is data only
+          # and can only name an immutable V<major>.<minor> tag.
+          if [[ ! "$tag" =~ ^V[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must match V<major>.<minor> (e.g. V0.19); got: $tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "distributing $tag"
+
+      # Fixed repository at the captured protected SHA: never the event ref,
+      # never the caller ref, never the target tag.
+      - name: Checkout automation revision
+        uses: actions/checkout@v4
+        with:
+          repository: ylang-ylang/portmap
+          ref: ${{ steps.trust.outputs.automation_sha }}
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      - name: Verify immutable tag, published release, and required assets
+        id: verify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          summary="$(python3 tools/release_brew.py verify-release \
+            --repo "$SOURCE_REPO" \
+            --tag "$TAG" \
+            --asset-wait-minutes 10 | tail -n 1)"
+          python3 - "$summary" <<'PY' >> "$GITHUB_OUTPUT"
+          import json, sys
+          data = json.loads(sys.argv[1])
+          fields = (
+              "tag_object_sha",
+              "commit_sha",
+              "release_id",
+              "manifest_sha256",
+              "manifest_asset_id",
+              "archive_asset_id",
+              "archive_sha256",
+              "archive_size",
+              "version",
+          )
+          missing = [name for name in fields if data.get(name) in (None, "")]
+          if missing:
+              raise SystemExit(f"verification summary missing {missing}")
+          for name in fields:
+              print(f"{name}={data[name]}")
+          PY
+          echo "verified $TAG identity"
+
+  update-tap:
+    name: Update tap formula via checked PR
+    needs: [verify-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # The SAME automation SHA captured by the verify job, from the fixed
+      # repository. The target tag remains data only.
+      - name: Checkout automation revision
+        uses: actions/checkout@v4
+        with:
+          repository: ylang-ylang/portmap
+          ref: ${{ needs.verify-release.outputs.automation_sha }}
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      # A missing HOMEBREW_TAP_TOKEN fails here with exit code 2; the source
+      # GITHUB_TOKEN is never used for tap access and the token is never
+      # printed. All tap REST calls (branch, PR, checks, merge) authenticate
+      # with this dedicated secret only. The expected-* values bind this run
+      # to the EXACT release identity (including release id, manifest body
+      # hash, and asset ids) the verify job confirmed; any drift or
+      # replacement fails the run, even with an identical archive hash.
+      - name: Download formula source, open/refresh PR, wait for checks, merge
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify-release.outputs.tag }}
+          EXPECTED_TAG_SHA: ${{ needs.verify-release.outputs.tag_object_sha }}
+          EXPECTED_COMMIT_SHA: ${{ needs.verify-release.outputs.commit_sha }}
+          EXPECTED_RELEASE_ID: ${{ needs.verify-release.outputs.release_id }}
+          EXPECTED_MANIFEST_SHA256: ${{ needs.verify-release.outputs.manifest_sha256 }}
+          EXPECTED_MANIFEST_ASSET_ID: ${{ needs.verify-release.outputs.manifest_asset_id }}
+          EXPECTED_ARCHIVE_ASSET_ID: ${{ needs.verify-release.outputs.archive_asset_id }}
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.verify-release.outputs.archive_sha256 }}
+          EXPECTED_ARCHIVE_SIZE: ${{ needs.verify-release.outputs.archive_size }}
+        run: |
+          set -euo pipefail
+          python3 tools/release_brew.py update-tap \
+            --source-repo "$SOURCE_REPO" \
+            --tag "$TAG" \
+            --tap-repo "$TAP_REPO" \
+            --formula-path "$FORMULA_PATH" \
+            --required-check "$REQUIRED_CHECK" \
+            --check-timeout-minutes 20 \
+            --expected-tag-sha "$EXPECTED_TAG_SHA" \
+            --expected-commit-sha "$EXPECTED_COMMIT_SHA" \
+            --expected-release-id "$EXPECTED_RELEASE_ID" \
+            --expected-manifest-sha256 "$EXPECTED_MANIFEST_SHA256" \
+            --expected-manifest-asset-id "$EXPECTED_MANIFEST_ASSET_ID" \
+            --expected-archive-asset-id "$EXPECTED_ARCHIVE_ASSET_ID" \
+            --expected-archive-sha256 "$EXPECTED_ARCHIVE_SHA256" \
+            --expected-archive-size "$EXPECTED_ARCHIVE_SIZE"

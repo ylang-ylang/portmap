@@ -595,7 +595,7 @@ function OpenLink({ href, children }) {
   );
 }
 
-function CopyButton({ targetId }) {
+function CopyButton({ targetId, label = "Copy" }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
@@ -610,7 +610,7 @@ function CopyButton({ targetId }) {
       }}
     >
       <Copy className="button-icon" aria-hidden="true" />
-      {copied ? "Copied" : "Copy"}
+      {copied ? "Copied" : label}
     </button>
   );
 }
@@ -1115,6 +1115,8 @@ function DownloadPanel({ catalog }) {
   const platforms = release?.platforms || [];
   const detected = detectPlatform();
   const suggested = platforms.find((p) => p.os === detected.os && p.arch === detected.arch) || null;
+  const skillUrl = new URL("/skills/project-integration/SKILL.md", window.location.origin).href;
+  const agentPrompt = `请先用 curl -fsS ${shellSingleQuote(skillUrl)} 获取并阅读 Portmap 项目接入指南。\n按指南和项目现有规则，将当前项目/worktree 接入运行该项目的机器上的 Portmap。复用已有安装与 Compose 配置，验证实际应用访问后给我真实 URL。\n如果指南地址不可达或缺少权限，请明确报告，不要自行修改系统 DNS、安装第二套网关或清理其他项目。`;
 
   return (
     <section className="utility-panel" aria-label="Download portmap">
@@ -1124,6 +1126,14 @@ function DownloadPanel({ catalog }) {
           {" "}Download portmap / 获取 portmap
         </summary>
         <div className="quick-setup-body">
+          <div className="quick-command" data-agent-skill>
+            <div className="quick-setup-actions">
+              <p><OpenLink href={skillUrl}>Agent 接入指南</OpenLink></p>
+              <CopyButton targetId="portmap-agent-prompt" label="复制提示词" />
+            </div>
+            <p>Version-matched Markdown for your agent; read it, do not pipe it into a shell.</p>
+            <pre className="agent-skill-prompt"><code id="portmap-agent-prompt">{agentPrompt}</code></pre>
+          </div>
           {releaseLoading && <p>Loading…</p>}
           {!releaseLoading && releaseError && (
             <p className="portmap-download-notice portmap-download-error">{releaseError}</p>
@@ -1274,96 +1284,6 @@ function ConnectionStatusBadge({ status }) {
   );
 }
 
-function ConnectionRow({ conn, onConnect, onDisconnect, onEdit, onDelete, mutating }) {
-  const active = conn.has_connection === true;
-  // Show actual_via when known (what's really used), fall back to requested via
-  const via = conn.actual_via || conn.via;
-  return (
-    <div className="conn-row" role="listitem">
-      <div className="conn-row-body">
-        <div className="conn-row-main">
-          <ConnectionStatusBadge status={conn.status} />
-          <span className="conn-row-target">{conn.target}</span>
-          {via && (
-            <span
-              className={`machine-via-badge machine-via-${
-                via === "direct" || via === "ssh" ? via : "auto"
-              }`}
-            >
-              {via}
-            </span>
-          )}
-          {conn.domain && conn.domain !== conn.target && (
-            <span className="conn-row-domain">{conn.domain}</span>
-          )}
-        </div>
-        <div className="conn-row-meta">
-          <span className="conn-latency" title="HTTP latency from last check">
-            {formatLatency(conn.latency_ms)}
-          </span>
-          {conn.last_checked_at && (
-            <span className="conn-checked">
-              {"· checked "}
-              {formatCheckedAt(conn.last_checked_at)}
-            </span>
-          )}
-          {conn.error && (
-            <span className="conn-error-inline" title={conn.error}>
-              {conn.error}
-            </span>
-          )}
-        </div>
-      </div>
-      <div className="conn-row-actions">
-        {active ? (
-          <button
-            className="action-button conn-disconnect-btn"
-            type="button"
-            onClick={() => onDisconnect(conn.id)}
-            disabled={mutating}
-          >
-            <Unlink2 className="button-icon" aria-hidden="true" />
-            {" "}Disconnect
-          </button>
-        ) : (
-          <button
-            className="action-button conn-connect-btn"
-            type="button"
-            onClick={() => onConnect(conn.id)}
-            disabled={mutating}
-          >
-            <Link2 className="button-icon" aria-hidden="true" />
-            {" "}Connect
-          </button>
-        )}
-        <button
-          className="action-button"
-          type="button"
-          onClick={() => onEdit(conn)}
-          disabled={mutating}
-          title={active ? "Disconnect before editing" : `Edit ${conn.target || conn.id}`}
-          aria-label={
-            active
-              ? `Edit ${conn.target || conn.id} — disconnect first`
-              : `Edit ${conn.target || conn.id}`
-          }
-        >
-          <Pencil className="button-icon" aria-hidden="true" />
-        </button>
-        <button
-          className="action-button conn-delete-btn"
-          type="button"
-          onClick={() => onDelete(conn.id, conn.target)}
-          disabled={mutating}
-          aria-label={`Delete ${conn.target || conn.id}`}
-        >
-          <Trash2 className="button-icon" aria-hidden="true" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function ConnectionForm({ formState, onChange, onSave, onCancel, formError, mutating }) {
   const isEdit = Boolean(formState.id);
   function handleKeyDown(e) {
@@ -1508,33 +1428,6 @@ function machineStatusClass(machine) {
   return "upd-state-ok";
 }
 
-function VersionFacts({ machine }) {
-  const current = text(machine.current_version);
-  const installed = text(machine.installed_version);
-  const build = text(machine.build_id);
-  const latest = text(machine.latest_version);
-  const mismatch = installed && installed !== current;
-  return (
-    <span className="upd-row-meta">
-      <span className="upd-ver">running <b>{current || "unknown"}</b></span>
-      {installed ? (
-        <span
-          className={mismatch ? "upd-ver upd-ver-mismatch" : "upd-ver"}
-          title={mismatch
-            ? `The installed package (${installed}) differs from the running process (${current || "unknown"}); a restart or in-flight update is pending.`
-            : "installed package version"}
-        >
-          installed <b>{installed}</b>{mismatch ? " · restart pending" : ""}
-        </span>
-      ) : null}
-      {build ? <span className="upd-build" title={build}>build {shortIdentity(build)}</span> : null}
-      {latest
-        ? <span className="upd-ver">latest <b>{latest}</b></span>
-        : <span className="upd-muted">latest unknown — use Check</span>}
-    </span>
-  );
-}
-
 function JobLogTail({ job, label }) {
   const log = text(job?.log_tail);
   if (!log) return null;
@@ -1546,84 +1439,308 @@ function JobLogTail({ job, label }) {
   );
 }
 
-function UpdateMachineRow({ machine, onUpdate, onAuthorized, submitting, batchActive }) {
-  const via = text(machine.via);
-  const status = machineStatus(machine);
-  const eligible = machineUpdateEligible(machine) && !submitting && !batchActive;
-  const reason = text(machine.reason);
-  const lastJob = machine.last_job || null;
-  const activeJob = machine.active_job || null;
-  const disabledTitle = batchActive
-    ? "another update batch is already active; follow it below"
-    : machineHasActiveJob(machine)
-      ? "an update is already running on this machine"
-      : reason || (machine.update_available !== true ? "no update available" : "this machine cannot be updated right now");
+function ConnectionActions({ conn, mutating, onConnect, onDisconnect, onEdit, onDelete }) {
+  const active = conn.has_connection === true;
   return (
-    <div className="upd-row" role="listitem" data-upd-machine={machine.id}>
-      <div className="upd-row-body">
-        <div className="upd-row-main">
-          <span className={`upd-badge ${machineStatusClass(machine)}`} title={status.title} data-upd-status={status.label}>
-            {status.label}
-          </span>
-          <span className="upd-row-name">{machineLabel(machine)}</span>
-          {via && via !== "local" ? (
-            <span className={`machine-via-badge machine-via-${via === "direct" || via === "ssh" ? via : "auto"}`}>{via}</span>
-          ) : null}
-          {machine.id === "local" ? <span className="machine-via-badge machine-via-auto">local</span> : null}
-          {text(machine.install_method) ? (
+    <>
+      {active ? (
+        <button
+          className="action-button conn-disconnect-btn"
+          type="button"
+          onClick={() => onDisconnect(conn.id)}
+          disabled={mutating}
+        >
+          <Unlink2 className="button-icon" aria-hidden="true" />
+          {" "}Disconnect
+        </button>
+      ) : (
+        <button
+          className="action-button conn-connect-btn"
+          type="button"
+          onClick={() => onConnect(conn.id)}
+          disabled={mutating}
+        >
+          <Link2 className="button-icon" aria-hidden="true" />
+          {" "}Connect
+        </button>
+      )}
+      <button
+        className="action-button"
+        type="button"
+        onClick={() => onEdit(conn)}
+        disabled={mutating}
+        title={active ? "Disconnect before editing" : `Edit ${conn.target || conn.id}`}
+        aria-label={
+          active
+            ? `Edit ${conn.target || conn.id} — disconnect first`
+            : `Edit ${conn.target || conn.id}`
+        }
+      >
+        <Pencil className="button-icon" aria-hidden="true" />
+      </button>
+      <button
+        className="action-button conn-delete-btn"
+        type="button"
+        onClick={() => onDelete(conn.id, conn.target)}
+        disabled={mutating}
+        aria-label={`Delete ${conn.target || conn.id}`}
+      >
+        <Trash2 className="button-icon" aria-hidden="true" />
+      </button>
+    </>
+  );
+}
+
+// One line per saved connection profile, shown only when a machine has several
+// profiles: the compact target keeps every profile identifiable and
+// independently actionable; the full address lives in the card's Details.
+function ConnectionProfileLine({ conn, mutating, onConnect, onDisconnect, onEdit, onDelete }) {
+  // Show actual_via when known (what's really used), fall back to requested via
+  const via = text(conn.actual_via || conn.via);
+  const requested = text(conn.via);
+  const modeLabel = requested && requested !== via ? `${requested} → ${via}` : via;
+  return (
+    <div className="machine-profile" data-conn-profile={conn.id}>
+      <ConnectionStatusBadge status={conn.status} />
+      <span className="machine-profile-target" title={text(conn.target)}>{text(conn.target)}</span>
+      {modeLabel ? (
+        <span className={`machine-via-badge machine-via-${via === "direct" || via === "ssh" ? via : "auto"}`}>{modeLabel}</span>
+      ) : null}
+      {conn.error ? <span className="conn-error-inline" title={text(conn.error)}>{text(conn.error)}</span> : null}
+      <div className="conn-row-actions">
+        <ConnectionActions
+          conn={conn}
+          mutating={mutating}
+          onConnect={onConnect}
+          onDisconnect={onDisconnect}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+      </div>
+    </div>
+  );
+}
+
+// MachineCard: one flattened Settings card per machine. The always-visible
+// summary carries a single identity, transport, status and current-version line
+// with the existing connect/edit/delete/update actions. Full target addresses,
+// latency, last-check time, build fingerprint, install method, detailed update
+// reason and previous-job logs sit behind one unobtrusive Details disclosure —
+// no separate nested connection/update header panels.
+function MachineCard({
+  cardKey,
+  label,
+  conns,
+  machine,
+  updatesAvailable,
+  mutating,
+  submitting,
+  batchActive,
+  formState,
+  formError,
+  onFormChange,
+  onFormSave,
+  onFormCancel,
+  onConnect,
+  onDisconnect,
+  onEdit,
+  onDelete,
+  onUpdate,
+  onAuthorized,
+}) {
+  const showUpdate = Boolean(updatesAvailable && machine);
+  const multi = conns.length > 1;
+  const single = conns.length === 1 ? conns[0] : null;
+  const vias = Array.from(new Set(conns.map((conn) => text(conn.actual_via || conn.via)).filter(Boolean)));
+  const status = showUpdate ? machineStatus(machine) : null;
+  const eligible = showUpdate && machineUpdateEligible(machine) && !submitting && !batchActive;
+  const reason = showUpdate ? text(machine.reason) : "";
+  const activeJob = showUpdate ? machine.active_job || null : null;
+  const lastJob = showUpdate ? machine.last_job || null : null;
+  const current = showUpdate ? text(machine.current_version) : "";
+  const installed = showUpdate ? text(machine.installed_version) : "";
+  // Installed version is only surfaced at all when it differs from the running
+  // one — the mismatch means a restart or in-flight update is pending.
+  const mismatch = Boolean(installed && installed !== current);
+  const editing = Boolean(formState && formState.id) && conns.some((conn) => conn.id === formState.id);
+  const disabledTitle = !showUpdate
+    ? ""
+    : batchActive
+      ? "another update batch is already active; follow it below"
+      : machineHasActiveJob(machine)
+        ? "an update is already running on this machine"
+        : reason || (machine.update_available !== true ? "no update available" : "this machine cannot be updated right now");
+
+  return (
+    <div
+      className="machine-card"
+      role="listitem"
+      data-machine-card={cardKey}
+      data-upd-machine={showUpdate ? machine.id : undefined}
+    >
+      <div className="machine-card-summary">
+        <div className="machine-card-main">
+          <span className="machine-card-name">{label}</span>
+          {machine?.id === "local" ? <span className="machine-via-badge machine-via-auto">local</span> : null}
+          {vias.map((via) => (
             <span
-              className={`upd-method-badge ${machine.install_method === "unsupported" ? "upd-state-warn" : ""}`}
-              title="how portmap is installed on this machine"
+              key={via}
+              className={`machine-via-badge machine-via-${via === "direct" || via === "ssh" ? via : "auto"}`}
             >
-              {text(machine.install_method)}
+              {via}
+            </span>
+          ))}
+          {single ? <ConnectionStatusBadge status={single.status} /> : null}
+          {showUpdate ? (
+            <span
+              className={`upd-badge ${machineStatusClass(machine)}`}
+              title={status.title}
+              data-upd-status={status.label}
+            >
+              {status.label}
             </span>
           ) : null}
+          {showUpdate ? (
+            <span
+              className="upd-ver"
+              title={mismatch ? `running ${current || "unknown"}, installed package ${installed}` : "running version"}
+            >
+              {current ? `v${current}` : "version unknown"}
+            </span>
+          ) : null}
+          {mismatch ? (
+            <span
+              className="upd-ver upd-ver-mismatch"
+              title={`The installed package (${installed}) differs from the running process (${current || "unknown"}); a restart or in-flight update is pending.`}
+            >
+              installed {installed} · restart pending
+            </span>
+          ) : null}
+          {single || showUpdate ? (
+            <div className="machine-card-actions">
+              {single ? (
+                <ConnectionActions
+                  conn={single}
+                  mutating={mutating}
+                  onConnect={onConnect}
+                  onDisconnect={onDisconnect}
+                  onEdit={onEdit}
+                  onDelete={onDelete}
+                />
+              ) : null}
+              {showUpdate ? (
+                <button
+                  className="action-button conn-connect-btn"
+                  type="button"
+                  disabled={!eligible}
+                  title={eligible
+                    ? `Update ${label} to ${text(machine.latest_version) || "the latest release"}`
+                    : disabledTitle}
+                  onClick={() => onUpdate(machine)}
+                >
+                  <Play className="button-icon" aria-hidden="true" />
+                  {" "}{machineHasActiveJob(machine) ? "Updating…" : "Update"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
-        <VersionFacts machine={machine} />
-        {reason ? <div className="upd-reason" title={reason}>{reason}</div> : null}
-        {machine.error ? <div className="upd-error-inline" title={text(machine.error)}>{text(machine.error)}</div> : null}
+        {multi
+          ? conns.map((conn) => (
+              <ConnectionProfileLine
+                key={conn.id}
+                conn={conn}
+                mutating={mutating}
+                onConnect={onConnect}
+                onDisconnect={onDisconnect}
+                onEdit={onEdit}
+                onDelete={onDelete}
+              />
+            ))
+          : null}
+        {single && single.error ? (
+          <div className="machine-card-flag">
+            <span className="conn-error-inline" title={text(single.error)}>{text(single.error)}</span>
+          </div>
+        ) : null}
+        {showUpdate && machine.error ? (
+          <div className="machine-card-flag">
+            <span className="upd-error-inline" title={text(machine.error)}>{text(machine.error)}</span>
+          </div>
+        ) : null}
         {activeJob ? (
-          <div className="upd-job-line" data-upd-active-job>
+          <div className="machine-card-flag" data-upd-active-job>
             <StateBadge state={activeJob.state} />
             <span className="upd-muted">{text(activeJob.message) || "update in progress"}</span>
             <JobLogTail job={activeJob} label="log" />
           </div>
         ) : null}
-        {lastJob ? (
-          <div className="upd-job-line" data-upd-last-job>
-            <span className="upd-muted">
-              last update {text(lastJob.state)}
-              {text(lastJob.version_after) ? ` → ${text(lastJob.version_after)}` : ""}
-              {text(lastJob.updated_at) ? ` · ${formatCheckedAt(lastJob.updated_at)}` : ""}
-            </span>
-            {text(lastJob.error) ? <span className="upd-error-inline" title={text(lastJob.error)}>{text(lastJob.error)}</span> : null}
-            <JobLogTail job={lastJob} label="log" />
-          </div>
+        {showUpdate && text(machine.via) === "direct" && machine.authorized === false ? (
+          <CredentialEnrollment machineId={machine.id} machineName={label} onAuthorized={onAuthorized} />
         ) : null}
-        {via === "direct" && machine.authorized === false ? (
-          <CredentialEnrollment machineId={machine.id} machineName={machineLabel(machine)} onAuthorized={onAuthorized} />
-        ) : null}
-        {via === "ssh" && machine.authorized === false ? (
-          <p className="upd-reason">
-            SSH machines are authorized by the server over the existing connection when an update runs;
-            no token entry is needed here.
-          </p>
+        {editing ? (
+          <ConnectionForm
+            formState={formState}
+            onChange={onFormChange}
+            onSave={onFormSave}
+            onCancel={onFormCancel}
+            formError={formError}
+            mutating={mutating}
+          />
         ) : null}
       </div>
-      <div className="upd-row-actions">
-        <button
-          className="action-button conn-connect-btn"
-          type="button"
-          disabled={!eligible}
-          title={eligible
-            ? `Update ${machineLabel(machine)} to ${text(machine.latest_version) || "the latest release"}`
-            : disabledTitle}
-          onClick={() => onUpdate(machine)}
-        >
-          <Play className="button-icon" aria-hidden="true" />
-          {" "}{machineHasActiveJob(machine) ? "Updating…" : "Update"}
-        </button>
-      </div>
+      <details className="machine-card-details">
+        <summary>Details</summary>
+        <div className="machine-card-details-body">
+          {conns.map((conn) => {
+            const via = text(conn.actual_via || conn.via);
+            return (
+              <div className="machine-detail-row" key={conn.id}>
+                <code className="machine-detail-target">{text(conn.target)}</code>
+                {via ? (
+                  <span className={`machine-via-badge machine-via-${via === "direct" || via === "ssh" ? via : "auto"}`}>{via}</span>
+                ) : null}
+                <span className="conn-latency" title="HTTP latency from last check">
+                  {formatLatency(conn.latency_ms)}
+                </span>
+                <span className="conn-checked">checked {formatCheckedAt(conn.last_checked_at)}</span>
+              </div>
+            );
+          })}
+          {showUpdate ? (
+            <div className="machine-detail-row">
+              {text(machine.latest_version) ? (
+                <span className="upd-ver">latest <b>{text(machine.latest_version)}</b></span>
+              ) : (
+                <span className="upd-muted">latest unknown — use Check</span>
+              )}
+              {text(machine.build_id) ? <span className="upd-build">build {text(machine.build_id)}</span> : null}
+              {text(machine.install_method) ? (
+                <span
+                  className={`upd-method-badge ${machine.install_method === "unsupported" ? "upd-state-warn" : ""}`}
+                  title="how portmap is installed on this machine"
+                >
+                  {text(machine.install_method)}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          {reason ? <p className="upd-reason" title={reason}>{reason}</p> : null}
+          {lastJob ? (
+            <div className="machine-detail-row" data-upd-last-job>
+              <span className="upd-muted">
+                last update {text(lastJob.state)}
+                {text(lastJob.version_after) ? ` → ${text(lastJob.version_after)}` : ""}
+                {text(lastJob.updated_at) ? ` · ${formatCheckedAt(lastJob.updated_at)}` : ""}
+              </span>
+              {text(lastJob.error) ? (
+                <span className="upd-error-inline" title={text(lastJob.error)}>{text(lastJob.error)}</span>
+              ) : null}
+              <JobLogTail job={lastJob} label="log" />
+            </div>
+          ) : null}
+        </div>
+      </details>
     </div>
   );
 }
@@ -2243,25 +2360,22 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
             </div>
           )}
 
-          {/* Local machine update row (no connection profile) */}
+          {/* Local machine card (no connection profiles) */}
           {updatesAvailable && localMachine && (
-            <div className="machine-card" role="listitem" data-machine-card="local">
-              <div className="machine-card-header">
-                <span className="machine-card-name">{machineLabel(localMachine)}</span>
-                <span className="machine-via-badge machine-via-auto">local</span>
-              </div>
-              <div className="machine-card-upd">
-                <UpdateMachineRow
-                  machine={localMachine}
-                  onUpdate={requestSingleUpdate}
-                  onAuthorized={() => refreshUpdates()}
-                  submitting={submitting}
-                  batchActive={batchActive}
-                />
-              </div>
-            </div>
+            <MachineCard
+              cardKey="local"
+              label={machineLabel(localMachine)}
+              conns={[]}
+              machine={localMachine}
+              updatesAvailable={updatesAvailable}
+              mutating={mutating}
+              submitting={submitting}
+              batchActive={batchActive}
+              onUpdate={requestSingleUpdate}
+              onAuthorized={() => refreshUpdates()}
+            />
           )}
-          {/* Machine cards: one per domain, showing all connection profiles + updates */}
+          {/* Machine cards: one per domain — all connection profiles plus update state */}
           {connections !== null && [false, true].map((failed) => {
             const keys = allMachineKeys.filter((key) => {
               const health = connHealth.get(key);
@@ -2275,61 +2389,39 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
               <Group key={String(failed)} className={failed ? "machine-settings-disconnected" : undefined}>
                 {failed && <summary>Disconnected machines ({keys.length})</summary>}
                 <div className="machine-card-list" role="list">
-              {keys.map((domainKey) => {
-                const conns = (connsByDomain.get(domainKey) || []).map((conn) =>
-                  connHealth.get(domainKey)?.profiles?.find((profile) => profile.id === conn.id) || conn);
-                // Match update machine: prefer domain match, then id match
-                const updMachine = updByMachineId.get(domainKey)
-                  || updMachines.find((m) => m.id === domainKey || (conns[0] && m.id === conns[0]?.id))
-                  || null;
-                const label = conns[0]?.domain || domainKey;
-                const isEditing = formState?.id && conns.some((c) => c.id === formState.id);
-                return (
-                  <div className="machine-card" role="listitem" key={domainKey} data-machine-card={domainKey}>
-                    {/* Card header: hostname badge */}
-                    <div className="machine-card-header">
-                      <span className="machine-card-name">{label}</span>
-                    </div>
-                    {/* Connection profiles for this domain */}
-                    <div className="machine-card-conns">
-                      {conns.map((conn) => (
-                        <div key={conn.id} className="machine-card-conn-row">
-                          <ConnectionRow
-                            conn={conn}
-                            onConnect={handleConnect}
-                            onDisconnect={handleDisconnect}
-                            onEdit={startEdit}
-                            onDelete={handleDelete}
-                            mutating={mutating}
-                          />
-                          {isEditing && formState?.id === conn.id && (
-                            <ConnectionForm
-                              formState={formState}
-                              onChange={setFormState}
-                              onSave={handleSave}
-                              onCancel={cancelForm}
-                              formError={formError}
-                              mutating={mutating}
-                            />
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                    {/* Update controls for this machine */}
-                    {updatesAvailable && updMachine && (
-                      <div className="machine-card-upd">
-                        <UpdateMachineRow
-                          machine={updMachine}
-                          onUpdate={requestSingleUpdate}
-                          onAuthorized={() => refreshUpdates()}
-                          submitting={submitting}
-                          batchActive={batchActive}
-                        />
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+                  {keys.map((domainKey) => {
+                    const conns = (connsByDomain.get(domainKey) || []).map((conn) =>
+                      connHealth.get(domainKey)?.profiles?.find((profile) => profile.id === conn.id) || conn);
+                    // Match update machine: prefer domain match, then id match
+                    const updMachine = updByMachineId.get(domainKey)
+                      || updMachines.find((m) => m.id === domainKey || (conns[0] && m.id === conns[0]?.id))
+                      || null;
+                    const label = conns[0]?.domain || (updMachine ? machineLabel(updMachine) : "") || domainKey;
+                    return (
+                      <MachineCard
+                        key={domainKey}
+                        cardKey={domainKey}
+                        label={label}
+                        conns={conns}
+                        machine={updMachine}
+                        updatesAvailable={updatesAvailable}
+                        mutating={mutating}
+                        submitting={submitting}
+                        batchActive={batchActive}
+                        formState={formState}
+                        formError={formError}
+                        onFormChange={setFormState}
+                        onFormSave={handleSave}
+                        onFormCancel={cancelForm}
+                        onConnect={handleConnect}
+                        onDisconnect={handleDisconnect}
+                        onEdit={startEdit}
+                        onDelete={handleDelete}
+                        onUpdate={requestSingleUpdate}
+                        onAuthorized={() => refreshUpdates()}
+                      />
+                    );
+                  })}
                 </div>
               </Group>
             );

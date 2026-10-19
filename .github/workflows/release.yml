@@ -1,0 +1,366 @@
+name: release
+
+# Automated immutable release pipeline.
+#
+# Triggers:
+#   - push to dev: builds and publishes exactly one V<major>.<minor> release
+#     from the pushed commit (feature-branch pushes never trigger this file).
+#   - workflow_dispatch: retry of a previous release. Selecting a source sha
+#     reuses the already published version/tag when its Portmap-Source marker
+#     matches (see tools/release_pipeline.py); missing GitHub release assets
+#     are recovered from the retained CI artifact of the recorded run, never
+#     from a fresh uncontrolled binary build.
+#
+# Trust model:
+#   * Orchestration code (tools/release_pipeline.py) always runs from the
+#     TRUSTED checkout at the workflow's own revision, pointed at the
+#     validated source via --repo-root. The dispatch-selected source is
+#     validated (full 40-hex, exists, already part of origin/dev) by that
+#     trusted script BEFORE the source checkout ever runs.
+#   * Source code (npm/pytest/docker build) executes only in the read-only
+#     build job with contents:read and no persisted credentials; it never
+#     sees the publication token.
+#   * Publication is bound to the manifest committed at the exact tag:
+#     manifest bytes, archive digests, canonical checksum companions and the
+#     exact GitHub release URL. Published assets are verified by sha256
+#     digest and are never replaced. New releases are created as drafts,
+#     completed with the full asset set and only then published (immutability
+#     is enforced by this pipeline itself; enabling GitHub's native
+#     immutability lock is an optional hardening, not a prerequisite).
+#
+# Jobs: build (contents: read) -> publish (contents: write) -> distribution
+# (reusable Brew workflow, dedicated HOMEBREW_TAP_TOKEN secret). The workflow
+# only reports success after the Brew distribution job has finished.
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact dev commit to release (full 40-hex sha; defaults to the current dev head)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# One release at a time; never cancel an in-flight publication.
+concurrency:
+  group: release-pipeline
+  cancel-in-progress: false
+
+env:
+  # Same pinned interpreter the production Dockerfile uses.
+  PYIMAGE: python:3.12-slim-bullseye@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db
+  BUILDER_IMAGE: portmap-release-builder:ci
+  PIPELINE: trusted/tools/release_pipeline.py
+
+jobs:
+  build:
+    name: Validate source, build and test the release
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      source_sha: ${{ steps.select.outputs.source_sha }}
+      base_main: ${{ steps.plan.outputs.base_main }}
+      build_run_id: ${{ steps.plan.outputs.build_run_id }}
+    steps:
+      - name: Preflight the dedicated Brew tap token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not configured. Refusing to build a release whose Brew distribution would fail after publication."
+            exit 1
+          fi
+
+      # Trusted orchestration checkout: the workflow's own revision. Selected
+      # sources are validated from here before anything executes them.
+      - name: Check out trusted orchestration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the requested source against protected dev
+        id: select
+        env:
+          REQUESTED: ${{ inputs.source_sha || '' }}
+        run: |
+          # Push events pin the exact pushed commit; an empty manual dispatch
+          # falls back to the CURRENT origin/dev head inside the script.
+          default=()
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            default=(--default-sha "$GITHUB_SHA")
+          fi
+          python3 "$PIPELINE" --repo-root trusted select-source \
+            --input "$REQUESTED" "${default[@]}" > select.json
+          cat select.json
+          python3 - <<'PY'
+          import json, os
+          selected = json.load(open("select.json"))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"source_sha={selected['source_sha']}\n")
+          PY
+
+      - name: Check out the validated source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.select.outputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Plan version, tag and idempotency mode
+        id: plan
+        env:
+          SOURCE_SHA: ${{ steps.select.outputs.source_sha }}
+        run: |
+          python3 "$PIPELINE" --repo-root source plan --source-sha "$SOURCE_SHA" > plan.json
+          cat plan.json
+          python3 - <<'PY'
+          import json, os
+          plan = json.load(open("plan.json"))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              for key in ("mode", "version", "tag", "source_sha", "base_main", "build_run_id"):
+                  out.write(f"{key}={plan[key]}\n")
+          PY
+
+      # Everything below only runs for a brand-new release. Retries of an
+      # already tagged source skip straight to the publish job, which recovers
+      # any missing release assets from the retained artifact of the recorded
+      # run id instead of building a different binary.
+      - name: Align version metadata with the planned release
+        if: steps.plan.outputs.mode == 'new'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: python3 "$PIPELINE" --repo-root source bump --version "$VERSION"
+
+      - name: Set up Node
+        if: steps.plan.outputs.mode == 'new'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Compile the catalog UI and project skill
+        if: steps.plan.outputs.mode == 'new'
+        working-directory: source
+        run: |
+          npm ci
+          npm run build
+          test -f src/portmap/catalog_static/skills/project-integration/SKILL.md
+          test -f src/portmap/catalog_static/assets/catalog.js
+
+      - name: Run the full non-integration test suite
+        if: steps.plan.outputs.mode == 'new'
+        working-directory: source
+        run: |
+          docker run --rm -e HOME=/tmp -v "$PWD:/src" -w /src "$PYIMAGE" \
+            bash -lc 'apt-get update && apt-get install -y --no-install-recommends git \
+              && pip install --no-cache-dir -e ".[test]" \
+              && python -m pytest -m "not integration"'
+
+      - name: Build the frozen linux-amd64 archive
+        if: steps.plan.outputs.mode == 'new'
+        working-directory: source
+        run: |
+          # The Dockerfile only pins the build environment (no COPY), so the
+          # build context is the small packaging directory.
+          docker build --pull -f packaging/portmap.Dockerfile -t "$BUILDER_IMAGE" packaging
+          mkdir -p dist
+          # The build tool stages its own static tree under the out dir; the
+          # source mount stays read-only.
+          docker run --rm -e HOME=/tmp \
+            -v "$PWD:/src:ro" -v "$PWD/dist:/out" \
+            "$BUILDER_IMAGE" --out-dir /out
+
+      - name: Validate the built release against the plan
+        if: steps.plan.outputs.mode == 'new'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          python3 "$PIPELINE" --repo-root source check-build \
+            --version "$VERSION" --assets-dir source/dist
+
+
+      - name: Runtime-gate the actual frozen artifact
+        if: steps.plan.outputs.mode == 'new'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          # Execute the built binary once on an owned loopback listener:
+          # --version must match the plan and its catalog server must serve
+          # the canonical rendered skill over HTTP 200 Markdown. Runs ONLY
+          # in this contents:read job; the publish job never executes
+          # artifact code. Existing-mode retries skip the build and smoke.
+          python3 "$PIPELINE" --repo-root source smoke-build \
+            --version "$VERSION" --dist-dir source/dist
+
+      # mode=new means no tag is bound to this source yet, so a re-run of the
+      # same failed run may deterministically replace its own pre-tag
+      # artifacts. Once a tag exists the workflow never uploads artifacts
+      # again (these steps are skipped for mode=existing).
+      - name: Retain the release assets
+        if: steps.plan.outputs.mode == 'new'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets-${{ github.run_id }}
+          path: |
+            source/dist/*.tar.gz
+            source/dist/*.sha256
+            source/dist/release.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+      - name: Retain the compiled catalog tree for the release commit
+        if: steps.plan.outputs.mode == 'new'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: built-tree-${{ github.run_id }}
+          path: source/src/portmap/catalog_static
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+  publish:
+    name: Commit, merge, tag and publish the GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read # cross-run artifact recovery for tagged retries
+    outputs:
+      tag: ${{ needs.build.outputs.tag }}
+      version: ${{ needs.build.outputs.version }}
+      mode: ${{ needs.build.outputs.mode }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      MODE: ${{ needs.build.outputs.mode }}
+      VERSION: ${{ needs.build.outputs.version }}
+      TAG: ${{ needs.build.outputs.tag }}
+      SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+      BASE_MAIN: ${{ needs.build.outputs.base_main }}
+      BUILD_RUN_ID: ${{ needs.build.outputs.build_run_id }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      # Orchestration always comes from the trusted workflow revision; the
+      # publication token is never exposed to source or artifact code.
+      - name: Check out trusted orchestration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the validated source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          path: source
+          fetch-depth: 0
+
+      - name: Configure the release bot identity
+        run: |
+          git -C source config user.name "portmap-release-bot"
+          git -C source config user.email "90782530+ylang-ylang@users.noreply.github.com"
+
+      - name: Export runtime release paths
+        run: |
+          # runner.temp is unavailable in job-level env; export it per run.
+          echo "ASSETS_DIR=${RUNNER_TEMP}/release-assets" >> "$GITHUB_ENV"
+
+      - name: Download the fresh release assets
+        if: needs.build.outputs.mode == 'new'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Download the compiled catalog tree
+        if: needs.build.outputs.mode == 'new'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: built-tree-${{ github.run_id }}
+          path: ${{ runner.temp }}/built-tree
+      - name: Restore the compiled catalog tree into the checkout
+        if: needs.build.outputs.mode == 'new'
+        run: |
+          rm -rf source/src/portmap/catalog_static
+          mkdir -p source/src/portmap/catalog_static
+          # The artifact root is the directory's content itself.
+          cp -a "${RUNNER_TEMP}/built-tree/." source/src/portmap/catalog_static/
+
+      - name: Verify the published tag before any recovery
+        if: needs.build.outputs.mode == 'existing'
+        id: verify
+        run: |
+          python3 "$PIPELINE" --repo-root source verify-existing \
+            --tag "$TAG" --source-sha "$SOURCE_SHA" --run-id "$BUILD_RUN_ID" > verify.json
+          cat verify.json
+          python3 - <<'PY'
+          import json, os
+          result = json.load(open("verify.json"))
+          recovery = "true" if result["missing_files"] else "false"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"needs_recovery={recovery}\n")
+          PY
+
+      # Retained artifacts expire; recovery is only attempted when the GitHub
+      # release is genuinely incomplete. A complete release proceeds straight
+      # to Brew distribution without any artifact dependency.
+      - name: Recover the retained release assets of the original run
+        if: needs.build.outputs.mode == 'existing' && steps.verify.outputs.needs_recovery == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets-${{ needs.build.outputs.build_run_id }}
+          run-id: ${{ needs.build.outputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Commit the release state on feat/release-Vx.y
+        if: needs.build.outputs.mode == 'new'
+        run: |
+          python3 "$PIPELINE" --repo-root source prepare \
+            --version "$VERSION" --tag "$TAG" --source-sha "$SOURCE_SHA" \
+            --run-id "$RUN_ID" --assets-dir "$ASSETS_DIR"
+
+      - name: Merge into dev and main, tag, and push atomically
+        if: needs.build.outputs.mode == 'new'
+        run: |
+          python3 "$PIPELINE" --repo-root source finalize \
+            --version "$VERSION" --tag "$TAG" --source-sha "$SOURCE_SHA" \
+            --run-id "$RUN_ID" --base-main "$BASE_MAIN"
+
+      - name: Publish the GitHub release without clobbering assets
+        run: |
+          # Retries of an already tagged release are recorded under the
+          # ORIGINAL build run id from the tag marker.
+          RID="$RUN_ID"
+          if [ "$MODE" = "existing" ]; then
+            RID="$BUILD_RUN_ID"
+          fi
+          python3 "$PIPELINE" --repo-root source publish-release \
+            --tag "$TAG" --assets-dir "$ASSETS_DIR" \
+            --version "$VERSION" --source-sha "$SOURCE_SHA" --run-id "$RID"
+
+  distribution:
+    name: Update the Brew tap through the reusable workflow
+    needs: publish
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-distribution.yml
+    with:
+      tag: ${{ needs.publish.outputs.tag }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
