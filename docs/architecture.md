@@ -250,12 +250,13 @@ available, but reports unattempted activation on machines without a usable user
 manager. Neither path installs or starts a container engine. Published V0.13
 assets and resource pins remain unchanged until a separate release.
 
-`release.json` pins real versioned assets, size and SHA-256. Frozen installs
-resolve an adjacent sidecar first, source/Brew use packaged metadata, and raw
-bundles without metadata can fetch a bounded manifest from the version-pinned
-trusted release. The archive never embeds its own checksum manifest: build
-and installer write the sidecar separately. Invalid local metadata fails
-honestly instead of selecting another release. Archive cache entries are
+`release.json` pins real versioned assets, size and SHA-256, and its generated
+`source` block records the repository, release tag and exact source commit.
+Frozen installs resolve an adjacent sidecar first; source/Brew installs and
+raw bundles without a sidecar fetch the bounded official manifest pinned to
+their exact version from the trusted release and cache it. The archive never
+embeds its own checksum manifest: build and installer write the sidecar
+separately. Invalid local metadata fails
 verified before serving. Canonical HTTPS GitHub URLs and trusted signed-CDN
 redirects remain constrained; arbitrary hosts and credential-bearing URLs
 are rejected. Standalone installation itself changes no DNS, processes or
@@ -263,15 +264,32 @@ listeners. Brew uses the ordinary user's available service manager without
 escaping the package-install sandbox. Attempted activation failures propagate;
 unattempted activation leaves existing services untouched and claims no readiness.
 
+Exact-version release lookup preserves the immutable historical `V0.0` through
+`V0.19` tags for versions `0.0.0` through `0.19.0`. All newer normal releases
+and hotfixes use lowercase full-version `vX.Y.Z` tags; patch manifests and their
+generated source identity retain the complete version. New release versions
+must be greater than `0.19.0`; lowercase aliases for historical versions and
+invented older patch tags are rejected. Release builds accept only the paired
+full lowercase tag and exact HEAD commit and never write a manifest into
+source. The current updater understands both historical and new
+tags. Already-installed old binaries only recognize the old `V#.#` latest-tag
+format and cannot discover the first new-format release themselves: Brew users
+must explicitly run `brew update` and `brew upgrade ylang-ylang/tap/portmap`
+(standalone users must explicitly reinstall from the new official release).
+There are no compatibility aliases or bridge tags, and publishing a release
+does not automatically upgrade any machine.
+
 Source-snapshot SSH deployment is a separate controller operation:
-`tools/deploy_portmap.py` builds with the pinned builder and stages verified
-source, archive metadata, and tap helpers. `deploy_apply.py` installs an owned
+`tools/deploy_portmap.py` builds with the pinned builder and stages a pristine
+source snapshot (no generated manifest inside), the built release manifest,
+and tap helpers. `deploy_apply.py` installs an owned
 local tap and explicitly runs the setup helper outside the Brew sandbox, then
 checks actual system resolution and HTTP. The installed `portmap setup`
 itself verifies (and when needed repairs) the container runtime, so the
 deploy flow adds no separate pre-repair step. An identical snapshot skips
-rebuild and reinstall. Only the staged source manifest is replaced with the
-generated archive metadata; public release pins are not rewritten.
+rebuild and reinstall. The staged manifest and its verified archive are
+seeded into the target's download cache, so the deployed snapshot serves
+exactly its own build offline; public release pins are not rewritten.
 Existing packages use Homebrew's reinstall transaction even for a version
 upgrade: plain install refuses a switch from a published tap to the snapshot
 tap. Reinstall preserves the old keg for rollback instead of requiring a

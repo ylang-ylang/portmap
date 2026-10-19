@@ -1,4 +1,4 @@
-# Dev Feat Case Flow
+# Basic Feature Release Case Flow
 
 ```mermaid
 gitGraph TB:
@@ -11,12 +11,14 @@ gitGraph TB:
 
     checkout dev
     commit id:"dev branch history"
+
+    %% Feature work
     branch "feat/*" order: 2
     checkout main
     commit id:"main after feat fork"
 
     checkout main
-    branch "case/*/*" order: 3
+    branch "case/*/*" order: 5
     checkout main
     commit id:"main after case fork"
 
@@ -29,38 +31,59 @@ gitGraph TB:
 
     checkout dev
     commit id:"dev branch sync point"
+
     checkout "feat/*"
     merge dev id:"dev to feat/* sync"
 
     checkout dev
     merge "feat/*" id:"feat/* to dev"
 
+    %% Release from dev to main
+    branch "release/*" order: 3
     checkout main
-    merge dev id:"dev to main" tag:"V#.#"
+    commit id:"main after release fork"
+    checkout "release/*"
+    commit id:"release hardening"
+    checkout dev
+    merge "release/*" id:"release/* to dev"
+    checkout main
+    merge "release/*" id:"release/* to main" tag:"v#.#.0"
+
+    %% Hotfix from main
+    checkout main
+    branch "hotfix/*" order: 4
+    checkout main
+    commit id:"main after hotfix fork"
+    checkout "hotfix/*"
+    commit id:"hotfix"
+    checkout dev
+    merge "hotfix/*" id:"hotfix/* to dev"
+    checkout main
+    merge "hotfix/*" id:"hotfix/* to main" tag:"v=.=.#"
 ```
 
 ## Rules
 
+- `feat/*` branches from `dev`, must absorb the current `dev`, and merges to `dev`.
 - `case/*/*` means `case/<context>/<topic>`, where `<context>` is a real project, customer, dataset, robot, deployment, or reproducible scenario.
 - `case/*/*` branches from `main` and may merge only into `feat/*`.
 - `case/*/*` must not merge directly into `dev` or `main`; reusable work must be distilled through `feat/*`.
-- `feat/*` branches from `dev`.
-- `feat/*` work must absorb the current `dev` and merge back to `dev`.
+- `release/*` branches from `dev`, must merge to `dev`, then merge to `main`; the `main` merge result must be tagged with `v#.#.0`.
+- `hotfix/*` branches from `main`, must merge to `dev`, then merge to `main`; the `main` merge result must be tagged with `v=.=.#`.
 - `dev` is the integration branch and must not receive direct commits after the policy is installed.
-- `main` may only receive tagged merges from `dev`.
-- `main` release merge results must use a `V#.#` tag, where `#` means one or more decimal digits.
-- `main` must not receive direct commits.
-- Ad hoc tags are not allowed; release tags are allowed only when they satisfy the `dev` to `main` rule.
+- `#` in tag patterns means one or more decimal digits.
+- `=` in tag patterns means the same numeric component as the base release tag for this source branch.
 
-## Release and hotfix policy
+## Workflow
 
-- Every shipped change, including a small hotfix, must use the immutable release
-  and Homebrew distribution workflow. Use `feat/hotfix-*` for small fixes under
-  the same protected branch graph; “hotfix” does not mean live patching.
-- Never overwrite Python modules, JavaScript, CSS, or other files inside users'
-  installed Portmap packages as a deployment method.
-- A release is complete only after its artifacts are published and the tap formula
-  PR passes checks and merges. Failure must remain visible and retries must not
-  rewrite published tags or assets.
-- Publishing only builds/distributes packages. User machines upgrade explicitly
-  through Homebrew or the authenticated web updater; CI must not upgrade them.
+`main` and `dev` are integration-only. Create short-lived `feat/*` or `case/*/*` branches before editing — always from the main worktree, because linked worktrees cannot create branches — and merge back through the declared flow. Never develop directly on a protected-branch checkout.
+
+## Release safety
+
+- Normal releases use `release/*` and lowercase three-part tags such as `v0.20.0`; patches use `hotfix/*` and tags such as `v0.20.1`. Existing uppercase two-part releases through `V0.19` remain immutable historical releases, not a new-release entry point.
+- Maintainers prepare matching source versions and compiled catalog assets before the protected merge/tag. Only version-tag pushes start automatic publication; ordinary branch pushes do not.
+- CI validates the exact existing tag commit against remote main history and source version, then tests, builds and distributes it. CI must not allocate versions, merge branches, write main/dev commits, or create/move tags.
+- Generated release manifests are verified Release attachments, not post-build source commits. Explicit-tag retries reuse published bytes after main advances or temporary build artifacts expire.
+- A release is complete only after all required artifacts are published and the formula-only Brew PR passes exact-head checks and merges. Failures remain visible; published tags and assets are never rewritten.
+- Never overwrite files in users' installed Portmap packages as deployment. A hotfix is a versioned release, not a live patch.
+- Publishing distributes packages only. Users explicitly upgrade through Homebrew or the authenticated web updater; CI never upgrades their machines.

@@ -7,7 +7,15 @@ bundled: the gateway, DNS and catalog containers come from images supplied by
 the host Docker/Podman runtime at setup time.
 
 Use packaging/portmap.Dockerfile on Linux for a glibc-2.31 build baseline. This
-script never publishes artifacts or modifies the source release manifest.
+script never publishes artifacts; the generated manifest is a build output
+only and is never committed to the source tree.
+
+Release identity: pass the paired ``--release-tag v<major>.<minor>.<patch>``
+and ``--source-commit <40-hex>`` flags for a release build. The builder then
+verifies the tag matches the exact version and that the repository HEAD is
+exactly the requested source commit, and records the
+identity as a top-level manifest ``source`` block. Both flags may be omitted
+for a local candidate build, which emits no ``source`` block.
 """
 from __future__ import annotations
 
@@ -26,6 +34,9 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SOURCE_REPOSITORY = "ylang-ylang/portmap"
+TAG_RE = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def digest(path: Path) -> str:
@@ -44,17 +55,86 @@ def platform_key() -> str:
     return f"{sys.platform}-{arch}"
 
 
+def resolve_head() -> str:
+    """Read source HEAD as its owner; the container uses the host runner UID."""
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "rev-parse",
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"cannot resolve repository HEAD: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def resolve_release_identity(
+    version: str, release_tag: str | None, source_commit: str | None
+) -> tuple[str, dict | None]:
+    """Return (asset tag, manifest source block) for the build.
+
+    ``--release-tag`` and ``--source-commit`` are paired: a release build
+    proves the tag matches the exact version and that HEAD is the exact
+    source commit being released, then records the
+    identity in the generated manifest. A local candidate build omits both
+    flags and records nothing.
+    """
+    match = re.fullmatch(
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version
+    )
+    if match is None:
+        raise ValueError("release version must be numeric major.minor.patch")
+    default_tag = f"v{version}"
+    if (release_tag is None) != (source_commit is None):
+        raise ValueError(
+            "--release-tag and --source-commit are paired; pass both for a "
+            "release build or neither for a local candidate"
+        )
+    if release_tag is None or source_commit is None:
+        return default_tag, None
+    tag_match = TAG_RE.fullmatch(release_tag)
+    if tag_match is None:
+        raise ValueError("release tag must match repository v<major>.<minor>.<patch> policy")
+    if release_tag != default_tag:
+        raise ValueError(f"release tag {release_tag} does not match version {version}")
+    if tuple(map(int, version.split("."))) <= (0, 19, 0):
+        raise ValueError("new release versions must be greater than historical 0.19.0")
+    if COMMIT_RE.fullmatch(source_commit) is None:
+        raise ValueError("--source-commit must be a full 40-hex commit id")
+    head = resolve_head()
+    if head != source_commit:
+        raise ValueError(
+            f"HEAD {head} is not the requested release source {source_commit}"
+        )
+    return release_tag, {
+        "repository": SOURCE_REPOSITORY,
+        "tag": release_tag,
+        "commit": source_commit,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--release-tag", help="release asset tag, defaults to V<major>.<minor>")
+    parser.add_argument(
+        "--release-tag",
+        help="release asset tag v<major>.<minor>.<patch>; pairs with --source-commit",
+    )
+    parser.add_argument(
+        "--source-commit",
+        help="full 40-hex source commit being released; pairs with --release-tag",
+    )
     args = parser.parse_args()
     out = args.out_dir.expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
     target = platform_key()
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        raise ValueError("release version must be numeric major.minor.patch")
+    tag, source = resolve_release_identity(version, args.release_tag, args.source_commit)
     with tempfile.TemporaryDirectory(prefix="portmap-static-", dir=out) as temporary:
         static_root = Path(temporary)
         shutil.copytree(ROOT / "src/portmap/catalog_static", static_root, dirs_exist_ok=True)
@@ -81,18 +161,18 @@ def main() -> int:
                 continue
             output.add(member, arcname=member.name)
     os_name, arch = target.split("-", 1)
-    tag = args.release_tag or "V" + ".".join(version.split(".")[:2])
-    if not re.fullmatch(r"V[0-9]+\.[0-9]+", tag):
-        raise ValueError("release tag must match repository V<major>.<minor> policy")
     record = {
         "os": os_name,
         "arch": arch,
         "filename": filename,
         "sha256": digest(archive),
         "size": archive.stat().st_size,
-        "source_url": f"https://github.com/ylang-ylang/portmap/releases/download/{tag}/{filename}",
+        "source_url": f"https://github.com/{SOURCE_REPOSITORY}/releases/download/{tag}/{filename}",
     }
-    manifest = {"version": version, "assets": [record]}
+    manifest: dict = {"version": version}
+    if source is not None:
+        manifest["source"] = source
+    manifest["assets"] = [record]
     manifest_document = json.dumps(manifest, indent=2) + "\n"
     (out / "release.json").write_text(manifest_document, encoding="utf-8")
     # The archive above was already hashed, so it deliberately contains no
@@ -110,6 +190,7 @@ def main() -> int:
                 "manifest": str(out / "release.json"),
                 "bundle_manifest": str(bundle_manifest),
                 **record,
+                **({"source": source} if source else {}),
             },
             indent=2,
         )

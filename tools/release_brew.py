@@ -3,13 +3,20 @@
 
 Two operations, both driven by the release-distribution workflow:
 
-  verify-release   Confirm an immutable ``V<major>.<minor>`` tag exists, a
+  verify-release   Confirm an immutable ``v<major>.<minor>.<patch>`` tag
+                   above 0.19.0 (or historical V0.0..V0.19) exists, a
                    non-draft/non-prerelease Release is published for it, and
                    the expected ``release.json`` plus linux-amd64 archive
                    assets are present, uploaded, and consistent with the
-                   manifest (bounded wait for upload races). Emits the
-                   verified identity (tag object SHA, peeled commit SHA,
-                   release id, archive digest/size) for downstream binding.
+                   manifest (bounded wait for upload races). The manifest's
+                   generated ``source`` block (repository, tag, commit) is
+                   bound to the peeled tag commit and that commit must
+                   belong to the repository's main history; legacy manifests
+                   without ``source`` are only accepted when their bytes
+                   exactly match the historical ``src/portmap/release.json``
+                   committed at the tag. Emits the verified identity (tag
+                   object SHA, peeled commit SHA, release id, archive
+                   digest/size) for downstream binding.
   update-tap       Download the EXACT formula source archive, hash its bytes,
                    update only the class-level ``url``/``version``/``sha256``
                    of the tap formula, open (or reuse) a deterministic
@@ -33,6 +40,7 @@ import os
 import re
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -47,7 +55,8 @@ REQUIRED_CHECK_DEFAULT = "tap-checks"
 GZIP_MAGIC = b"\x1f\x8b"
 MAX_PAGES = 20
 
-TAG_RE = re.compile(r"V(?P<major>[0-9]+)\.(?P<minor>[0-9]+)")
+TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+LEGACY_TAG_RE = re.compile(r"V0\.(0|[1-9]|1[0-9])")
 REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -94,13 +103,19 @@ def log(message: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def parse_tag(tag: str) -> tuple[int, int]:
+def parse_tag(tag: str) -> tuple[int, int, int]:
     match = TAG_RE.fullmatch(tag or "")
-    if not match:
-        raise InputError(
-            f"tag must be V<major>.<minor> (e.g. V0.19), got {tag!r}"
-        )
-    return int(match.group("major")), int(match.group("minor"))
+    if match:
+        version = tuple(int(part) for part in match.groups())
+        if version > (0, 19, 0):
+            return version
+    legacy = LEGACY_TAG_RE.fullmatch(tag or "")
+    if legacy:
+        return 0, int(legacy.group(1)), 0
+    raise InputError(
+        f"tag must be v<major>.<minor>.<patch> above 0.19.0 (e.g. v0.20.1) "
+        f"or historical V0.0..V0.19, got {tag!r}"
+    )
 
 
 def validate_repo(repo: str, label: str = "repo") -> str:
@@ -127,6 +142,7 @@ def validate_sha(value: str, label: str) -> str:
 
 
 def source_archive_url(source_repo: str, tag: str) -> str:
+    parse_tag(tag)
     return f"https://{GITHUB_HOST}/{source_repo}/archive/refs/tags/{tag}.tar.gz"
 
 
@@ -171,14 +187,55 @@ class ReleaseSpec:
     manifest_sha256: str
     manifest_asset_id: int
     archive_asset_id: int
+    manifest_source: dict[str, str] | None = None
 
 
 def expected_archive_filename(version: str) -> str:
     return f"portmap-{version}-linux-amd64.tar.gz"
 
 
+def parse_manifest_source(
+    payload: dict[str, Any], *, source_repo: str, tag: str, version: str
+) -> dict[str, str] | None:
+    """Validate the optional generated ``source`` identity block.
+
+    New manifests record ``{repository, tag, commit}`` from the paired
+    builder flags. Historical manifests (through V0.19) simply omit the
+    key — an explicit ``source: null`` is malformed, not legacy; the
+    caller must anchor key-absent manifests to the exact tag-committed
+    manifest bytes (see :func:`verify_manifest_identity`).
+    """
+    if "source" not in payload:
+        if not LEGACY_TAG_RE.fullmatch(tag):
+            raise InputError("new release.json requires source identity")
+        return None
+    source = payload["source"]
+    if not isinstance(source, dict):
+        raise InputError("release.json source must be a JSON object")
+    repository = source.get("repository")
+    if repository != source_repo:
+        raise InputError(
+            f"release.json source repository must be {source_repo}, got {repository!r}"
+        )
+    if source.get("tag") != tag:
+        raise InputError(
+            f"release.json source tag must be {tag}, got {source.get('tag')!r}"
+        )
+    commit = source.get("commit")
+    if not isinstance(commit, str) or not SHA1_RE.fullmatch(commit):
+        raise InputError(
+            "release.json source commit must be a 40-hex git SHA, "
+            f"got {commit!r}"
+        )
+    if version != ".".join(str(part) for part in parse_tag(tag)):
+        raise InputError(
+            f"release.json version {version} does not match tag {tag}"
+        )
+    return {"repository": repository, "tag": tag, "commit": commit}
+
+
 def parse_release_manifest(document: str, *, source_repo: str, tag: str) -> dict[str, Any]:
-    major, minor = parse_tag(tag)
+    expected_version = ".".join(str(part) for part in parse_tag(tag))
     try:
         manifest = json.loads(document)
     except json.JSONDecodeError as exc:
@@ -189,10 +246,12 @@ def parse_release_manifest(document: str, *, source_repo: str, tag: str) -> dict
     version = manifest.get("version")
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise InputError(f"release.json version must be X.Y.Z, got {version!r}")
-    if not version.startswith(f"{major}.{minor}."):
+    if version != expected_version:
         raise InputError(
-            f"release.json version {version} does not match tag {tag}"
+            f"release.json version {version} does not match tag {tag} "
+            f"(requires exactly {expected_version})"
         )
+    source = parse_manifest_source(manifest, source_repo=source_repo, tag=tag, version=version)
 
     assets = manifest.get("assets")
     if not isinstance(assets, list) or not assets:
@@ -247,6 +306,7 @@ def parse_release_manifest(document: str, *, source_repo: str, tag: str) -> dict
         "sha256": sha256,
         "size": size,
         "source_url": source_url,
+        "source": source,
     }
 
 
@@ -681,6 +741,169 @@ def peel_tag_commit(github: GitHub, repo: str, tag: str) -> tuple[str, str]:
     raise ReleaseError(f"tag {tag} has unsupported object type {obj_type!r}")
 
 
+MAIN_BRANCH = "main"
+
+
+def require_commit_in_main_history(
+    github: GitHub, repo: str, *, commit_sha: str
+) -> None:
+    """The peeled tag commit must belong to the repository's main history.
+
+    ``compare/{commit}...main`` reports ``ahead``/``identical`` exactly when
+    the commit is the main head or one of its ancestors: the tag was cut
+    from mainline history. The commit need not be the CURRENT head; main may
+    have advanced past it. (The repository's default branch is dev; release
+    tags are cut from main merges, so the anchor is the literal main ref.)
+    """
+    try:
+        compare = github.request(
+            "GET", f"/repos/{repo}/compare/{commit_sha}...{MAIN_BRANCH}"
+        )
+    except ApiError as exc:
+        if "HTTP 404" in str(exc):
+            raise ReleaseError(
+                f"repository {repo} has no {MAIN_BRANCH} branch to validate "
+                f"tag commit {commit_sha} against"
+            ) from None
+        raise
+    status = compare.get("status")
+    if status not in {"ahead", "identical"}:
+        raise ReleaseError(
+            f"tag commit {commit_sha} is not part of {repo}'s {MAIN_BRANCH} "
+            f"history (compare status {status!r}); refusing to distribute "
+            "history that never merged to main"
+        )
+
+
+def committed_manifest_bytes_at(
+    github: GitHub, repo: str, *, tag: str, commit_sha: str
+) -> bytes:
+    """Exact bytes of the historical src/portmap/release.json at the tagged
+    commit. The immutable peeled commit SHA (not the moving tag name) is the
+    anchor: this tool never rewrites tags, but only the commit address is
+    trusted for content."""
+    path = "src/portmap/release.json"
+    try:
+        payload = github.request(
+            "GET",
+            f"/repos/{repo}/contents/{path}?ref={urllib.parse.quote(commit_sha)}",
+        )
+    except ApiError as exc:
+        if "HTTP 404" in str(exc):
+            raise ReleaseError(
+                f"tag {tag} commit {commit_sha[:12]} carries no historical "
+                f"{path}; a legacy manifest without source identity cannot be "
+                "anchored to it"
+            ) from None
+        raise
+    if not isinstance(payload, dict) or payload.get("encoding") != "base64":
+        raise ReleaseError(f"unexpected contents payload for {repo}/{path}")
+    try:
+        return base64.b64decode("".join((payload.get("content") or "").splitlines()))
+    except (ValueError, TypeError) as exc:
+        raise ReleaseError(
+            f"historical {path} at {tag} commit {commit_sha[:12]} is not "
+            f"decodable: {exc}"
+        ) from None
+
+
+INIT_VERSION_RE = re.compile(
+    r'^__version__[ \t]*=[ \t]*["\']([0-9]+\.[0-9]+\.[0-9]+)["\']', re.MULTILINE
+)
+
+
+def tagged_file_text(github: GitHub, repo: str, path: str, *, commit_sha: str) -> str:
+    text, _ = fetch_file_content(github, repo, path, commit_sha)
+    if not text:
+        raise ReleaseError(
+            f"tag commit {commit_sha[:12]} carries no readable {path}"
+        )
+    return text
+
+
+def verify_tagged_source_version(
+    github: GitHub, repo: str, *, tag: str, commit_sha: str, version: str
+) -> None:
+    """The exact tagged source must declare this release version.
+
+    The standalone distribution dispatch (workflow_dispatch on this workflow)
+    bypasses the release pipeline's validator, so both tagged version
+    declarations — pyproject.toml ``project.version`` and
+    ``src/portmap/__init__.py`` ``__version__`` — are independently read at
+    the immutable peeled commit and must equal the manifest version
+    (the full ``major.minor.patch`` tag version, including hotfix patches).
+    """
+    pyproject = tagged_file_text(github, repo, "pyproject.toml", commit_sha=commit_sha)
+    try:
+        declared = tomllib.loads(pyproject)["project"]["version"]
+    except (tomllib.TOMLDecodeError, KeyError, TypeError) as exc:
+        raise ReleaseError(
+            f"tag {tag} commit {commit_sha[:12]} pyproject.toml has no "
+            f"readable project.version: {exc}"
+        ) from None
+    if declared != version:
+        raise ReleaseError(
+            f"tag {tag} pyproject.toml declares version {declared!r}, "
+            f"not the release version {version!r}; refusing to distribute"
+        )
+    init_text = tagged_file_text(
+        github, repo, "src/portmap/__init__.py", commit_sha=commit_sha
+    )
+    match = INIT_VERSION_RE.search(init_text)
+    if match is None:
+        raise ReleaseError(
+            f"tag {tag} src/portmap/__init__.py declares no __version__"
+        )
+    if match.group(1) != version:
+        raise ReleaseError(
+            f"tag {tag} src/portmap/__init__.py declares __version__ "
+            f"{match.group(1)!r}, not the release version {version!r}; "
+            "refusing to distribute"
+        )
+
+
+def verify_manifest_identity(
+    github: GitHub,
+    repo: str,
+    tag: str,
+    *,
+    commit_sha: str,
+    manifest: dict[str, Any],
+    document: bytes,
+) -> None:
+    """Bind the manifest's identity to the immutable tag and main history.
+
+    Both manifest generations are held to the same standard: the peeled tag
+    commit must belong to the repository's main history, and the exact
+    tagged source must declare the release version (checked at the immutable
+    commit, never at the moving tag name). On top of that, a generated
+    ``source`` block must name this repository, this tag and exactly the
+    peeled tag commit, while legacy manifests without ``source`` (published
+    through V0.19) are accepted only when the published document is
+    byte-for-byte the historical manifest committed at that commit.
+    """
+    require_commit_in_main_history(github, repo, commit_sha=commit_sha)
+    verify_tagged_source_version(
+        github, repo, tag=tag, commit_sha=commit_sha, version=manifest["version"]
+    )
+    source = manifest.get("source")
+    if source is not None:
+        if source["commit"] != commit_sha:
+            raise ReleaseError(
+                f"release.json source commit {source['commit']} is not the "
+                f"peeled tag commit {commit_sha}; refusing to distribute"
+            )
+        return
+    committed = committed_manifest_bytes_at(github, repo, tag=tag, commit_sha=commit_sha)
+    if committed != document:
+        raise ReleaseError(
+            f"legacy release.json for {tag} has no source identity and does "
+            "not match the exact historical tag-committed manifest bytes; "
+            "refusing to distribute"
+        )
+
+
+
 def verify_published_release(
     github: GitHub,
     repo: str,
@@ -749,6 +972,17 @@ def verify_published_release(
                 manifest = parse_release_manifest(
                     document.decode("utf-8"), source_repo=repo, tag=tag
                 )
+                # Identity binding is permanent, never a retryable race:
+                # the manifest's source identity (or, for legacy manifests,
+                # the exact tag-committed bytes) must match the peeled tag.
+                verify_manifest_identity(
+                    github,
+                    repo,
+                    tag,
+                    commit_sha=commit_sha,
+                    manifest=manifest,
+                    document=document,
+                )
                 archive_asset = _asset_by_name(release, manifest["filename"])
                 if archive_asset is None:
                     problems.append(f"{manifest['filename']} asset is missing")
@@ -798,10 +1032,16 @@ def verify_published_release(
                         f"tag {tag} identity changed during verification; "
                         "tags are immutable"
                     )
+                origin = (
+                    f"source {manifest['source']['tag']}@{manifest['source']['commit'][:12]}"
+                    if manifest.get("source")
+                    else "legacy tag-committed manifest"
+                )
                 log(
                     f"release {tag} verified: version {manifest['version']}, "
                     f"assets release.json + {manifest['filename']} "
-                    f"(tag object {tag_object_sha[:12]}, commit {commit_sha[:12]})"
+                    f"(tag object {tag_object_sha[:12]}, commit {commit_sha[:12]}, "
+                    f"{origin})"
                 )
                 return ReleaseSpec(
                     tag=tag,
@@ -816,6 +1056,7 @@ def verify_published_release(
                     manifest_sha256=manifest_sha256,
                     manifest_asset_id=manifest_asset_id,
                     archive_asset_id=archive_asset_id,
+                    manifest_source=manifest.get("source"),
                 )
             last_problem = "; ".join(problems)
         else:
@@ -1037,12 +1278,24 @@ def reverify_release_identity(
     manifest = parse_release_manifest(
         body.decode("utf-8"), source_repo=source_repo, tag=spec.tag
     )
+    # Re-run the full source-identity binding against the freshly downloaded
+    # document: source commit/peeled-tag binding and main history for new
+    # manifests, exact tag-committed bytes for legacy ones.
+    verify_manifest_identity(
+        source,
+        source_repo,
+        spec.tag,
+        commit_sha=spec.commit_sha,
+        manifest=manifest,
+        document=body,
+    )
     if manifest != {
         "version": spec.version,
         "filename": spec.archive_filename,
         "sha256": spec.archive_sha256,
         "size": spec.archive_size,
         "source_url": spec.source_url,
+        "source": spec.manifest_source,
     }:
         raise ReleaseError(
             "release manifest no longer matches the verified release"
@@ -1377,7 +1630,7 @@ def build_parser() -> argparse.ArgumentParser:
         "verify-release", help="verify a published release and its assets"
     )
     verify.add_argument("--repo", required=True, help="source repository owner/name")
-    verify.add_argument("--tag", required=True, help="release tag, e.g. V0.19")
+    verify.add_argument("--tag", required=True, help="release tag, e.g. v0.20.1 (historical V0.0..V0.19 read-only)")
     verify.add_argument(
         "--asset-wait-minutes",
         type=float,

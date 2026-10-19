@@ -209,3 +209,25 @@
   Full CI tests/build/HTTP gates passed in run39237869253; the sync resolves
   the subsequent pre-push merge obstruction without altering existing tags.
 - Release V0.19 (portmap 0.19.0) from dev 9d5262a8d8 via the automated pipeline: compiled catalog UI/skill rebuilt, frozen linux-amd64 archive, checksum and matching manifest published to the immutable GitHub release; non-integration suite green.
+- Correct the release contract in `feat/hotfix-tag-release`: maintainers prepare
+  the protected main merge and matching version tag; CI only validates, builds
+  and distributes the existing tag. Remove dev-triggered publication and all
+  CI version allocation, source commits, branch merges and tag creation.
+- Build-generated manifests bind the exact source identity and artifact checksums
+  without post-build source writes. Preserve published V0.19, checked formula-only
+  Brew distribution, explicit-tag retries and user-controlled machine upgrades.
+- Tag-only repair acceptance: 1179 tests passed, 2 integration tests deselected;
+  both workflows passed Actionlint. Real frozen candidate CLI and private/public
+  Skill HTTP passed; real V0.19 was verified read-only without artifacts/rebuild.
+  Sync the existing main/V0.19 refs without changing their objects. Integrating
+  this repair into dev does not publish: only an existing main-history version
+  tag push (or explicit-tag manual retry) enters the release pipeline.
+- The isolated old-policy experiment rejected V0.20.0 and V0.20.1 with
+  TAG_TARGET_TAG_PATTERN_MISMATCH. At the user's subsequent request, migrate to
+  dev-feat-release-hotfix-case: release/* uses vX.Y.0; hotfix/* uses v=.=.#.
+- Prepare v0.20.0 (package 0.20.0), preserve historical V0.19 read-only retries,
+  and extend tag/source/manifest/updater validation to exact patch versions.
+  Publication remains tag-driven with checked Brew PRs and no machine upgrades.
+- Integrate release/v0.20.0 before its main merge, as required by the new graph.
+  Frozen candidate/Skill HTTP and both workflow lint gates passed; the exact
+  full regression result is 1337 passed, 2 deselected. No live deployment.

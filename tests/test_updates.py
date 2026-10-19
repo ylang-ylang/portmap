@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from portmap import update_worker, updates
+from portmap.downloads import tag_for_version
 from portmap.updates import UpdateError
 
 STUB_TEMPLATE = """#!/bin/sh
@@ -98,7 +99,7 @@ def platform_asset_payload(version: str) -> dict:
         "filename": filename,
         "sha256": "a" * 64,
         "size": 1024,
-        "source_url": f"https://github.com/ylang-ylang/portmap/releases/download/V{version.rsplit('.', 1)[0]}/{filename}",
+        "source_url": f"https://github.com/ylang-ylang/portmap/releases/download/{tag_for_version(version)}/{filename}",
     }
 
 
@@ -217,12 +218,122 @@ def test_parse_update_manifest_rejects_duplicates_and_bad_entries():
         updates.parse_update_manifest({"version": "0.16.0", "assets": []})
 
 
-def test_release_manifest_url_only_allows_project_tags():
-    assert updates._release_manifest_url("V0.16").endswith("/V0.16/release.json")
-    for tag in ("../../etc", "V0.16/", "v0.16", "V0.16.0.1"):
-        with pytest.raises(UpdateError):
-            updates._release_manifest_url(tag)
+@pytest.mark.parametrize("tag", ["V0.0", "V0.16", "V0.19", "v0.20.0", "v0.20.3", "v1.0.1"])
+def test_release_manifest_url_only_allows_project_tags(tag):
+    assert updates._release_manifest_url(tag).endswith(f"/{tag}/release.json")
 
+
+@pytest.mark.parametrize(
+    "tag",
+    ["../../etc", "V0.16/", "v0.16", "V0.16.0.1", "V0.20", "V1.0", "V0.019", "v0.20.03", "v0.19.0", "v0.18.1"],
+)
+def test_release_manifest_url_rejects_malformed_or_nonhistorical_tags(tag):
+    with pytest.raises(UpdateError):
+        updates._release_manifest_url(tag)
+
+
+def release_http(monkeypatch, *, final_url: str = "", payload=None):
+    """Replace only HTTPS I/O; keep real tag, source and manifest validation."""
+    requests = []
+    document = json.dumps(payload).encode()
+
+    class Opener:
+        def open(self, request, *, timeout):
+            requests.append((request.full_url, request.get_method()))
+            response = io.BytesIO(document)
+            response.geturl = lambda: final_url
+            return response
+
+    monkeypatch.setattr(updates, "trusted_opener", Opener)
+    return requests
+
+
+@pytest.mark.parametrize("tag", ["V0.0", "V0.19", "v0.20.0", "v0.20.3", "v1.0.1"])
+def test_fetch_latest_tag_reads_historical_normal_and_hotfix_releases(monkeypatch, tag):
+    requests = release_http(
+        monkeypatch, final_url=f"https://github.com/ylang-ylang/portmap/releases/tag/{tag}"
+    )
+    assert updates.fetch_latest_tag() == tag
+    assert requests == [(updates.RELEASES_LATEST_URL, "HEAD")]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/other/portmap/releases/tag/v0.20.3",
+        "https://evil.example/ylang-ylang/portmap/releases/tag/v0.20.3",
+        "https://github.com/ylang-ylang/portmap/releases/tag/V0.20",
+        "https://github.com/ylang-ylang/portmap/releases/tag/V1.0",
+        "https://github.com/ylang-ylang/portmap/releases/tag/v0.19.0",
+        "https://github.com/ylang-ylang/portmap/releases/tag/v0.18.1",
+        "https://github.com/ylang-ylang/portmap/releases/tag/v0.20",
+        "https://github.com/ylang-ylang/portmap/releases/tag/v0.20.03",
+        "https://github.com/ylang-ylang/portmap/releases/tag/v0.20.3?other=1",
+        "http://github.com/ylang-ylang/portmap/releases/tag/v0.20.3",
+    ],
+)
+def test_fetch_latest_tag_rejects_untrusted_or_nonpolicy_targets(monkeypatch, url):
+    release_http(monkeypatch, final_url=url)
+    with pytest.raises(UpdateError, match="outside the project tags"):
+        updates.fetch_latest_tag()
+
+
+@pytest.mark.parametrize(
+    "version, tag", [("0.19.0", "V0.19"), ("0.20.0", "v0.20.0"), ("0.20.3", "v0.20.3")]
+)
+def test_fetch_release_manifest_pins_the_exact_tag_version(monkeypatch, version, tag):
+    payload = {"version": version, "assets": [platform_asset_payload(version)]}
+    requests = release_http(monkeypatch, payload=payload)
+    release = updates.fetch_release_manifest(tag)
+    assert release.version == version
+    assert requests == [(
+        f"https://github.com/ylang-ylang/portmap/releases/download/{tag}/release.json", "GET"
+    )]
+
+
+def test_fetch_patch_manifest_rejects_wrong_patch_without_caching(monkeypatch, tmp_path):
+    payload = {"version": "0.20.0", "assets": [platform_asset_payload("0.20.0")]}
+    release_http(monkeypatch, payload=payload)
+    monkeypatch.setattr(updates, "fetch_latest_tag", lambda: "v0.20.3")
+    latest, reason = updates._check_latest_release(tmp_path)
+    assert latest is None
+    assert "not the requested 0.20.3" in reason
+    cached = json.loads((tmp_path / "updates/check.json").read_text())
+    assert cached["latest_version"] is None
+    assert cached["tag"] is None
+
+
+def test_latest_patch_manifest_is_cached_under_its_exact_identity(monkeypatch, tmp_path):
+    version = "0.20.3"
+    payload = {
+        "version": version,
+        "source": {"repository": "ylang-ylang/portmap", "tag": "v0.20.3", "commit": "a" * 40},
+        "assets": [platform_asset_payload(version)],
+    }
+    requests = release_http(monkeypatch, payload=payload)
+    monkeypatch.setattr(updates, "fetch_latest_tag", lambda: "v0.20.3")
+    assert updates._check_latest_release(tmp_path) == (version, None)
+    assert updates._check_latest_release(tmp_path) == (version, None)
+    assert len(requests) == 1
+    cached = json.loads((tmp_path / "updates/check.json").read_text())
+    assert cached["latest_version"] == version
+    assert cached["tag"] == "v0.20.3"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        None,
+        {"repository": "other/portmap", "tag": "v0.20.3", "commit": "a" * 40},
+        {"repository": "ylang-ylang/portmap", "tag": "v0.20.0", "commit": "a" * 40},
+        {"repository": "ylang-ylang/portmap", "tag": "V0.20", "commit": "a" * 40},
+        {"repository": "ylang-ylang/portmap", "tag": "v0.20.3", "commit": "short"},
+    ],
+)
+def test_update_manifest_rejects_invalid_source_identity(source):
+    payload = {"version": "0.20.3", "source": source, "assets": [platform_asset_payload("0.20.3")]}
+    with pytest.raises(UpdateError, match="release manifest is invalid"):
+        updates.parse_update_manifest(payload)
 
 # ---------------------------------------------------------------------------
 # Status, installation detection and check caching
@@ -558,12 +669,14 @@ def test_public_job_schema_has_no_secret_fields(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def run_worker_job(state_dir: Path, job: dict, *, manifest_release=None, archive: Path | None = None, fetch_calls: list | None = None) -> dict:
+def run_worker_job(state_dir: Path, job: dict, *, manifest_release=None, archive: Path | None = None, fetch_calls: list | None = None, manifest_calls: list | None = None) -> dict:
     if manifest_release is None:
         manifest_release = release_for(job["target_version"])
     monkey_manifest = manifest_release
 
     def fake_fetch_release_manifest(tag, expected_version=None):
+        if manifest_calls is not None:
+            manifest_calls.append((tag, expected_version))
         return monkey_manifest
 
     update_worker.fetch_release_manifest = fake_fetch_release_manifest
@@ -614,6 +727,28 @@ def test_standalone_job_succeeds_and_flips_managed_launcher(tmp_path, monkeypatc
     assert "--target-version 0.16.0" in calls
     assert "--expect-agent" not in calls
     assert "roles, connections and DNS preserved" in result["message"]
+
+
+def test_standalone_worker_fetches_and_installs_the_exact_hotfix(tmp_path, monkeypatch):
+    binary, _, launcher = make_standalone_install(tmp_path, "0.20.0")
+    patch_worker_environment(monkeypatch, tmp_path)
+    archive = build_archive(tmp_path / "fixture.tar.gz", "0.20.3")
+    job = make_job(
+        tmp_path, version_before="0.20.0", target_version="0.20.3", install_executable=str(binary)
+    )
+    manifests = []
+    result = run_worker_job(tmp_path, job, archive=archive, manifest_calls=manifests)
+    assert manifests == [("v0.20.3", "0.20.3")]
+    assert result["_rc"] == 0
+    assert result["state"] == "succeeded"
+    assert result["version_after"] == "0.20.3"
+    installed = launcher.resolve()
+    assert installed != binary
+    sidecar = json.loads((installed.parent / "release.json").read_text())
+    assert sidecar["version"] == "0.20.3"
+    assert sidecar["assets"][0]["source_url"].endswith(
+        "/v0.20.3/portmap-0.20.3-" + "-".join(updates.current_platform()) + ".tar.gz"
+    )
 
 
 def test_activation_job_completes_installed_newer_version_without_reinstall(tmp_path, monkeypatch):

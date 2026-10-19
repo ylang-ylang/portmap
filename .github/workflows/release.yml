@@ -1,46 +1,76 @@
 name: release
 
-# Automated immutable release pipeline.
+# Tag-driven immutable release pipeline.
 #
 # Triggers:
-#   - push to dev: builds and publishes exactly one V<major>.<minor> release
-#     from the pushed commit (feature-branch pushes never trigger this file).
-#   - workflow_dispatch: retry of a previous release. Selecting a source sha
-#     reuses the already published version/tag when its Portmap-Source marker
-#     matches (see tools/release_pipeline.py); missing GitHub release assets
-#     are recovered from the retained CI artifact of the recorded run, never
-#     from a fresh uncontrolled binary build.
+#   - push of a v<major>.<minor>.<patch> tag: first publication of the exact tagged
+#     commit (branch-only pushes NEVER publish).
+#   - workflow_dispatch with an existing tag: retry — completes an
+#     interrupted draft, verifies a published release, finishes the Brew
+#     distribution, or performs first publication for lowercase tags only.
+#     Historical V0.0..V0.19 tags require an existing release and explicit dispatch.
+#     Lowercase versions must be above 0.19.0; no alternate tags for legacy versions.
 #
-# Trust model:
-#   * Orchestration code (tools/release_pipeline.py) always runs from the
-#     TRUSTED checkout at the workflow's own revision, pointed at the
-#     validated source via --repo-root. The dispatch-selected source is
-#     validated (full 40-hex, exists, already part of origin/dev) by that
-#     trusted script BEFORE the source checkout ever runs.
-#   * Source code (npm/pytest/docker build) executes only in the read-only
-#     build job with contents:read and no persisted credentials; it never
-#     sees the publication token.
-#   * Publication is bound to the manifest committed at the exact tag:
-#     manifest bytes, archive digests, canonical checksum companions and the
-#     exact GitHub release URL. Published assets are verified by sha256
-#     digest and are never replaced. New releases are created as drafts,
-#     completed with the full asset set and only then published (immutability
-#     is enforced by this pipeline itself; enabling GitHub's native
-#     immutability lock is an optional hardening, not a prerequisite).
+# Mode selection (never by event type): after trusted validation, the
+# pipeline asks GitHub whether a release already exists for the tag (a
+# genuine HTTP 404 is the ONLY absence; 403/5xx/network fail the run).
+#   - no release -> mode=build for lowercase tags only: checkout/build/smoke
+#     the exact tagged commit, then publish (draft -> complete -> publish).
+#     A missing historical uppercase release is refused, never rebuilt.
+#   - release exists (draft or published) -> mode=verify: NO build, NO
+#     rebuild of published bytes; verify/complete from the manifest anchor
+#     and, for an unfinished draft, the original attempt's retained
+#     artifact (its digest is bound into the draft's notes at creation).
+#
+# Trust bootstrap (validation BEFORE any event-tag code runs):
+#   * Orchestration (tools/release_pipeline.py) is NEVER taken from the event
+#     tag. Job 1 resolves the protected dev head SHA through the fixed GitHub
+#     API with inline stdlib code and checks out that revision (full clone,
+#     with tags) as the trusted checkout.
+#   * `plan-run` then peels the event tag on that trusted checkout and
+#     refuses it unless the peeled commit belongs to remote main history and
+#     the committed source versions (pyproject.toml, src/portmap/__init__.py
+#     and, when present, uv.lock) are exactly <major>.<minor>.<patch>. Only after
+#     that does the tagged source checkout (npm/pytest/docker) execute, in a
+#     read-only build job (contents: read) with no persisted credentials.
+#   * The publish job revalidates the same tag identity against main history
+#     inside tools/release_pipeline.py before any mutation.
+#
+# Release identity:
+#   * New releases publish a BUILD-GENERATED manifest that is never committed
+#     to the source: the builder receives paired --release-tag/--source-commit
+#     provenance flags and embeds source={repository, tag, commit}; check-build
+#     validates that identity against the tag and the actual built files.
+#   * Historical releases (immutable V0.19) committed their manifest at the
+#     tag; retries anchor to those exact tag-committed manifest bytes plus the
+#     actual published asset digests and are never rewritten.
+#   * New releases are created as drafts, completed with the full asset set
+#     (verified by sha256 digest) and only then published. Published assets
+#     are never replaced; a published release found incomplete is a hard
+#     failure (never rebuilt, never attached to). An unfinished draft is
+#     completed from the original attempt's retained artifact — including a
+#     draft whose manifest asset upload failed, authenticated by the
+#     manifest digest recorded in the draft notes. Published retries never
+#     depend on CI artifacts or rebuilds.
+#   * A fresh catalog rebuild must equal the tagged committed catalog_static
+#     tree (Brew installs the tag SOURCE archive), and tracked source must
+#     not drift during the build job (exact-tag-build), otherwise the run
+#     fails before the frozen build.
 #
 # Jobs: build (contents: read) -> publish (contents: write) -> distribution
 # (reusable Brew workflow, dedicated HOMEBREW_TAP_TOKEN secret). The workflow
-# only reports success after the Brew distribution job has finished.
+# only reports success after the Brew distribution job has finished; a failed
+# Brew run is retried by dispatching the same tag again.
 
 on:
   push:
-    branches:
-      - dev
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
-      source_sha:
-        description: "Exact dev commit to release (full 40-hex sha; defaults to the current dev head)"
-        required: false
+      tag:
+        description: "Existing vX.Y.Z tag to publish/retry; V0.0..V0.19 only retries an existing release"
+        required: true
         type: string
 
 permissions:
@@ -57,15 +87,15 @@ env:
 
 jobs:
   build:
-    name: Validate source, build and test the release
+    name: Validate tag and plan the run (build only when unpublished)
     runs-on: ubuntu-24.04
     outputs:
-      mode: ${{ steps.plan.outputs.mode }}
-      version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
-      source_sha: ${{ steps.select.outputs.source_sha }}
-      base_main: ${{ steps.plan.outputs.base_main }}
-      build_run_id: ${{ steps.plan.outputs.build_run_id }}
+      version: ${{ steps.plan.outputs.version }}
+      commit: ${{ steps.plan.outputs.commit }}
+      historical: ${{ steps.plan.outputs.historical }}
+      mode: ${{ steps.plan.outputs.mode }}
+      automation_sha: ${{ steps.trust.outputs.automation_sha }}
     steps:
       - name: Preflight the dedicated Brew tap token
         env:
@@ -76,80 +106,103 @@ jobs:
             exit 1
           fi
 
-      # Trusted orchestration checkout: the workflow's own revision. Selected
-      # sources are validated from here before anything executes them.
+      # The automation revision is resolved FIRST, before any checkout, from
+      # the fixed repository through the GitHub API (inline stdlib only). The
+      # event tag is never a source of automation code.
+      - name: Resolve protected automation revision
+        id: trust
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          automation_sha="$(python3 - <<'PY'
+          import json, os, urllib.request
+          token = os.environ.get("GITHUB_TOKEN")
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "portmap-release",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+          request = urllib.request.Request(
+              "https://api.github.com/repos/ylang-ylang/portmap/git/ref/heads/dev",
+              headers=headers,
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              ref = json.load(response)
+          sha = (ref.get("object") or {}).get("sha")
+          if not isinstance(sha, str) or len(sha) != 40 or any(
+              character not in "0123456789abcdef" for character in sha
+          ):
+              raise SystemExit("resolved automation SHA is not a 40-hex string")
+          print(sha)
+          PY
+          )"
+          echo "automation_sha=$automation_sha" >> "$GITHUB_OUTPUT"
+          echo "automation revision: ylang-ylang/portmap@dev $automation_sha"
+
+      # Trusted orchestration checkout: the protected dev revision with the
+      # full history, origin/main and all tags for tag validation.
       - name: Check out trusted orchestration
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.sha }}
+          repository: ylang-ylang/portmap
+          ref: ${{ steps.trust.outputs.automation_sha }}
           path: trusted
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
-      - name: Validate the requested source against protected dev
-        id: select
-        env:
-          REQUESTED: ${{ inputs.source_sha || '' }}
-        run: |
-          # Push events pin the exact pushed commit; an empty manual dispatch
-          # falls back to the CURRENT origin/dev head inside the script.
-          default=()
-          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            default=(--default-sha "$GITHUB_SHA")
-          fi
-          python3 "$PIPELINE" --repo-root trusted select-source \
-            --input "$REQUESTED" "${default[@]}" > select.json
-          cat select.json
-          python3 - <<'PY'
-          import json, os
-          selected = json.load(open("select.json"))
-          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f"source_sha={selected['source_sha']}\n")
-          PY
-
-      - name: Check out the validated source commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ steps.select.outputs.source_sha }}
-          path: source
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Plan version, tag and idempotency mode
+      # Bootstrap gate: peel the event tag, require the peeled commit to be
+      # part of origin/main history and the committed source versions to be
+      # exactly major.minor.patch — BEFORE the tagged source is ever checked out.
+      # The run mode then comes from the ACTUAL release state (404-only
+      # absence): build only when nothing is published yet, so re-runs of an
+      # already released tag never regenerate published bytes.
+      - name: Validate the tag and select the run mode
         id: plan
         env:
-          SOURCE_SHA: ${{ steps.select.outputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          EVENT_SHA: ${{ github.sha }}
         run: |
-          python3 "$PIPELINE" --repo-root source plan --source-sha "$SOURCE_SHA" > plan.json
+          python3 "$PIPELINE" --repo-root trusted plan-run \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --event-tag "$EVENT_TAG" \
+            --event-sha "$EVENT_SHA" > plan.json
           cat plan.json
           python3 - <<'PY'
           import json, os
           plan = json.load(open("plan.json"))
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              for key in ("mode", "version", "tag", "source_sha", "base_main", "build_run_id"):
+              for key in ("tag", "version", "commit", "historical", "mode"):
                   out.write(f"{key}={plan[key]}\n")
           PY
 
-      # Everything below only runs for a brand-new release. Retries of an
-      # already tagged source skip straight to the publish job, which recovers
-      # any missing release assets from the retained artifact of the recorded
-      # run id instead of building a different binary.
-      - name: Align version metadata with the planned release
-        if: steps.plan.outputs.mode == 'new'
-        env:
-          VERSION: ${{ steps.plan.outputs.version }}
-        run: python3 "$PIPELINE" --repo-root source bump --version "$VERSION"
+      # Everything below only runs when NO release exists for the tag yet
+      # (mode=build): the exact tagged commit is built for the first time.
+      # Existing drafts/published releases skip straight to the publish job.
+      - name: Check out the validated tagged commit
+        if: steps.plan.outputs.mode == 'build'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ylang-ylang/portmap
+          ref: ${{ steps.plan.outputs.commit }}
+          path: source
+          persist-credentials: false
 
       - name: Set up Node
-        if: steps.plan.outputs.mode == 'new'
+        if: steps.plan.outputs.mode == 'build'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: source/package-lock.json
 
-      - name: Compile the catalog UI and project skill
-        if: steps.plan.outputs.mode == 'new'
+      - name: Rebuild the catalog from the tagged source
+        if: steps.plan.outputs.mode == 'build'
         working-directory: source
         run: |
           npm ci
@@ -157,8 +210,16 @@ jobs:
           test -f src/portmap/catalog_static/skills/project-integration/SKILL.md
           test -f src/portmap/catalog_static/assets/catalog.js
 
+      # Brew installs the GitHub tag SOURCE archive: the committed
+      # catalog_static tree must equal a fresh rebuild, otherwise the frozen
+      # bundle would ship a new UI while Brew/source installs silently ship
+      # a stale one. Maintainers run npm ci && npm run build before tagging.
+      - name: Require the rebuilt catalog to equal the tagged tree
+        if: steps.plan.outputs.mode == 'build'
+        run: python3 "$PIPELINE" --repo-root source check-catalog
+
       - name: Run the full non-integration test suite
-        if: steps.plan.outputs.mode == 'new'
+        if: steps.plan.outputs.mode == 'build'
         working-directory: source
         run: |
           # Ubuntu 24.04 supplies Python 3.12 and Git; run tests as the runner,
@@ -167,31 +228,43 @@ jobs:
           "$RUNNER_TEMP/portmap-tests/bin/pip" install --no-cache-dir -e ".[test]"
           "$RUNNER_TEMP/portmap-tests/bin/python" -m pytest -m "not integration"
 
-      - name: Build the frozen linux-amd64 archive
-        if: steps.plan.outputs.mode == 'new'
+      # Exact-tag-build: tests or the rebuild must not have modified any
+      # TRACKED file (untracked node_modules/dist stay usable); the frozen
+      # archive is built from the exact tagged tree or not at all.
+      - name: Reject tracked source drift before the frozen build
+        if: steps.plan.outputs.mode == 'build'
+        run: python3 "$PIPELINE" --repo-root source check-source
+
+      - name: Build the frozen linux-amd64 archive with provenance
+        if: steps.plan.outputs.mode == 'build'
         working-directory: source
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
         run: |
           # The Dockerfile only pins the build environment (no COPY), so the
           # build context is the small packaging directory.
           docker build --pull -f packaging/portmap.Dockerfile -t "$BUILDER_IMAGE" packaging
           mkdir -p dist
           # The build tool stages its own static tree under the out dir; the
-          # source mount stays read-only.
-          docker run --rm -e HOME=/tmp \
+          # source mount stays read-only. Paired provenance flags make the
+          # builder verify HEAD/version and embed the source identity block.
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
             -v "$PWD:/src:ro" -v "$PWD/dist:/out" \
-            "$BUILDER_IMAGE" --out-dir /out
+            "$BUILDER_IMAGE" --out-dir /out \
+            --release-tag "$TAG" --source-commit "$COMMIT"
 
-      - name: Validate the built release against the plan
-        if: steps.plan.outputs.mode == 'new'
+      - name: Validate the built manifest against the tag identity
+        if: steps.plan.outputs.mode == 'build'
         env:
-          VERSION: ${{ steps.plan.outputs.version }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
         run: |
           python3 "$PIPELINE" --repo-root source check-build \
-            --version "$VERSION" --assets-dir source/dist
-
+            --tag "$TAG" --commit "$COMMIT" --assets-dir source/dist
 
       - name: Runtime-gate the actual frozen artifact
-        if: steps.plan.outputs.mode == 'new'
+        if: steps.plan.outputs.mode == 'build'
         env:
           VERSION: ${{ steps.plan.outputs.version }}
         run: |
@@ -199,19 +272,18 @@ jobs:
           # --version must match the plan and its catalog server must serve
           # the canonical rendered skill over HTTP 200 Markdown. Runs ONLY
           # in this contents:read job; the publish job never executes
-          # artifact code. Existing-mode retries skip the build and smoke.
+          # artifact code.
           python3 "$PIPELINE" --repo-root source smoke-build \
             --version "$VERSION" --dist-dir source/dist
 
-      # mode=new means no tag is bound to this source yet, so a re-run of the
-      # same failed run may deterministically replace its own pre-tag
-      # artifacts. Once a tag exists the workflow never uploads artifacts
-      # again (these steps are skipped for mode=existing).
+      # The attempt suffix keeps every re-run's bytes distinct: an
+      # interrupted draft is completed from ITS OWN attempt's artifact, never
+      # from a rebuild with different bytes.
       - name: Retain the release assets
-        if: steps.plan.outputs.mode == 'new'
+        if: steps.plan.outputs.mode == 'build'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-assets-${{ github.run_id }}
+          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             source/dist/*.tar.gz
             source/dist/*.sha256
@@ -220,138 +292,84 @@ jobs:
           retention-days: 90
           overwrite: true
 
-      - name: Retain the compiled catalog tree for the release commit
-        if: steps.plan.outputs.mode == 'new'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: built-tree-${{ github.run_id }}
-          path: source/src/portmap/catalog_static
-          if-no-files-found: error
-          retention-days: 90
-          overwrite: true
-
   publish:
-    name: Commit, merge, tag and publish the GitHub release
+    name: Publish or complete the immutable GitHub release
     needs: build
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      actions: read # cross-run artifact recovery for tagged retries
+      actions: read # cross-run artifact recovery for interrupted drafts
     outputs:
       tag: ${{ needs.build.outputs.tag }}
       version: ${{ needs.build.outputs.version }}
-      mode: ${{ needs.build.outputs.mode }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      MODE: ${{ needs.build.outputs.mode }}
-      VERSION: ${{ needs.build.outputs.version }}
       TAG: ${{ needs.build.outputs.tag }}
-      SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
-      BASE_MAIN: ${{ needs.build.outputs.base_main }}
-      BUILD_RUN_ID: ${{ needs.build.outputs.build_run_id }}
       RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
-      # Orchestration always comes from the trusted workflow revision; the
+      # Same protected automation revision the build job resolved; the
       # publication token is never exposed to source or artifact code.
+      # tools/release_pipeline.py revalidates the tag against main history
+      # and the committed source versions before any mutation below.
       - name: Check out trusted orchestration
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.sha }}
+          repository: ylang-ylang/portmap
+          ref: ${{ needs.build.outputs.automation_sha }}
           path: trusted
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
-
-      - name: Check out the validated source commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ needs.build.outputs.source_sha }}
-          path: source
-          fetch-depth: 0
-
-      - name: Configure the release bot identity
-        run: |
-          git -C source config user.name "portmap-release-bot"
-          git -C source config user.email "90782530+ylang-ylang@users.noreply.github.com"
 
       - name: Export runtime release paths
         run: |
           # runner.temp is unavailable in job-level env; export it per run.
           echo "ASSETS_DIR=${RUNNER_TEMP}/release-assets" >> "$GITHUB_ENV"
 
-      - name: Download the fresh release assets
-        if: needs.build.outputs.mode == 'new'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: release-assets-${{ github.run_id }}
-          path: ${{ runner.temp }}/release-assets
-
-      - name: Download the compiled catalog tree
-        if: needs.build.outputs.mode == 'new'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: built-tree-${{ github.run_id }}
-          path: ${{ runner.temp }}/built-tree
-      - name: Restore the compiled catalog tree into the checkout
-        if: needs.build.outputs.mode == 'new'
+      - name: Inspect the tagged release
+        id: inspect
         run: |
-          rm -rf source/src/portmap/catalog_static
-          mkdir -p source/src/portmap/catalog_static
-          # The artifact root is the directory's content itself.
-          cp -a "${RUNNER_TEMP}/built-tree/." source/src/portmap/catalog_static/
-
-      - name: Verify the published tag before any recovery
-        if: needs.build.outputs.mode == 'existing'
-        id: verify
-        run: |
-          python3 "$PIPELINE" --repo-root source verify-existing \
-            --tag "$TAG" --source-sha "$SOURCE_SHA" --run-id "$BUILD_RUN_ID" > verify.json
-          cat verify.json
+          python3 "$PIPELINE" --repo-root trusted inspect-release \
+            --tag "$TAG" > inspect.json
+          cat inspect.json
           python3 - <<'PY'
           import json, os
-          result = json.load(open("verify.json"))
-          recovery = "true" if result["missing_files"] else "false"
+          result = json.load(open("inspect.json"))
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f"needs_recovery={recovery}\n")
+              out.write(f"recover_artifact={result['recover_artifact'] or ''}\n")
+              out.write(f"origin_run_id={result['origin_run_id'] or ''}\n")
+              out.write(f"missing={','.join(result['missing'])}\n")
           PY
 
-      # Retained artifacts expire; recovery is only attempted when the GitHub
-      # release is genuinely incomplete. A complete release proceeds straight
-      # to Brew distribution without any artifact dependency.
-      - name: Recover the retained release assets of the original run
-        if: needs.build.outputs.mode == 'existing' && steps.verify.outputs.needs_recovery == 'true'
+      - name: Download this run's release assets
+        if: needs.build.outputs.mode == 'build'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: release-assets-${{ needs.build.outputs.build_run_id }}
-          run-id: ${{ needs.build.outputs.build_run_id }}
+          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-assets
+
+      # Only an unfinished DRAFT recovers the original attempt's retained
+      # artifact bytes — including a draft whose manifest asset upload
+      # failed (its manifest digest is bound in the draft notes); published
+      # releases verify to a no-op and never depend on CI artifacts or
+      # rebuilds.
+      - name: Recover the original attempt's retained assets
+        if: steps.inspect.outputs.recover_artifact != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ steps.inspect.outputs.recover_artifact }}
+          run-id: ${{ steps.inspect.outputs.origin_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/release-assets
 
-      - name: Commit the release state on feat/release-Vx.y
-        if: needs.build.outputs.mode == 'new'
+      - name: Publish or complete the release without clobbering assets
         run: |
-          python3 "$PIPELINE" --repo-root source prepare \
-            --version "$VERSION" --tag "$TAG" --source-sha "$SOURCE_SHA" \
-            --run-id "$RUN_ID" --assets-dir "$ASSETS_DIR"
-
-      - name: Merge into dev and main, tag, and push atomically
-        if: needs.build.outputs.mode == 'new'
-        run: |
-          python3 "$PIPELINE" --repo-root source finalize \
-            --version "$VERSION" --tag "$TAG" --source-sha "$SOURCE_SHA" \
-            --run-id "$RUN_ID" --base-main "$BASE_MAIN"
-
-      - name: Publish the GitHub release without clobbering assets
-        run: |
-          # Retries of an already tagged release are recorded under the
-          # ORIGINAL build run id from the tag marker.
-          RID="$RUN_ID"
-          if [ "$MODE" = "existing" ]; then
-            RID="$BUILD_RUN_ID"
-          fi
-          python3 "$PIPELINE" --repo-root source publish-release \
+          python3 "$PIPELINE" --repo-root trusted publish-release \
             --tag "$TAG" --assets-dir "$ASSETS_DIR" \
-            --version "$VERSION" --source-sha "$SOURCE_SHA" --run-id "$RID"
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
 
   distribution:
     name: Update the Brew tap through the reusable workflow
