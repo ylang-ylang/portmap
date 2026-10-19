@@ -910,6 +910,11 @@ pre {
   white-space: pre;
 }
 
+.quick-setup pre.agent-skill-prompt code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 
 /* Machine navigation tabs */
 .machine-nav {
@@ -1084,13 +1089,17 @@ pre {
   overflow: hidden;
 }
 
-.machine-card-header {
+.machine-card-summary {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.machine-card-main {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  background: #eef2f6;
-  border-bottom: 1px solid #d1dae3;
+  flex-wrap: wrap;
 }
 
 .machine-card-name {
@@ -1100,27 +1109,66 @@ pre {
   color: #283544;
 }
 
-.machine-card-conns {
-  /* connection rows inside card */
+.machine-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
-.machine-card-conn-row {
-  border-bottom: 1px solid #edf1f5;
+.machine-profile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
-.machine-card-conn-row:last-child {
-  border-bottom: 0;
+.machine-profile-target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: #283544;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.machine-card-upd {
+.machine-card-flag {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.machine-card-details {
   border-top: 1px solid #e6ebf1;
-  background: #f8fafc;
 }
 
-/* Remove outer border from upd-row inside a card (card provides it) */
-.machine-card-upd .upd-row {
-  border-bottom: 0;
-  background: transparent;
+.machine-card-details > summary {
+  cursor: pointer;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #52606d;
+  user-select: none;
+}
+
+.machine-card-details-body {
+  display: grid;
+  gap: 6px;
+  padding: 8px 12px 10px;
+}
+
+.machine-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.machine-detail-target {
+  font-size: 12px;
 }
 
 
@@ -1135,53 +1183,6 @@ pre {
   border: 1px solid #d1dae3;
   border-radius: 4px;
   overflow: hidden;
-}
-
-.conn-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  background: #ffffff;
-  border-bottom: 1px solid #e6ebf1;
-}
-
-.conn-row:last-child {
-  border-bottom: 0;
-}
-
-.conn-row-body {
-  flex: 1 1 0;
-  min-width: 0;
-}
-
-.conn-row-main {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.conn-row-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 5px;
-  flex-wrap: wrap;
-}
-
-.conn-row-target {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  font-weight: 600;
-  color: #283544;
-}
-
-.conn-row-domain {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  color: #52606d;
 }
 
 .conn-row-actions {
@@ -1391,48 +1392,11 @@ pre {
   overflow: hidden;
 }
 
-.upd-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  background: #ffffff;
-  border-bottom: 1px solid #e6ebf1;
-}
-
-.upd-row:last-child {
-  border-bottom: 0;
-}
-
-.upd-row-body {
-  flex: 1 1 0;
-  min-width: 0;
-  display: grid;
-  gap: 5px;
-}
-
-.upd-row-main,
-.upd-row-meta,
-.upd-job-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
 .upd-row-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   font-weight: 600;
   color: #283544;
-}
-
-.upd-row-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
 }
 
 .upd-badge {
@@ -1871,15 +1835,14 @@ pre {
     font-size: 12px;
   }
 
-  .conn-row {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-  }
-
-  .conn-row-actions {
+  .conn-row-actions,
+  .machine-card-actions {
     align-self: flex-start;
     flex-wrap: wrap;
+  }
+
+  .machine-card-actions {
+    margin-left: 0;
   }
 
   .conn-form-row {
@@ -1892,17 +1855,6 @@ pre {
     flex-basis: auto;
     width: 100%;
     box-sizing: border-box;
-  }
-
-  .upd-row {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-  }
-
-  .upd-row-actions {
-    align-self: flex-start;
-    flex-wrap: wrap;
   }
 
   .upd-cred-input {
@@ -2214,26 +2166,21 @@ pre {
     border-color: #2b3540;
   }
 
-  .machine-card-header {
-    background: #202832;
-    border-bottom-color: #2b3540;
-  }
-
   .machine-card-name {
     color: #eef2f6;
   }
 
-  .machine-card-conn-row {
-    border-bottom-color: #2b3540;
-  }
-
-  .machine-card-upd {
+  .machine-card-details {
     border-top-color: #2b3540;
-    background: #171d23;
   }
 
-  .machine-card-upd .upd-row {
-    background: transparent;
+  .machine-card-details > summary {
+    color: #a7b2bf;
+  }
+
+  .machine-profile-target,
+  .machine-detail-target {
+    color: #eef2f6;
   }
 
   .machine-via-direct {
@@ -2255,19 +2202,6 @@ pre {
   /* Connection management - dark */
   .conn-list {
     border-color: #2b3540;
-  }
-
-  .conn-row {
-    background: #151b22;
-    border-color: #2b3540;
-  }
-
-  .conn-row-target {
-    color: #eef2f6;
-  }
-
-  .conn-row-domain {
-    color: #a7b2bf;
   }
 
   .conn-status-configured {
@@ -2390,7 +2324,6 @@ pre {
   }
 
   /* Settings updates panel - dark */
-  .upd-row,
   .upd-batch {
     background: #151b22;
     border-color: #2b3540;
@@ -2400,10 +2333,6 @@ pre {
   .upd-batch-id,
   .upd-ver b {
     color: #eef2f6;
-  }
-
-  .upd-row {
-    border-bottom-color: #2b3540;
   }
 
   .upd-batch-header {

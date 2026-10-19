@@ -51,3 +51,16 @@ gitGraph TB:
 - `main` release merge results must use a `V#.#` tag, where `#` means one or more decimal digits.
 - `main` must not receive direct commits.
 - Ad hoc tags are not allowed; release tags are allowed only when they satisfy the `dev` to `main` rule.
+
+## Release and hotfix policy
+
+- Every shipped change, including a small hotfix, must use the immutable release
+  and Homebrew distribution workflow. Use `feat/hotfix-*` for small fixes under
+  the same protected branch graph; “hotfix” does not mean live patching.
+- Never overwrite Python modules, JavaScript, CSS, or other files inside users'
+  installed Portmap packages as a deployment method.
+- A release is complete only after its artifacts are published and the tap formula
+  PR passes checks and merges. Failure must remain visible and retries must not
+  rewrite published tags or assets.
+- Publishing only builds/distributes packages. User machines upgrade explicitly
+  through Homebrew or the authenticated web updater; CI must not upgrade them.

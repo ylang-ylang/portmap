@@ -14,11 +14,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -52,11 +55,18 @@ def main() -> int:
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("release version must be numeric major.minor.patch")
-    subprocess.run(
-        [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--distpath", str(out / "frozen"), "--workpath", str(out / "work"), str(ROOT / "packaging" / "portmap.spec")],
-        cwd=ROOT,
-        check=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="portmap-static-", dir=out) as temporary:
+        static_root = Path(temporary)
+        shutil.copytree(ROOT / "src/portmap/catalog_static", static_root, dirs_exist_ok=True)
+        skill_asset = static_root / "skills/project-integration/SKILL.md"
+        skill_asset.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / "skills/project-integration/SKILL.md", skill_asset)
+        subprocess.run(
+            [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--distpath", str(out / "frozen"), "--workpath", str(out / "work"), str(ROOT / "packaging" / "portmap.spec")],
+            cwd=ROOT,
+            env={**os.environ, "PORTMAP_BUILD_STATIC_ROOT": str(static_root)},
+            check=True,
+        )
     package = out / "frozen" / "portmap"
     executable = package / "portmap"
     if not executable.is_file():

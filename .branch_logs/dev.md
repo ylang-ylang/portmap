@@ -184,3 +184,18 @@
 - Restore official0.18 on mujoco and its mj connection; dexgem deployment remains
   externally blocked by failed Coder workspace startup/no agents. No persistence
   template changes or deferred Tailscale DNS redesign included.
+- Integrate `feat/http-project-skill` as the 0.19.0 release candidate: serve
+  versioned Markdown from `/skills/project-integration/SKILL.md`, maintain its
+  sole source under `skills/`, and expose a guide link/copyable agent prompt.
+- Flatten machine cards while preserving update/connection/error controls and
+  duplicate profiles. Candidate browser, public/private HTTP, wheel and actual
+  frozen-binary smoke passed; installed machines were not hot-patched.
+- Add push-to-GitHub-dev immutable build/release automation and checked Brew
+  formula PR distribution, including protected merge graph, retry identity,
+  artifact/manifest verification, source trust and no user-machine upgrades.
+- Corrected release-tool regression: 139 passed; Actionlint clean; the actual
+  frozen0.19 HTTP smoke passed. Initial full-suite failures were confined to the
+  new release tools/fixtures; the automatic release reruns the full suite.
+- Bootstrap tap CI merged only after its real GitHub check passed (tap PR1).
+  Dedicated `HOMEBREW_TAP_TOKEN` is persisted in source-repository Actions Secrets.
+  Formal publication is complete only after the automatic release and tap jobs.

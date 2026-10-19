@@ -67,7 +67,7 @@ from .compose_takeover import find_compose_file, generated_compose_project, plan
 from .repo_identity import git, git_branch, resolve_repo_identity, stable_hash
 from .settings import load_portmap_settings
 from .slug import slugify
-from .web_static import StaticHandler, vite_public_root_asset
+from .web_static import STATIC_ROOT, StaticHandler, vite_public_root_asset
 
 
 DOCKER_SOCKET = os.environ.get("PORTMAP_DOCKER_SOCKET", "/var/run/docker.sock")
@@ -1730,6 +1730,23 @@ class CatalogHandler(StaticHandler):
 
     def handle_request(self, *, send_body: bool) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/skills/project-integration/SKILL.md":
+            try:
+                template = (STATIC_ROOT / "skills/project-integration/SKILL.md").read_text(encoding="utf-8")
+            except FileNotFoundError:
+                self.write_not_found(send_body=send_body)
+                return
+            body = template.replace("{{PORTMAP_VERSION}}", __version__).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "text/markdown; charset=utf-8")
+            self.send_header("content-length", str(len(body)))
+            self.send_header("cache-control", "no-cache")
+            self.send_header("x-content-type-options", "nosniff")
+            self.end_headers()
+            if send_body:
+                self.wfile.write(body)
+            return
+
         if parsed.path in {"/healthz", "/readyz"}:
             if self.private_scope:
                 # Controller readiness only: the private scope cannot claim
