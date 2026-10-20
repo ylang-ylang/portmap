@@ -1286,6 +1286,22 @@ pre {
   border-color: #fda4af;
 }
 
+/* Update button: lit up when an update is available, muted otherwise */
+.upd-btn-available {
+  font-weight: 600;
+}
+
+.upd-btn-unavailable {
+  color: #7b8794;
+  border-color: #c8d3dc;
+  background: #f0f4f8;
+  cursor: default;
+}
+
+.upd-btn-unavailable:disabled {
+  opacity: 1;
+}
+
 .conn-panel-error {
   background: #fee2e2;
   color: #7f1d1d;
@@ -2274,6 +2290,12 @@ pre {
     background: #2a1212;
     color: #fca5a5;
     border-color: #b42318;
+  }
+
+  .upd-btn-unavailable {
+    color: #52606d;
+    border-color: #2b3540;
+    background: #1a2230;
   }
 
   .conn-panel-error {

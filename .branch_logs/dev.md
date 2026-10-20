@@ -245,3 +245,7 @@
 - hotfix/catalog-host-path-status: stop using the catalog filesystem to classify
   host project paths. Unknown/untracked stays distinct from host-confirmed deletion;
   matching agent metadata remains authoritative. Preserve running-service controls.
+- hotfix/minimal-update-controls: show one highlighted/disabled Update action,
+  check availability on Settings entry, and keep diagnostics/credentials collapsed.
+  Preserve explicit confirmation and reject stale status responses. Translate the
+  agent-guide heading, copy action and complete integration prompt to English.
