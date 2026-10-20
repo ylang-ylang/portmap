@@ -824,6 +824,54 @@ def test_host_worktrees_includes_running_worktree_and_writes_history(tmp_path: P
     assert payload["worktrees"][0]["worktree_root"] == str(repo / ".git")
 
 
+def test_host_worktrees_shows_unconfigured_git_worktrees_only_under_explicit_roots(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    root = tmp_path / "projects@wt"
+    repo = root / "sample@dev"
+    outside = tmp_path / "outside@case"
+    history = tmp_path / "history.json"
+    write_git_compose_repo(repo, with_compose=False, with_endpoints=False)
+    run(["git", "worktree", "add", "-b", "case-outside", str(outside)], cwd=repo)
+    run(["git", "branch", "not-checked-out"], cwd=repo)
+    (root / "not-a-project").mkdir()
+    monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", str(root))
+    monkeypatch.setenv("PORTMAP_CATALOG_HISTORY_FILE", str(history))
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [])
+
+    catalog = host_collected_catalog()
+
+    record, = catalog["worktrees"]
+    assert record["worktree"] == str(repo)
+    assert record["running"] is False
+    assert record["startable"] is False
+    assert record["start_error"] == "missing compose file; missing .portmap/endpoints.toml"
+    assert record["source"] == "current"
+    assert [entry["worktree"] for entry in json.loads(history.read_text())["worktrees"]] == [str(repo)]
+
+    monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", "")
+    historical, = host_collected_catalog()["worktrees"]
+    assert historical["worktree"] == str(repo)
+    assert historical["source"] == "history"
+    assert historical["startable"] is False
+
+
+@pytest.mark.parametrize("contract", ["", "[endpoints]\n"])
+def test_host_worktrees_disables_start_for_empty_endpoint_contract(
+    tmp_path: Path, monkeypatch, contract: str,
+) -> None:
+    repo = tmp_path / "sample@dev"
+    write_git_compose_repo(repo)
+    (repo / ".portmap/endpoints.toml").write_text(contract, encoding="utf-8")
+    monkeypatch.setenv("PORTMAP_CATALOG_WORKTREE_ROOTS", str(tmp_path))
+
+    record, = discover_catalog_worktrees([])
+
+    assert record["startable"] is False
+    assert ".portmap/endpoints.toml" in record["start_error"]
+    assert "endpoints" in record["start_error"]
+
+
 def test_host_worktrees_orders_worktrees_by_branch_tip_descending(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "sample@dev"
     feat = tmp_path / "sample@feat-new"
@@ -1015,7 +1063,7 @@ def test_host_worktrees_drops_history_branches_not_checked_out(tmp_path: Path, m
     assert [entry["branch"] for entry in payload["worktrees"]] == ["dev"]
 
 
-def test_host_worktrees_drops_non_startable_history(tmp_path: Path, monkeypatch) -> None:
+def test_host_worktrees_preserves_non_startable_history_with_reason(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "sample@dev"
     history = tmp_path / "history.json"
     write_git_compose_repo(repo, with_endpoints=False)
@@ -1043,7 +1091,11 @@ def test_host_worktrees_drops_non_startable_history(tmp_path: Path, monkeypatch)
     catalog = host_collected_catalog()
 
     assert catalog["services"] == []
-    assert catalog["worktrees"] == []
+    record, = catalog["worktrees"]
+    assert record["worktree"] == str(repo)
+    assert record["source"] == "history"
+    assert record["startable"] is False
+    assert record["start_error"] == "missing .portmap/endpoints.toml"
 
 
 def test_catalog_compose_up_action_uses_agent(monkeypatch) -> None:

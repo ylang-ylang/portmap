@@ -133,3 +133,7 @@
   .portmap/endpoints.toml with CLI override priority and no invalid-path fallback.
   Use the same selection for initialization, generation, discovery and UI start.
   Document Portmap-supported layouts without imposing a Git/Compose root-file rule.
+- Hotfix v0.20.5: show every valid Git worktree under configured scan roots,
+  independently of Compose readiness. Keep non-startable worktrees visible in
+  stopped/history lists with diagnostic reasons and disabled Start; preserve
+  service/contract qualification for incidental siblings and validate endpoints.

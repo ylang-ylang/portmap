@@ -53,6 +53,7 @@ from .client_dns import probe_marker
 from .client_discovery import probe_gateway
 from .client_runtime import native_environment
 from .client_view import project_catalog, request_host
+from .config import load_endpoint_declarations
 from .downloads import (
     ARCHIVE_CONTENT_TYPE,
     DOWNLOADS_PREFIX,
@@ -438,6 +439,7 @@ def parse_host_rule(rule: str) -> str | None:
 def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str, Any]]:
     running_by_worktree = running_services_by_worktree(services)
     candidates: dict[str, Path] = {}
+    configured_worktrees: dict[str, Path] = {}
 
     for worktree in running_by_worktree:
         path = Path(worktree)
@@ -447,9 +449,11 @@ def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str,
 
     for root in catalog_worktree_roots():
         for candidate in root_worktree_candidates(root):
-            add_existing_worktree_candidate(candidates, candidate)
+            add_existing_worktree_candidate(configured_worktrees, candidate)
             for sibling in git_worktree_paths(candidate):
                 add_existing_worktree_candidate(candidates, sibling)
+
+    candidates.update(configured_worktrees)
 
     add_submodule_worktree_candidates(candidates)
 
@@ -462,6 +466,7 @@ def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str,
             not worktree.get("running")
             and not worktree.get("startable")
             and not (Path(worktree["worktree"]) / ENDPOINT_CONFIG).is_file()
+            and str(path) not in configured_worktrees
         ):
             continue
         worktrees.append(worktree)
@@ -488,9 +493,7 @@ def merge_catalog_history(
         if not raw_worktree:
             continue
         record = catalog_worktree_from_path(Path(raw_worktree), running_by_worktree)
-        if record is None or (
-            not record.get("startable") and not (Path(record["worktree"]) / ENDPOINT_CONFIG).is_file()
-        ):
+        if record is None:
             continue
         historical_branch = slugify(str(historical.get("branch") or record["branch"]))
         if historical_branch != record["branch"]:
@@ -568,8 +571,6 @@ def write_catalog_history(worktrees: list[dict[str, Any]], *, generated_at: str)
     for worktree in worktrees:
         raw_path = str(worktree.get("worktree") or "").strip()
         if not raw_path:
-            continue
-        if not worktree.get("startable") and not (Path(raw_path) / ENDPOINT_CONFIG).is_file():
             continue
         entries.append(
             {
@@ -931,18 +932,23 @@ def catalog_worktree_from_path(
     running_services = running_by_worktree.get(str(top_level), [])
     compose_project = generated_compose_project(top_level) or first_service_value(running_services, "compose_project")
     endpoint_config = top_level / ENDPOINT_CONFIG
-    start_error = ""
+    start_errors = []
     try:
         compose_file = find_compose_file(top_level)
     except ConfigError as exc:
-        compose_file = None
-        start_error = str(exc)
-    if not start_error:
+        start_errors.append(str(exc))
+    else:
         if compose_file is None:
-            start_error = "missing compose file"
-        elif not endpoint_config.exists():
-            start_error = f"missing {ENDPOINT_CONFIG}"
-    startable = not start_error
+            start_errors.append("missing compose file")
+    if not endpoint_config.is_file():
+        start_errors.append(f"missing {ENDPOINT_CONFIG}")
+    else:
+        try:
+            load_endpoint_declarations(endpoint_config)
+        except (ConfigError, OSError, ValueError) as exc:
+            start_errors.append(f"{ENDPOINT_CONFIG}: {exc}")
+    start_error = "; ".join(start_errors)
+    startable = not start_errors
 
     endpoint_total = sum(len(service.get("endpoints") or []) for service in running_services)
     return {

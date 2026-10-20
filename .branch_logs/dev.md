@@ -253,3 +253,7 @@
   generation, broker and host catalog; persist explicit selection in the existing
   endpoint contract. Preserve file-relative Compose semantics and explicit errors.
   Valid-Git isolated up/down/agent-restart and real build/bind HTTP proof passed.
+- hotfix/all-worktree-visibility: admit valid Git worktrees under explicit host
+  scan roots without deployment contracts, preserve existing checked-out history,
+  and show non-startable rows with real reasons and disabled Start. No extra
+  registry, fabricated endpoints, historical-ref directories or lifecycle states.
