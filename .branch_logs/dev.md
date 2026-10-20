@@ -250,3 +250,6 @@
 - Integrate final v0.20.1 acceptance: 1418 tests passed; frozen version/Skill HTTP
   passed; a real isolated SSH outage withdrew its route and recovered automatically
   in about 8s. Explicit disconnect stayed disconnected; smoke resources removed.
+- v0.20.1 is formally published: Actions39367456043 succeeded and tap PR6 merged.
+  Explicit Brew activation upgraded only mj to0.20.1; setup completed successfully.
+  Existing v0.20.0 and other machine installations were not rewritten/upgraded.
