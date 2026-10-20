@@ -1005,7 +1005,35 @@ project's containers and networks, not the access infrastructure. JSON is at:
 http://<detected-host-ip>/registry.json
 ```
 
-Generate files for an external compose project:
+### Integrating a Compose project
+
+Use a **Portmap-supported layout** with `.portmap/` at the selected project or
+worktree root. This is Portmap's discovery contract, not a Git or Compose
+standard. The Compose file may be at that root or in a nested directory:
+
+```text
+project/
+  docker/
+    compose.yaml
+  .portmap/
+    endpoints.toml
+    README.md
+    .gitignore
+```
+
+Inputs and prerequisites:
+
+| Input | Requirement |
+| --- | --- |
+| Project root | Required; current directory by default, or Portmap `--project-dir <root>` for `init`/`generate`. Run broker commands from that root. |
+| Existing Compose file | Required; use root discovery or select a path explicitly as described below. |
+| Endpoint declarations | Required for generation/runtime: `[endpoints.<name>]` with actual service names, endpoint kinds and container-internal ports. `init` may create an empty starter contract to fill before generation. |
+| Compose path setting | Optional for root-discovered files; needed for a nested/non-default file. Relative paths are project-root-relative. |
+| Endpoint config/output paths | Optional for `generate`: `--config` defaults to `.portmap/endpoints.toml`, `--out-dir` to `.portmap`, relative to the project root. Canonical `.portmap/endpoints.toml` remains the broker/host-agent discovery contract. |
+| Runtime | A usable Docker or Podman API and Compose client for Compose rendering and project operations; the shared gateway must be available to publish endpoints. |
+| Git metadata | A valid local checkout/worktree is a separate prerequisite for Git-based identity, branch/worktree discovery and catalog actions. |
+
+Initialize a project whose Compose file is at the root:
 
 ```bash
 cd /path/to/project
@@ -1027,6 +1055,84 @@ use Docker bridge networking for managed services, declare endpoint kinds in
 with that override, and query the shared catalog for the assigned URLs and raw
 ports.
 
+#### Selecting the Compose file
+
+Selection uses this priority:
+
+1. `portmap init --compose-file <path>` or `portmap generate --compose-file <path>`.
+2. `[compose].file` in the selected endpoint TOML. `generate --config <path>`
+   consults that file, not an unrelated canonical config; the default is
+   `.portmap/endpoints.toml`.
+3. Root-only discovery, in this exact order: `docker-compose.yml`,
+   `docker-compose.yaml`, `compose.yml`, `compose.yaml`.
+
+Discovery does not recurse into `docker/`, `deployment/`, or other directories.
+For the nested layout above, initialize with:
+
+```bash
+portmap init --compose-file docker/compose.yaml
+```
+
+Successful explicit selection is saved in `.portmap/endpoints.toml` even when
+`init` creates an empty endpoint scaffold. Initialization does not require
+already-configured endpoints; fill in the real endpoint declarations before
+generation or runtime use. For example, a completed contract could contain:
+
+```toml
+[compose]
+file = "docker/compose.yaml"
+
+[endpoints.frontend]
+kind = "http"
+service = "frontend"
+container_port = 5173
+```
+
+Both `--compose-file` and `[compose].file` resolve relative paths from the
+Portmap project root, **not** from the endpoint TOML's directory. Absolute input
+paths are accepted; persisted paths are normalized relative to that root
+(including `../` when the file is outside it). Plain root discovery does not
+automatically pin a filename.
+
+Successful `generate` with an explicit `--compose-file` or custom `--config`
+records the selected path in both the selected endpoint TOML and canonical
+`.portmap/endpoints.toml`. If canonical config is absent, it copies the full
+custom endpoint contract, not a compose-only file. If canonical config exists,
+its endpoint declarations and comments are preserved; only Compose selection is
+updated. Generation and custom-contract canonical copying require a non-empty
+endpoint contract; that requirement does not block fresh `init` scaffolding.
+This makes the same
+file discoverable for later broker commands and host-agent/catalog project
+Down/Restart operations. Existing canonical endpoints are not replaced by custom
+ones, so review that contract if the custom config declares different endpoints.
+
+An invalid explicit/configured selection fails rather than silently choosing
+a root-level file. A missing/non-file path diagnostic names the source field and
+the resolved path, for example:
+
+```text
+/work/project/.portmap/endpoints.toml: [compose].file: compose file is missing or not a regular file: /work/project/docker/compose.yaml
+```
+
+CLI overrides identify `--compose-file` instead. Blank/non-string values identify
+`[compose].file` and the project root; a malformed `[compose]` table or unreadable
+TOML identifies the configuration problem. The catalog retains a valid-Git
+worktree with a bad selection as non-startable with `start_error`; fix the
+selection rather than introducing a root-level decoy Compose file.
+
+Portmap passes the selected base Compose file first and the generated override
+second. It does **not** force Compose `--project-directory` to the Portmap root:
+relative bind mounts and build contexts keep the selected base file's Compose
+semantics. Portmap `--project-dir` selects Portmap's root; it is not a request
+to rebase the Compose application.
+
+Git validity is independent of Compose selection. A linked worktree normally has
+a `.git` file pointing to Git metadata elsewhere; the target must exist and be
+readable on the project host. A synchronized directory with a broken `.git`
+pointer, including a copy produced by Unison, does not become a valid worktree by
+setting `[compose].file`. Diagnose that Git/synchronization prerequisite
+separately; this integration does not repair Git metadata or change sync policy.
+
 After editing `.portmap/endpoints.toml`, the recommended path is to let the
 Docker Compose broker regenerate files automatically:
 
@@ -1040,12 +1146,12 @@ The broker can also be called explicitly without shell integration:
 portmap docker-compose -- up -d
 ```
 
-For manual generation, `portmap generate` defaults to the current directory
-when paths are omitted:
+For manual generation, omitted paths use the project-root defaults above.
+For example, explicitly select the nested Compose file:
 
 ```bash
 portmap generate \
-  --compose-file docker-compose.yml \
+  --compose-file docker/compose.yaml \
   --config .portmap/endpoints.toml \
   --out-dir .portmap \
   --branch "$(git branch --show-current)"

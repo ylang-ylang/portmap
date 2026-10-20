@@ -129,3 +129,7 @@
 - Hotfix v0.20.3: simplify update cards to a readiness button with necessary
   progress/errors, automatically check availability, and make agent guidance English.
   Keep versions/builds and direct authorization in Details; no automatic upgrades.
+- Hotfix v0.20.4: support project-root-relative [compose].file in
+  .portmap/endpoints.toml with CLI override priority and no invalid-path fallback.
+  Use the same selection for initialization, generation, discovery and UI start.
+  Document Portmap-supported layouts without imposing a Git/Compose root-file rule.
