@@ -316,6 +316,29 @@ state directories still require the current owner and mode 0700 permission
 bits; inherited setgid does not grant group access and is not mistaken for
 an unsafe directory.
 
+The read-only `portmap.runtime_startup` consumer is packaged with the CLI as
+`portmap runtime-env activate` and `portmap runtime-env verify-api`. It reuses
+the producer's ownership header and persistent helper-root contract, deriving
+the selected version directory from the owned file rather than a receipt.
+Activation proves both helper paths and versions through the real local CLI
+before emitting one shell-quoted export, without connecting to an API.
+Verification proves inherited activation and both selections through the real
+existing Unix-socket API. Foreign/empty explicit overrides and absent owned
+configuration are no-ops; malformed claimed-owned configuration fails closed.
+Existing producer modes, including 0664/0775, are preserved.
+All native helper, Podman and curl children use `native_environment`, including
+explicit activation environments: frozen-bundle LD/DYLD search paths are removed
+without dropping the user's own loader entries or the selected helper override.
+
+An external starter using `CONTAINERS_CONF` must opt into this bridge once:
+invoke the installed stable Brew opt binary before its existing API launch
+and verify after readiness, preserving its base configuration and environment.
+The implementation then follows ordinary Brew/web package updates rather than
+a copied starter script. Neither command manages engine lifetime or DNS.
+Installing a package does not rewrite the external starter or update a live
+process's environment; incompatible running workloads still require separately
+authorized idle maintenance. No shared workspace template change is implied.
+
 Restoring a persistent home volume can relax those bits again (directories
 to 2770/2775, records to 0660) while the private home itself keeps blocking
 every other user. `portmap.permissions` centralizes the recovery every gate

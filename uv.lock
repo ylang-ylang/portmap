@@ -40,7 +40,7 @@ wheels = [
 
 [[package]]
 name = "portmap"
-version = "0.20.5"
+version = "0.20.6"
 source = { editable = "." }
 
 [package.optional-dependencies]

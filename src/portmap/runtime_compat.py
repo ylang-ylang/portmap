@@ -17,9 +17,10 @@ When the selected service runs with a startup-generated ``CONTAINERS_CONF``
 base configuration (as on Coder-style workspaces), that file is never
 modified: the replacement service additionally receives the owned override
 via ``CONTAINERS_CONF_OVERRIDE``, which podman's configuration loader always
-merges last. After such a repair, the very next standard entry re-verifies
-the live service, so a workspace rebuild that swaps the API service back to
-the distro helpers is repaired again by rerunning setup -- never bypassed.
+merges last. Every standard entry re-verifies the live service. A rebuilt
+service that lost this environment can be repaired again only while idle;
+running workloads are never bypassed. External starters can preserve activation
+through the read-only ``portmap runtime-env`` boundaries in runtime_startup.
 Config files an earlier deployment of this very transaction already wrote
 are recognized as owned (header plus the portmap helper directory leading
 the search list) and reused, or refreshed in place when the surrounding
