@@ -13,6 +13,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import threading
 from pathlib import Path
 from typing import BinaryIO, Mapping, TypedDict
 
@@ -46,6 +47,7 @@ def start_tunnel(
     config_file: Path | None = None,
     timeout: float = 10,
     use_sudo: bool = True,
+    stop_event: threading.Event | None = None,
 ) -> TunnelDescriptor:
     """Start a private master; persist the returned dict unchanged as JSON.
 
@@ -53,6 +55,8 @@ def start_tunnel(
     or SSH URLs. Authentication and proxies come from the local SSH config.
     Logs are retained under state_dir/ssh, including after failure or stop.
     Readiness means the control socket responds, not that a remote API works.
+    A supplied stop event interrupts startup polling and reaps this invocation's
+    child before cancellation returns; ordinary callers retain their timeout.
     """
     _validate_target(target)
     timeout = _timeout(timeout)
@@ -63,6 +67,8 @@ def start_tunnel(
     child: subprocess.Popen[bytes] | None = None
     deadline = time.monotonic() + timeout
     try:
+        if stop_event is not None and stop_event.is_set():
+            raise PortmapError("SSH tunnel startup cancelled")
         log_dir = Path(state_dir).expanduser().resolve() / "ssh"
         log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         config = str(Path(config_file).expanduser().resolve()) if config_file is not None else None
@@ -126,6 +132,8 @@ def start_tunnel(
                 start_new_session=not foreground_active(),
             )
         while True:
+            if stop_event is not None and stop_event.is_set():
+                raise PortmapError("SSH tunnel startup cancelled")
             status = child.poll()
             if status is not None:
                 raise PortmapError(_failure(tunnel, f"SSH tunnel to {target!r} exited with status {status}"))
@@ -141,7 +149,11 @@ def start_tunnel(
                     _CHILDREN[tunnel["controlpath"]] = child
                     _TRACKED_TUNNELS[tunnel["controlpath"]] = dict(tunnel)
                     return tunnel
-            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+            delay = min(0.05, max(0, deadline - time.monotonic()))
+            if stop_event is None:
+                time.sleep(delay)
+            else:
+                stop_event.wait(delay)
     except BaseException as exc:
         try:
             if child is not None:

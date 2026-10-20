@@ -7,6 +7,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -135,6 +136,34 @@ def test_startup_timeout_reaps_only_its_owned_child(tmp_path, replace_master):
     finally:
         unrelated.kill()
         unrelated.wait(timeout=5)
+
+
+def test_cancelled_start_never_spawns_or_creates_runtime(tmp_path, replace_master):
+    stopped = threading.Event()
+    stopped.set()
+    started = replace_master("import time; time.sleep(60)")
+
+    with pytest.raises(PortmapError, match="startup cancelled"):
+        client_tunnel.start_tunnel("configured-alias", state_dir=tmp_path, key="cancelled", stop_event=stopped)
+
+    assert started == []
+    assert not (tmp_path / "ssh").exists()
+
+
+def test_stop_during_start_reaps_owned_child_without_waiting_for_startup_deadline(tmp_path, replace_master):
+    stopped = threading.Event()
+    started = replace_master("import time; time.sleep(60)", inspect=lambda command: stopped.set())
+    before = time.monotonic()
+
+    with pytest.raises(PortmapError, match="startup cancelled"):
+        client_tunnel.start_tunnel(
+            "configured-alias", state_dir=tmp_path, key="cancel-start", timeout=30,
+            use_sudo=False, stop_event=stopped,
+        )
+
+    assert time.monotonic() - before < 3
+    assert started[0].child.poll() is not None
+    assert not started[0].runtime.exists()
 
 
 def test_master_config_preserves_auth_and_proxy_without_inherited_side_effects(tmp_path, replace_master, ssh_binary):

@@ -145,8 +145,8 @@ class ContainerRuntime:
         finally:
             connection.close()
 
-    def inspect_container(self, identity: str) -> dict[str, Any] | None:
-        result = self.request("GET", f"/containers/{quote(identity, safe='')}/json", statuses=(200, 404))
+    def inspect_container(self, identity: str, *, timeout: float = 15) -> dict[str, Any] | None:
+        result = self.request("GET", f"/containers/{quote(identity, safe='')}/json", statuses=(200, 404), timeout=timeout)
         return result if isinstance(result, dict) and result.get("Id") else None
 
     def inspect_network(self, identity: str) -> dict[str, Any] | None:
@@ -214,8 +214,8 @@ class ContainerRuntime:
             raise PortmapError("container runtime returned an invalid container inventory")
         return [item for item in containers if all((item.get("Labels") or {}).get(key) == value for key, value in labels.items())]
 
-    def require_owned(self, identity: str, labels: Mapping[str, str]) -> dict[str, Any] | None:
-        container = self.inspect_container(identity)
+    def require_owned(self, identity: str, labels: Mapping[str, str], *, timeout: float = 15) -> dict[str, Any] | None:
+        container = self.inspect_container(identity, timeout=timeout)
         if container is not None and any((container.get("Config", {}).get("Labels") or {}).get(key) != value for key, value in labels.items()):
             raise PortmapError(f"refusing to change container {identity}: infrastructure ownership does not match")
         return container
@@ -224,10 +224,10 @@ class ContainerRuntime:
         if self.require_owned(identity, labels) is not None:
             self.request("DELETE", f"/containers/{quote(identity, safe='')}?force=1&v=0", statuses=(204, 404), timeout=30)
 
-    def signal_owned(self, identity: str, labels: Mapping[str, str], signal: str) -> None:
-        if self.require_owned(identity, labels) is None:
+    def signal_owned(self, identity: str, labels: Mapping[str, str], signal: str, *, timeout: float = 15) -> None:
+        if self.require_owned(identity, labels, timeout=timeout) is None:
             raise PortmapError("the owned container disappeared before its configuration reload")
-        self.request("POST", f"/containers/{quote(identity, safe='')}/kill?signal={quote(signal, safe='')}", statuses=(204,))
+        self.request("POST", f"/containers/{quote(identity, safe='')}/kill?signal={quote(signal, safe='')}", statuses=(204,), timeout=timeout)
 
     def remove_empty_network(self, identity: str, labels: Mapping[str, str]) -> bool:
         network = self.inspect_network(identity)

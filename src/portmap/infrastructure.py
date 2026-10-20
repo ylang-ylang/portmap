@@ -13,6 +13,7 @@ import socket
 import sys
 import stat
 import tempfile
+import threading
 import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
@@ -55,11 +56,25 @@ def _atomic(path: Path, content: bytes, *, mode: int = 0o600) -> None:
 
 
 @contextmanager
-def _lock(state_dir: Path) -> Iterator[None]:
+def _lock(
+    state_dir: Path, *, stop_event: threading.Event | None = None, deadline: float | None = None,
+) -> Iterator[None]:
     _private_directory(state_dir)
     fd = os.open(state_dir / "infrastructure.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "a+") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if deadline is None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        else:
+            while True:
+                _maintenance_timeout(stop_event, deadline)
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if stop_event is None:
+                        time.sleep(0.025)
+                    else:
+                        stop_event.wait(0.025)
         try:
             yield
         finally:
@@ -183,15 +198,26 @@ def _dns_port(native: dict[str, Any], plan: Mapping[str, Any]) -> int:
         return _free_port(address, udp=True)
 
 
-def _profile_views(profiles: Mapping[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _profile_views(
+    profiles: Mapping[str, dict[str, Any]], *,
+    stop_event: threading.Event | None = None, deadline: float | None = None,
+    probe_tunnels: bool = True,
+) -> dict[str, dict[str, Any]]:
     result = {}
     for domain, profile in profiles.items():
+        if deadline is not None:
+            _maintenance_timeout(stop_event, deadline)
         available = profile.get("via") == "direct"
         if profile.get("via") == "ssh" and profile.get("tunnel") and profile.get("http_socket"):
             path = Path(profile["http_socket"])
             try:
                 metadata = path.lstat()
-                available = stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == os.getuid() and tunnel_alive(profile["tunnel"])
+                available = (
+                    stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == os.getuid()
+                    and (not probe_tunnels or tunnel_alive(profile["tunnel"], timeout=(
+                        _maintenance_timeout(stop_event, deadline) if deadline is not None else 2
+                    )))
+                )
             except OSError:
                 available = False
         result[domain] = {**profile, "available": available}
@@ -427,29 +453,56 @@ def _routes_loaded(actual: dict[str, Any], desired: dict[str, Any]) -> bool:
     return True
 
 
-def _health(state: dict[str, Any], routes: dict[str, Any], *, port: int | None = None) -> None:
-    if state["host_dns_enabled"] and probe_marker(state["resolver"]["address"], state["dns_port"], timeout=0.4) != state["dns_marker"]:
+def _maintenance_timeout(stop_event: threading.Event | None, deadline: float) -> float:
+    if stop_event is not None and stop_event.is_set():
+        raise PortmapError("connection maintenance cancelled")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise PortmapError("connection maintenance publication timed out")
+    return min(0.2, remaining)
+
+
+def _health(
+    state: dict[str, Any], routes: dict[str, Any], *, port: int | None = None,
+    stop_event: threading.Event | None = None, deadline: float | None = None,
+) -> None:
+    timeout = _maintenance_timeout(stop_event, deadline) if deadline is not None else 0.4
+    if state["host_dns_enabled"] and probe_marker(state["resolver"]["address"], state["dns_port"], timeout=timeout) != state["dns_marker"]:
         raise PortmapError("container DNS has not loaded the requested hostname mappings")
-    if not _routes_loaded(_json_get(state["management_port"], "/api/rawdata"), routes):
+    timeout = _maintenance_timeout(stop_event, deadline) if deadline is not None else 0.5
+    if not _routes_loaded(_json_get(state["management_port"], "/api/rawdata", timeout=timeout), routes):
         raise PortmapError("Traefik has not enabled the requested route revision")
     target = state["listen_port"] if port is None else port
     expected = {"ok": True, "owner": state["owner"], "dns_marker": state["dns_marker"]}
-    if _json_get(target, f"/__portmap_ready/{state['owner']}/{state['revision']}") != expected:
+    timeout = _maintenance_timeout(stop_event, deadline) if deadline is not None else 0.5
+    if _json_get(target, f"/__portmap_ready/{state['owner']}/{state['revision']}", timeout=timeout) != expected:
         raise PortmapError("private catalog or container DNS ownership readiness failed")
-    if _json_get(target, f"/__portmap_relay/{state['owner']}") != {"owner": state["owner"], "revision": state["relay_revision"]}:
+    timeout = _maintenance_timeout(stop_event, deadline) if deadline is not None else 0.5
+    if _json_get(target, f"/__portmap_relay/{state['owner']}", timeout=timeout) != {"owner": state["owner"], "revision": state["relay_revision"]}:
         raise PortmapError("SSH Unix-socket relay has not loaded the requested revision")
 
 
-def _wait_ready(state: dict[str, Any], routes: dict[str, Any], *, port: int | None = None) -> None:
-    deadline = time.monotonic() + _START_TIMEOUT
+def _wait_ready(
+    state: dict[str, Any], routes: dict[str, Any], *, port: int | None = None,
+    stop_event: threading.Event | None = None, deadline: float | None = None,
+) -> None:
+    bounded = deadline is not None
+    deadline = deadline if deadline is not None else time.monotonic() + _START_TIMEOUT
     error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            _health(state, routes, port=port)
+            if bounded:
+                _health(state, routes, port=port, stop_event=stop_event, deadline=deadline)
+            else:
+                _health(state, routes, port=port)
             return
         except (PortmapError, OSError, ValueError, http.client.HTTPException) as exc:
             error = exc
-        time.sleep(0.1)
+        if stop_event is not None:
+            if stop_event.wait(0.05):
+                raise PortmapError("connection maintenance cancelled")
+        else:
+            time.sleep(0.1)
     raise PortmapError(f"container infrastructure did not become ready: {error}")
 
 
@@ -476,38 +529,130 @@ def _dynamic_configuration(
     return candidate, routes, payloads
 
 
-def _publish(state: dict[str, Any], profiles: Mapping[str, dict[str, Any]], local: dict[str, Any] | None, runtime: ContainerRuntime) -> dict[str, Any]:
-    _check_profile_network(state, profiles, runtime)
+def _withdrawal_only(before: bytes, after: bytes) -> bool:
+    """Maintenance cannot change local/direct roles or bypass readiness on additions."""
+    old, new = json.loads(before), json.loads(after)
+    if old["local"] != new["local"]:
+        raise PortmapError("connection maintenance cannot change local publishing")
+    old_machines, new_machines = old["machines"], new["machines"]
+    withdrawal = True
+    for domain in old_machines.keys() | new_machines.keys():
+        previous, current = old_machines.get(domain), new_machines.get(domain)
+        if ((previous is not None and previous["via"] != "ssh")
+                or (current is not None and current["via"] != "ssh")):
+            if previous != current:
+                raise PortmapError("connection maintenance cannot change direct connections")
+        if current is not None and current["available"] and previous != current:
+            withdrawal = False
+    return withdrawal
+
+
+def _publish(
+    state: dict[str, Any], profiles: Mapping[str, dict[str, Any]],
+    local: dict[str, Any] | None, runtime: ContainerRuntime, *,
+    stop_event: threading.Event | None = None, deadline: float | None = None,
+) -> dict[str, Any]:
+    if deadline is None:
+        _check_profile_network(state, profiles, runtime)
     candidate, routes, payloads = _dynamic_configuration(state, profiles, local)
     paths = _configuration_paths(state)
     previous = {key: path.read_bytes() for key, path in paths.items()}
+    withdrawal = deadline is not None and _withdrawal_only(previous["access"], payloads["access"])
+    if deadline is not None:
+        _maintenance_timeout(stop_event, deadline)
+        if stop_event is None and not withdrawal:
+            raise PortmapError("uncancellable maintenance may only withdraw existing SSH routes")
     bridge_changed = previous["relay"] != payloads["relay"]
     try:
         # Endpoints first, routes next, DNS last. Readers see atomic snapshots.
         for key in ("access", "relay", "routes", "dns"):
+            if deadline is not None:
+                _maintenance_timeout(stop_event, deadline)
             if previous[key] != payloads[key]:
                 _atomic(paths[key], payloads[key], mode=0o644)
         if bridge_changed:
-            runtime.signal_owned(state["containers"]["relay"], resource_labels(state), "SIGUSR2")
-        _wait_ready(candidate, routes)
-        if state.get("phase") == "ready":
-            _wait_ready(candidate, routes, port=candidate["http_port"])
-            _verify_host_view(candidate, profiles)
+            if deadline is None:
+                runtime.signal_owned(state["containers"]["relay"], resource_labels(state), "SIGUSR2")
+            else:
+                runtime.signal_owned(
+                    state["containers"]["relay"], resource_labels(state), "SIGUSR2",
+                    timeout=_maintenance_timeout(stop_event, deadline),
+                )
+        if not withdrawal:
+            if deadline is None:
+                _wait_ready(candidate, routes)
+            else:
+                _wait_ready(candidate, routes, stop_event=stop_event, deadline=deadline)
+            if state.get("phase") == "ready":
+                if deadline is None:
+                    _wait_ready(candidate, routes, port=candidate["http_port"])
+                    _verify_host_view(candidate, profiles)
+                else:
+                    _wait_ready(candidate, routes, port=candidate["http_port"], stop_event=stop_event, deadline=deadline)
+        if deadline is not None:
+            _maintenance_timeout(stop_event, deadline)
     except BaseException as exc:
         for key, content in previous.items():
             _atomic(paths[key], content, mode=0o644)
         if bridge_changed:
             try:
-                runtime.signal_owned(state["containers"]["relay"], resource_labels(state), "SIGUSR2")
+                if deadline is None:
+                    runtime.signal_owned(state["containers"]["relay"], resource_labels(state), "SIGUSR2")
+                else:
+                    # Rollback is mandatory even after cancellation/deadline;
+                    # each ownership/signal request remains independently bounded.
+                    runtime.signal_owned(state["containers"]["relay"], resource_labels(state), "SIGUSR2", timeout=0.2)
             except PortmapError as rollback:
                 raise PortmapError(f"configuration update failed ({exc}); relay rollback also failed: {rollback}") from exc
-        if state.get("phase") == "ready":
+        if state.get("phase") == "ready" and deadline is None:
             try:
                 _wait_ready(state, json.loads(previous["routes"]))
             except PortmapError as rollback:
                 raise PortmapError(f"configuration update failed ({exc}); previous configuration restored on disk but readiness failed: {rollback}") from exc
         raise
     return candidate
+
+
+def sync_connection_routes(
+    state_dir: Path, profiles: Mapping[str, dict[str, Any]], local: dict[str, Any] | None,
+    *, stop_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    """Reconcile SSH routes in a ready owned stack, never bootstrap or repair DNS.
+
+    The caller holds the connection/client mutation locks. Normal reconciliation
+    supplies its cancellation event; a token-less cleanup can only withdraw
+    existing routes, with a one-second budget. Withdrawals publish immediately;
+    new reachable routes must pass internal and public ingress readiness.
+    """
+    if not (state_dir / "infrastructure.json").exists():
+        raise PortmapError("connection maintenance requires existing infrastructure")
+    deadline = time.monotonic() + (1.0 if stop_event is None else 6.0)
+    with _lock(state_dir, stop_event=stop_event, deadline=deadline):
+        state = load_infrastructure(state_dir)
+        if state is None or state.get("phase") != "ready":
+            raise PortmapError("connection maintenance requires ready infrastructure")
+        runtime = ContainerRuntime.from_record(state["runtime"])
+        labels = resource_labels(state)
+        for role in IMAGES:
+            identity = state["containers"].get(role)
+            if not identity:
+                raise PortmapError("connection maintenance requires existing owned containers")
+            container = runtime.require_owned(
+                identity, labels, timeout=_maintenance_timeout(stop_event, deadline),
+            )
+            if not container or not container.get("State", {}).get("Running"):
+                raise PortmapError("connection maintenance requires running owned containers")
+        # The caller has just proved each retained transport or withdrawn its
+        # socket under the client lock. Do not re-probe healthy peers with a
+        # shorter publication deadline and spuriously downgrade their routes.
+        views = _profile_views(
+            profiles, stop_event=stop_event, deadline=deadline, probe_tunnels=False,
+        )
+        candidate = _publish(
+            state, views, local, runtime, stop_event=stop_event, deadline=deadline,
+        )
+        _save(state_dir, candidate)
+        return candidate
 
 
 def _sync_existing(

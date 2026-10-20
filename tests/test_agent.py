@@ -1,14 +1,16 @@
 """Background and foreground agent startup regressions."""
+import json
 import os
 import signal
 import socket
 import subprocess
 import sys
 import time
+import threading
 
 import pytest
 
-from portmap import agent, client_runtime
+from portmap import agent, agent_client, client, client_runtime
 from portmap.agent_client import agent_health
 from portmap.errors import PortmapError
 from portmap.settings import load_portmap_settings
@@ -247,6 +249,179 @@ def test_foreground_spawn_cleanup_on_cancellation(settings, monkeypatch):
 
     # The owned child and its group died and were reaped before the raise.
     assert spawned["process"].returncode is not None
+    assert not settings.agent_socket.exists()
+    assert not settings.agent_pid_file.exists()
+    assert not (settings.agent_runtime_dir / "agent-owner.json").exists()
+
+
+def test_owned_agent_keeps_http_controls_responsive_and_pins_state_during_outage(settings, tmp_path, monkeypatch):
+    selected = tmp_path / "selected-client"
+    selected.mkdir(mode=0o700)
+    other = tmp_path / "other-client"
+    monkeypatch.setenv("PORTMAP_CLIENT_STATE_DIR", str(selected))
+    entered = threading.Event()
+    finished = threading.Event()
+    published = []
+
+    def outage(state_dir, stop_event):
+        entered.set()
+        # Model an unavailable remote waiting for its cancellable retry.
+        if not stop_event.wait(timeout=10):
+            published.append(state_dir)
+        finished.set()
+
+    monkeypatch.setattr(client, "run_connection_maintenance", outage)
+    monkeypatch.setattr(client, "connections", lambda *args, **kwargs: {"connections": []})
+    server = agent._bind_agent_server(settings.agent_socket, settings.agent_pid_file)
+    serving = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    serving.start()
+    try:
+        assert entered.wait(timeout=2)
+        # Even an environment change cannot send HTTP mutations to a different
+        # store from the worker bound to this owned socket.
+        monkeypatch.setenv("PORTMAP_CLIENT_STATE_DIR", str(other))
+        assert agent_health(socket_path=settings.agent_socket)["access_state_dir"] == str(selected)
+        status, payload = agent_client.request_json_status(
+            "POST", "/access/connections", socket_path=settings.agent_socket, timeout=1,
+            payload={"action": "save", "target": "user@offline-host", "via": "ssh"},
+        )
+        assert status == 200
+        assert payload["connections"][0]["target"] == "user@offline-host"
+        stored = json.loads((selected / "connection-targets.json").read_text())
+        assert stored
+        assert not (other / "connection-targets.json").exists()
+    finally:
+        server.shutdown()
+        serving.join(timeout=2)
+        agent._retire_agent_server(server)
+
+    assert finished.is_set()
+    assert published == []
+    assert not settings.agent_socket.exists()
+    assert not settings.agent_pid_file.exists()
+
+
+def test_owned_agent_retirement_does_not_wait_forever_for_a_stuck_worker(settings, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(agent, "MAINTENANCE_STOP_TIMEOUT", 0.05)
+
+    def stuck_worker(state_dir, stop_event):
+        entered.set()
+        release.wait(timeout=10)
+
+    monkeypatch.setattr(client, "run_connection_maintenance", stuck_worker)
+    server = agent._bind_agent_server(settings.agent_socket, settings.agent_pid_file)
+    try:
+        assert entered.wait(timeout=2)
+        started = time.monotonic()
+        agent._retire_agent_server(server)
+        assert time.monotonic() - started < 1
+        assert server.maintenance_stop.is_set()
+        assert not settings.agent_socket.exists()
+        assert not settings.agent_pid_file.exists()
+    finally:
+        release.set()
+        server.maintenance_thread.join(timeout=2)
+
+
+_OUTAGE_AGENT = """
+import sys
+from portmap import agent, client
+
+def outage(state_dir, stop_event):
+    journal = state_dir / "maintenance-journal"
+    with journal.open("a") as output:
+        output.write("started\\n")
+    if not stop_event.wait(timeout=30):
+        (state_dir / "late-reconnect").write_text("unexpected")
+    with journal.open("a") as output:
+        output.write("stopped\\n")
+
+client.run_connection_maintenance = outage
+client.connections = lambda *args, **kwargs: {"connections": []}
+raise SystemExit(agent.main(sys.argv[1:]))
+"""
+
+
+@pytest.mark.parametrize("foreground", [False, True], ids=["background", "foreground"])
+@pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+def test_agent_signal_stops_maintenance_and_reuse_never_duplicates_it(settings, tmp_path, foreground, stop_signal):
+    selected = tmp_path / "selected-client"
+    selected.mkdir(mode=0o700)
+    journal = selected / "maintenance-journal"
+    command = [
+        sys.executable, "-c", _OUTAGE_AGENT, "serve",
+        "--socket", str(settings.agent_socket), "--pid-file", str(settings.agent_pid_file),
+    ]
+    if foreground:
+        command.append("--foreground-lifetime")
+    process = subprocess.Popen(
+        command, env=agent._agent_worker_environment(settings, selected),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, process_group=0,
+    )
+    blocked = socket.socket(socket.AF_UNIX)
+    try:
+        agent._await_foreground_worker(settings, process, selected)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if journal.exists() and journal.read_text() == "started\n":
+                break
+            time.sleep(0.01)
+        assert journal.read_text() == "started\n"
+        assert agent.start_foreground_agent(settings, access_state_dir=selected) is None
+        assert agent.ensure_agent_started(settings, use_sudo=False, access_state_dir=selected).pid == process.pid
+        assert agent_health(socket_path=settings.agent_socket, timeout=1)["access_state_dir"] == str(selected)
+        status, body = agent_client.request_json_status(
+            "POST", "/access/connections", socket_path=settings.agent_socket, timeout=1,
+            payload={"action": "save", "target": "user@unreachable", "via": "ssh"},
+        )
+        assert status == 200
+        assert body["connections"][0]["target"] == "user@unreachable"
+        # A hung independent HTTP operation must not delay cancellation or
+        # prevent other controls answering during the maintenance outage.
+        blocked.connect(str(settings.agent_socket))
+        blocked.sendall(b"POST /access/connections HTTP/1.1\r\nHost: agent\r\ncontent-length: 65536\r\n\r\n")
+        assert agent_health(socket_path=settings.agent_socket, timeout=1)["pid"] == process.pid
+        started = time.monotonic()
+        process.send_signal(stop_signal)
+        assert process.wait(timeout=5) == 0
+        assert time.monotonic() - started < 5
+        assert journal.read_text() == "started\nstopped\n"
+        assert not (selected / "late-reconnect").exists()
+        assert (selected / "connection-targets.json").exists()
+        assert not settings.agent_socket.exists()
+        assert not settings.agent_pid_file.exists()
+        assert not (settings.agent_runtime_dir / "agent-owner.json").exists()
+    finally:
+        blocked.close()
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=5)
+
+
+def test_agent_stop_during_bind_cancels_before_any_reconnect(settings, monkeypatch):
+    reconnects = []
+    completed = threading.Event()
+    original_bind = agent._bind_agent_server
+    previous_handler = signal.getsignal(signal.SIGTERM)
+
+    def stopping_bind(*args, **kwargs):
+        signal.raise_signal(signal.SIGTERM)
+        return original_bind(*args, **kwargs)
+
+    def maintenance(state_dir, stop_event):
+        if not stop_event.is_set():
+            reconnects.append(state_dir)
+        completed.set()
+
+    monkeypatch.setattr(agent, "_bind_agent_server", stopping_bind)
+    monkeypatch.setattr(client, "run_connection_maintenance", maintenance)
+    agent.run_agent_server(settings.agent_socket, pid_file=settings.agent_pid_file)
+
+    assert completed.is_set()
+    assert reconnects == []
+    assert signal.getsignal(signal.SIGTERM) == previous_handler
     assert not settings.agent_socket.exists()
     assert not settings.agent_pid_file.exists()
     assert not (settings.agent_runtime_dir / "agent-owner.json").exists()

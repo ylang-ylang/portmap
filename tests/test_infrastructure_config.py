@@ -1,6 +1,9 @@
 import json
 import os
 import shutil
+import socket
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -260,3 +263,168 @@ def test_failed_reconfigure_preserves_compiled_ssh_route_without_old_port_alloca
         for server in service.get("loadBalancer", {}).get("servers", [])
     )
     assert paths["relay"].read_bytes() == b"previous relay configuration"
+
+
+@pytest.fixture
+def maintenance_stack(tmp_path, relay_socket_dir, monkeypatch):
+    state = stack_state(tmp_path, relay_socket_dir)
+    state_dir = Path(state["state_dir"])
+    state_dir.mkdir(mode=0o700)
+    owner = "a" * 32
+    state.update(
+        version=1, owner=owner, phase="ready", relay_ports={},
+        instance_dir=str(state_dir / "infrastructure" / owner),
+        runtime={"backend": "docker", "socket_path": "/test/docker.sock", "rootless": False},
+        containers={role: role for role in infrastructure_config.IMAGES},
+        dns_forward=["192.0.2.53"],
+    )
+    Path(state["instance_dir"]).mkdir(parents=True, mode=0o700)
+    sockets = []
+    profiles = {}
+    for digit, domain in (("1", "remote.portmap"), ("2", "healthy.portmap")):
+        path = relay_socket_dir / (digit * 24 + ".sock")
+        endpoint = socket.socket(socket.AF_UNIX)
+        endpoint.bind(str(path))
+        sockets.append(endpoint)
+        profiles[domain] = {
+            "domain": domain, "via": "ssh", "target": domain,
+            "remote_http_port": 80, "http_socket": str(path),
+            "tunnel": {"live": True}, "include_tcp": False,
+        }
+    profiles["direct.portmap"] = {
+        "domain": "direct.portmap", "via": "direct", "target": "192.0.2.20",
+        "address": "192.0.2.20", "remote_http_port": 8080,
+    }
+    monkeypatch.setattr(infrastructure, "tunnel_alive", lambda tunnel, **kwargs: tunnel["live"])
+    views = infrastructure._profile_views(profiles)
+    state, _, payloads = infrastructure._dynamic_configuration(state, views, None)
+    paths = infrastructure._configuration_paths(state)
+    for key, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payloads[key])
+    infrastructure._save(state_dir, state)
+    engine = {"running": True, "foreign": False}
+
+    def request(self, method, path, payload=None, **kwargs):
+        if method == "GET" and path.endswith("/json"):
+            labels = infrastructure_config.resource_labels(state)
+            if engine["foreign"]:
+                labels = {}
+            return {"Id": path.split("/")[2], "State": {"Running": engine["running"]},
+                    "Config": {"Labels": labels}}
+        if method == "POST" and "/kill?signal=SIGUSR2" in path:
+            return None
+        raise AssertionError(f"unexpected runtime operation: {method} {path}")
+
+    monkeypatch.setattr(ContainerRuntime, "request", request)
+    monkeypatch.setattr(infrastructure, "_health", lambda *args, **kwargs: None)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("maintenance must not bootstrap infrastructure or alter host DNS")
+
+    for name in ("prepare_runtime", "prepare_resolver", "setup_resolver", "teardown_resolver", "ensure_ingress"):
+        monkeypatch.setattr(infrastructure, name, forbidden)
+    yield state_dir, paths, profiles, engine
+    for endpoint in sockets:
+        endpoint.close()
+
+
+def test_maintenance_withdraws_dead_routes_and_restores_only_verified_connections(maintenance_stack):
+    state_dir, paths, profiles, _ = maintenance_stack
+    before = json.loads(paths["access"].read_bytes())
+    retired_socket = profiles["remote.portmap"].pop("http_socket")
+    event = threading.Event()
+    infrastructure.sync_connection_routes(state_dir, profiles, None, stop_event=event)
+    withdrawn = json.loads(paths["access"].read_bytes())
+    assert withdrawn["machines"]["remote.portmap"]["available"] is False
+    assert "backend_url" not in withdrawn["machines"]["remote.portmap"]
+    for peer in ("healthy.portmap", "direct.portmap"):
+        assert withdrawn["machines"][peer] == before["machines"][peer]
+    assert "remote.portmap" not in infrastructure.load_infrastructure(state_dir)["relay_ports"]
+
+    profiles["remote.portmap"]["http_socket"] = retired_socket
+    infrastructure.sync_connection_routes(state_dir, profiles, None, stop_event=event)
+    restored = json.loads(paths["access"].read_bytes())
+    assert restored["machines"]["remote.portmap"]["available"] is True
+    assert restored["machines"]["remote.portmap"]["backend_url"] == before["machines"]["remote.portmap"]["backend_url"]
+    assert infrastructure.load_infrastructure(state_dir)["revision"] == infrastructure_config.routes_config(
+        infrastructure.load_infrastructure(state_dir), restored
+    )[0]
+
+
+@pytest.mark.parametrize("fault", ["stopped", "foreign", "phase"])
+def test_maintenance_refuses_unready_or_foreign_stack_without_writes(maintenance_stack, fault):
+    from portmap.errors import PortmapError
+
+    state_dir, paths, profiles, engine = maintenance_stack
+    if fault == "phase":
+        state = infrastructure.load_infrastructure(state_dir)
+        state["phase"] = "starting"
+        infrastructure._save(state_dir, state)
+    else:
+        engine["running" if fault == "stopped" else "foreign"] = fault != "stopped"
+    before = {key: path.read_bytes() for key, path in paths.items()}
+    state_before = (state_dir / "infrastructure.json").read_bytes()
+    with pytest.raises(PortmapError):
+        infrastructure.sync_connection_routes(state_dir, profiles, None, stop_event=threading.Event())
+    assert {key: path.read_bytes() for key, path in paths.items()} == before
+    assert (state_dir / "infrastructure.json").read_bytes() == state_before
+
+
+def test_cancelled_restore_rolls_back_and_cleanup_cannot_add_reachable_routes(maintenance_stack, monkeypatch):
+    from portmap.errors import PortmapError
+
+    state_dir, paths, profiles, _ = maintenance_stack
+    retired_socket = profiles["remote.portmap"].pop("http_socket")
+    infrastructure.sync_connection_routes(state_dir, profiles, None)
+    before = {key: path.read_bytes() for key, path in paths.items()}
+    state_before = (state_dir / "infrastructure.json").read_bytes()
+    profiles["remote.portmap"]["http_socket"] = retired_socket
+    with pytest.raises(PortmapError):
+        infrastructure.sync_connection_routes(state_dir, profiles, None)
+    assert {key: path.read_bytes() for key, path in paths.items()} == before
+    event = threading.Event()
+    monkeypatch.setattr(infrastructure, "_health", lambda *args, **kwargs: event.set())
+    with pytest.raises(PortmapError):
+        infrastructure.sync_connection_routes(state_dir, profiles, None, stop_event=event)
+    assert {key: path.read_bytes() for key, path in paths.items()} == before
+    assert (state_dir / "infrastructure.json").read_bytes() == state_before
+
+
+def test_maintenance_shutdown_interrupts_an_infrastructure_lock_wait(maintenance_stack, monkeypatch):
+    import fcntl
+    from portmap.errors import PortmapError
+
+    state_dir, paths, profiles, _ = maintenance_stack
+    before = {key: path.read_bytes() for key, path in paths.items()}
+    entered, done, stop = threading.Event(), threading.Event(), threading.Event()
+    original = infrastructure._maintenance_timeout
+    errors = []
+
+    def checkpoint(event, deadline):
+        entered.set()
+        return original(event, deadline)
+
+    def publish():
+        try:
+            infrastructure.sync_connection_routes(state_dir, profiles, None, stop_event=stop)
+        except Exception as error:
+            errors.append(error)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(infrastructure, "_maintenance_timeout", checkpoint)
+    with (state_dir / "infrastructure.lock").open("a+") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        worker = threading.Thread(target=publish)
+        worker.start()
+        try:
+            assert entered.wait(1)
+            stop.set()
+            assert done.wait(1)
+        finally:
+            stop.set()
+            fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+            worker.join(2)
+    assert len(errors) == 1 and isinstance(errors[0], PortmapError)
+    assert {key: path.read_bytes() for key, path in paths.items()} == before
