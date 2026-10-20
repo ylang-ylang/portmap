@@ -579,7 +579,12 @@ def test_manifest_bootstrap_replaces_other_versions_without_losing_exact_tag(mon
     unpublish_manifest(monkeypatch, tmp_path)
     cache = Path(os.environ["PORTMAP_DOWNLOAD_DIR"])
     cache.mkdir(parents=True, exist_ok=True)
-    (cache / "release.json").write_text(json.dumps(valid_manifest_payload()))
+    stale_filename = "portmap-0.18.0-linux-amd64.tar.gz"
+    stale_asset = asset_payload(
+        filename=stale_filename,
+        source_url=f"https://github.com/ylang-ylang/portmap/releases/download/V0.18/{stale_filename}",
+    )
+    (cache / "release.json").write_text(json.dumps({"version": "0.18.0", "assets": [stale_asset]}))
     filename = f"portmap-{version}-linux-amd64.tar.gz"
     asset = asset_payload(
         filename=filename,

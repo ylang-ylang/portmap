@@ -1116,20 +1116,20 @@ function DownloadPanel({ catalog }) {
   const detected = detectPlatform();
   const suggested = platforms.find((p) => p.os === detected.os && p.arch === detected.arch) || null;
   const skillUrl = new URL("/skills/project-integration/SKILL.md", window.location.origin).href;
-  const agentPrompt = `请先用 curl -fsS ${shellSingleQuote(skillUrl)} 获取并阅读 Portmap 项目接入指南。\n按指南和项目现有规则，将当前项目/worktree 接入运行该项目的机器上的 Portmap。复用已有安装与 Compose 配置，验证实际应用访问后给我真实 URL。\n如果指南地址不可达或缺少权限，请明确报告，不要自行修改系统 DNS、安装第二套网关或清理其他项目。`;
+  const agentPrompt = `First, fetch and read the Portmap project integration guide with curl -fsS ${shellSingleQuote(skillUrl)}.\nFollow the guide and this project's existing rules to connect the current project/worktree to Portmap on the machine running the project. Reuse the existing installation and Compose configuration, verify access to the actual application, and report its working URL.\nIf the guide is unreachable or permissions are missing, report the blocker explicitly. Do not modify system DNS, install a second gateway, or clean up other projects.`;
 
   return (
     <section className="utility-panel" aria-label="Download portmap">
       <details className="quick-setup portmap-download" open>
         <summary>
           <Download className="button-icon" aria-hidden="true" />
-          {" "}Download portmap / 获取 portmap
+          {" "}Download portmap
         </summary>
         <div className="quick-setup-body">
           <div className="quick-command" data-agent-skill>
             <div className="quick-setup-actions">
-              <p><OpenLink href={skillUrl}>Agent 接入指南</OpenLink></p>
-              <CopyButton targetId="portmap-agent-prompt" label="复制提示词" />
+              <p><OpenLink href={skillUrl}>Agent integration guide</OpenLink></p>
+              <CopyButton targetId="portmap-agent-prompt" label="Copy prompt" />
             </div>
             <p>Version-matched Markdown for your agent; read it, do not pipe it into a shell.</p>
             <pre className="agent-skill-prompt"><code id="portmap-agent-prompt">{agentPrompt}</code></pre>
@@ -1398,36 +1398,6 @@ function compareUpdateMachines(left, right) {
   return text(left.label).localeCompare(text(right.label)) || text(left.id).localeCompare(text(right.id));
 }
 
-function machineStatus(machine) {
-  if (machineHasActiveJob(machine)) {
-    return { label: text(machine.active_job.state) || "updating", title: text(machine.active_job.message) || "" };
-  }
-  if (machine.supported === false) {
-    return { label: "unavailable", title: text(machine.reason) || "update service unavailable" };
-  }
-  if (machine.authorized === false && machine.via !== "ssh") {
-    return { label: "needs authorization", title: text(machine.reason) || "management capability missing" };
-  }
-  if (machine.update_available === true) {
-    if (machine.can_update === true) return { label: "update available", title: "" };
-    return { label: "cannot update", title: text(machine.reason) || "" };
-  }
-  if (machine.error) return { label: "error", title: text(machine.error) };
-  if (!machine.latest_version) return { label: "not checked", title: "Use Check updates to discover the latest release" };
-  return { label: "up to date", title: "" };
-}
-
-function machineStatusClass(machine) {
-  if (machineHasActiveJob(machine)) return "upd-state-active";
-  if (machine.supported === false || (machine.authorized === false && machine.via !== "ssh")) return "upd-state-warn";
-  if (machine.update_available === true) {
-    return machine.can_update === true ? "upd-state-info" : "upd-state-warn";
-  }
-  if (machine.error) return "upd-state-error";
-  if (!machine.latest_version) return "upd-state-info";
-  return "upd-state-ok";
-}
-
 function JobLogTail({ job, label }) {
   const log = text(job?.log_tail);
   if (!log) return null;
@@ -1535,6 +1505,7 @@ function MachineCard({
   updatesAvailable,
   mutating,
   submitting,
+  checking,
   batchActive,
   formState,
   formError,
@@ -1552,24 +1523,32 @@ function MachineCard({
   const multi = conns.length > 1;
   const single = conns.length === 1 ? conns[0] : null;
   const vias = Array.from(new Set(conns.map((conn) => text(conn.actual_via || conn.via)).filter(Boolean)));
-  const status = showUpdate ? machineStatus(machine) : null;
-  const eligible = showUpdate && machineUpdateEligible(machine) && !submitting && !batchActive;
-  const reason = showUpdate ? text(machine.reason) : "";
+  const eligible = showUpdate && machineUpdateEligible(machine) && !submitting && !batchActive && !checking;
   const activeJob = showUpdate ? machine.active_job || null : null;
   const lastJob = showUpdate ? machine.last_job || null : null;
   const current = showUpdate ? text(machine.current_version) : "";
   const installed = showUpdate ? text(machine.installed_version) : "";
-  // Installed version is only surfaced at all when it differs from the running
-  // one — the mismatch means a restart or in-flight update is pending.
   const mismatch = Boolean(installed && installed !== current);
+  const reason = showUpdate ? text(machine.reason) : "";
   const editing = Boolean(formState && formState.id) && conns.some((conn) => conn.id === formState.id);
   const disabledTitle = !showUpdate
     ? ""
     : batchActive
       ? "another update batch is already active; follow it below"
-      : machineHasActiveJob(machine)
-        ? "an update is already running on this machine"
-        : reason || (machine.update_available !== true ? "no update available" : "this machine cannot be updated right now");
+      : checking
+        ? "checking for updates…"
+        : machineHasActiveJob(machine)
+          ? "an update is already running on this machine"
+          : reason || (!text(machine.latest_version)
+            ? "update availability is unknown"
+            : machine.update_available !== true ? "no update available" : "this machine cannot be updated right now");
+
+  // Button label: Updating… when active job, Checking… when global check in progress, else Update
+  const updateBtnLabel = machineHasActiveJob(machine) ? "Updating…" : checking ? "Checking…" : "Update";
+  // Available update = most prominent action; unavailable = muted/disabled
+  const updateBtnClass = eligible
+    ? "action-button conn-connect-btn upd-btn-available"
+    : "action-button upd-btn-unavailable";
 
   return (
     <div
@@ -1591,31 +1570,6 @@ function MachineCard({
             </span>
           ))}
           {single ? <ConnectionStatusBadge status={single.status} /> : null}
-          {showUpdate ? (
-            <span
-              className={`upd-badge ${machineStatusClass(machine)}`}
-              title={status.title}
-              data-upd-status={status.label}
-            >
-              {status.label}
-            </span>
-          ) : null}
-          {showUpdate ? (
-            <span
-              className="upd-ver"
-              title={mismatch ? `running ${current || "unknown"}, installed package ${installed}` : "running version"}
-            >
-              {current ? `v${current}` : "version unknown"}
-            </span>
-          ) : null}
-          {mismatch ? (
-            <span
-              className="upd-ver upd-ver-mismatch"
-              title={`The installed package (${installed}) differs from the running process (${current || "unknown"}); a restart or in-flight update is pending.`}
-            >
-              installed {installed} · restart pending
-            </span>
-          ) : null}
           {single || showUpdate ? (
             <div className="machine-card-actions">
               {single ? (
@@ -1630,7 +1584,7 @@ function MachineCard({
               ) : null}
               {showUpdate ? (
                 <button
-                  className="action-button conn-connect-btn"
+                  className={updateBtnClass}
                   type="button"
                   disabled={!eligible}
                   title={eligible
@@ -1639,7 +1593,7 @@ function MachineCard({
                   onClick={() => onUpdate(machine)}
                 >
                   <Play className="button-icon" aria-hidden="true" />
-                  {" "}{machineHasActiveJob(machine) ? "Updating…" : "Update"}
+                  {" "}{updateBtnLabel}
                 </button>
               ) : null}
             </div>
@@ -1675,9 +1629,6 @@ function MachineCard({
             <JobLogTail job={activeJob} label="log" />
           </div>
         ) : null}
-        {showUpdate && text(machine.via) === "direct" && machine.authorized === false ? (
-          <CredentialEnrollment machineId={machine.id} machineName={label} onAuthorized={onAuthorized} />
-        ) : null}
         {editing ? (
           <ConnectionForm
             formState={formState}
@@ -1709,11 +1660,22 @@ function MachineCard({
           })}
           {showUpdate ? (
             <div className="machine-detail-row">
+              {text(machine.current_version) ? (
+                <span className="upd-ver">running <b>{text(machine.current_version)}</b></span>
+              ) : null}
               {text(machine.latest_version) ? (
                 <span className="upd-ver">latest <b>{text(machine.latest_version)}</b></span>
               ) : (
-                <span className="upd-muted">latest unknown — use Check</span>
+                <span className="upd-muted">latest unknown — use Check updates</span>
               )}
+              {mismatch ? (
+                <span
+                  className="upd-ver upd-ver-mismatch"
+                  title={`Installed package (${installed}) differs from running (${current || "unknown"}); restart or in-flight update pending.`}
+                >
+                  pkg {installed} · restart pending
+                </span>
+              ) : null}
               {text(machine.build_id) ? <span className="upd-build">build {text(machine.build_id)}</span> : null}
               {text(machine.install_method) ? (
                 <span
@@ -1726,6 +1688,9 @@ function MachineCard({
             </div>
           ) : null}
           {reason ? <p className="upd-reason" title={reason}>{reason}</p> : null}
+          {showUpdate && text(machine.via) === "direct" && machine.authorized === false ? (
+            <CredentialEnrollment machineId={machine.id} machineName={label} onAuthorized={onAuthorized} />
+          ) : null}
           {lastJob ? (
             <div className="machine-detail-row" data-upd-last-job>
               <span className="upd-muted">
@@ -1983,17 +1948,27 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
       setTokenBox(null);
       return;
     }
-    void refreshUpdates({ resume: true });
+    void refreshUpdates({ check: true, resume: true });
     return () => tokenRequestRef.current?.abort();
   }, [active, canManageConnections]);
 
+  const checkingRef = useRef(false);
+  const updatesRequestRef = useRef(null);
+
   async function refreshUpdates({ check = false, resume = false } = {}) {
-    if (check) setChecking(true);
+    if (check && checkingRef.current) return;
+    updatesRequestRef.current?.abort();
+    const request = new AbortController();
+    updatesRequestRef.current = request;
+    checkingRef.current = check;
+    setChecking(check);
     try {
-      const res = await fetch(`/api/updates${check ? "?check=1" : ""}`);
+      const res = await fetch(`/api/updates${check ? "?check=1" : ""}`, { signal: request.signal });
+      if (request.signal.aborted) return;
       if (res.status === 401 || res.status === 403 || res.status === 404) { setUpdatesAvailable(false); return; }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (request.signal.aborted) return;
       if (data?.update_api === false) { setUpdatesAvailable(false); return; }
       setUpdatesAvailable(true);
       setUpdatesError("");
@@ -2008,9 +1983,13 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
         if (!currentActive || text(target.id) !== text(current?.id)) setBatch(target);
       }
     } catch (err) {
-      setUpdatesError(`Failed to load updates: ${err.message || err}`);
+      if (!request.signal.aborted) setUpdatesError(`Failed to load updates: ${err.message || err}`);
     } finally {
-      if (check) setChecking(false);
+      if (updatesRequestRef.current === request) {
+        updatesRequestRef.current = null;
+        checkingRef.current = false;
+        setChecking(false);
+      }
     }
   }
 
@@ -2294,14 +2273,6 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
               {" "}Add connection
             </button>
           </div>
-
-          {/* Updates manager note */}
-          {updatesAvailable && localMachine && (
-            <p className="upd-muted" data-upd-manager-note>
-              Updates are managed by <b>{localName}</b> (the machine serving this portal).
-            </p>
-          )}
-
           {/* Token reveal */}
           {tokenBox?.token ? (
             <div className="upd-token-reveal" data-upd-local-token>
@@ -2370,6 +2341,7 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
               updatesAvailable={updatesAvailable}
               mutating={mutating}
               submitting={submitting}
+              checking={checking}
               batchActive={batchActive}
               onUpdate={requestSingleUpdate}
               onAuthorized={() => refreshUpdates()}
@@ -2407,6 +2379,7 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
                         updatesAvailable={updatesAvailable}
                         mutating={mutating}
                         submitting={submitting}
+                        checking={checking}
                         batchActive={batchActive}
                         formState={formState}
                         formError={formError}

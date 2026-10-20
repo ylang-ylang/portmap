@@ -260,18 +260,28 @@ an unavailable version endpoint leaves the footer hidden instead of guessing.
 
 ### Web-managed updates
 
-The private portal's **Settings → Machines** lists this machine and its saved
-connections, including connection actions, running version, installed version,
-build fingerprint, installation method and update readiness. **Check updates** checks the trusted
-Portmap release source. Update one eligible machine or use **Update all eligible**;
-the machine serving the portal runs last, so restarting it does not interrupt
-the other targets.
+The private portal's **Settings → Machines** automatically checks the trusted
+Portmap release source when opened. Each machine has one **Update** button:
+highlighted when an update is available and permitted, muted/disabled otherwise.
+Checking and updating are shown on the button; version/build/install metadata and
+direct-connection authorization stay in collapsed **Details**. Routine SSH
+authorization explanations are not shown. Checks never start an installation.
+**Check updates** refreshes availability manually; **Update all eligible** retains
+its confirmation and updates the machine serving the portal last.
 
 Explicit release checks and update starts have a longer request budget than
 cached status reads: resolving the latest tag and downloading its manifest can
 take longer than a normal machine probe. SSH connections show release readiness
 before their first update; that update pairs through the owned private tunnel
 automatically, without requiring a token to be pasted.
+
+Engines older than 0.20.0 only understand legacy `V<major>.<minor>` release tags.
+They cannot self-update across the switch to `v<major>.<minor>.<patch>`: forcing
+an enabled button or an explicit version does not fix their manifest lookup.
+Use a one-time standard Brew upgrade first. If Brew reports that automatic setup
+was not run (for example, no systemd user manager), activate the installed package
+with `portmap setup`; verify the running agent/catalog version before trying
+web-managed updates. Never patch installed updater files or rewrite old tags.
 
 Each target executes its own fixed updater through an authenticated HTTP API.
 SSH connections carry that API through Portmap's owned SSH forward; they do not

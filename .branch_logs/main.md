@@ -126,3 +126,6 @@
 - Hotfix v0.20.2: prevent false DELETED labels for host paths invisible to catalog,
   including non-Git projects and missing agent records. Only host authority can
   establish deletion or Git metadata; retain existing tri-state model and actions.
+- Hotfix v0.20.3: simplify update cards to a readiness button with necessary
+  progress/errors, automatically check availability, and make agent guidance English.
+  Keep versions/builds and direct authorization in Details; no automatic upgrades.
