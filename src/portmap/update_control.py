@@ -673,10 +673,10 @@ def _remote_machine_item(machine: Any, *, state_dir: Path, check: bool) -> dict[
                     "install_method",
                     "update_available",
                     "can_update",
+                    "reason",
                 ):
                     item[field] = body.get(field)
                 item["supported"] = True
-                item["reason"] = "authorized through the SSH tunnel when the update starts"
                 return item
     if item["current_version"] is None and not item.get("error") and item["reason"] != LEGACY_UNSUPPORTED_REASON:
         body, legacy = _minimal_version_probe(machine, state_dir=state_dir)
