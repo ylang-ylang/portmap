@@ -699,6 +699,16 @@ Historical SSH routes are not rebuilt from a newer relay-port allocation:
 retiring a disconnected relay must not prevent another saved connection from
 being restored or redirect an old route during rollback.
 
+The existing host agent monitors saved SSH transports while it is running, in
+both background `setup` and foreground `run` modes. Dead masters or missing
+owned socket forwards are withdrawn from the routing snapshot, then restored
+using their saved identity/options when connectivity returns. Failed attempts
+back off independently for 5, 10, 20, 40, then 60 seconds; healthy SSH/TCP
+sessions are not torn down merely because a remote HTTP catalog is slow.
+Explicitly disconnected targets stay disconnected. The agent never repairs
+system DNS, bootstraps missing infrastructure, prompts for credentials/sudo,
+or starts a second daemon as part of reconnection.
+
 `connect --tcp` additionally forwards advertised raw TCP ports. UDP and port
 ranges do not travel over ordinary SSH forwards and are marked unsupported.
 SSH apex catalogs project client-visible URLs; application subdomains and
@@ -718,6 +728,29 @@ routes only `~portmap` to CoreDNS at `169.254.254.53:1053` without rewriting
 application resolver path through resolved, and permission to create that
 interface. Do not combine either mode with the former per-interface Web DNS
 commands.
+
+On hosts using NetworkManager and Tailscale, do not let both applications
+rewrite `/etc/resolv.conf` independently. With the resolved adapter, a host
+administrator can configure NetworkManager to feed resolved and leave the
+resolver file administrator-owned:
+
+```ini
+# /etc/NetworkManager/conf.d/90-local-resolved.conf
+[main]
+dns=systemd-resolved
+rc-manager=unmanaged
+```
+
+Keep `/etc/resolv.conf` linked to `/run/systemd/resolve/stub-resolv.conf`.
+An already-running Tailscale direct-file DNS manager does not switch backend
+just because this link changes: it can overwrite it again. Establish a LAN or
+console management path before stopping Tailscale, setting the stub link and
+reloading NetworkManager (`nmcli general reload`), then start Tailscale and
+verify its journal selects `systemd-resolved`/`resolvedManager`. Preserve its
+MagicDNS routes and Portmap's separate `~portmap` route. Repeatedly restarting
+resolved, disabling DNS acceptance, or relinking the file in a watchdog is
+not a fix for competing DNS ownership. Portmap does not apply this global
+NetworkManager/Tailscale policy automatically.
 
 The unified state root defaults to
 `${XDG_STATE_HOME:-$HOME/.local/state}/portmap`; access state is in `client/`

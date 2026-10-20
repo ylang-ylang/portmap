@@ -240,3 +240,10 @@
   archive SHA25681488dd8369c83acd13ce68342f3bba950f23d79ce28290268166c7fa9d97dcc
   match the original build. Brew now serves0.20.0. This is completed publication,
   not the old failed/waiting run39280508837. No user-machine upgrades performed.
+- hotfix/reconnect-after-network-loss: maintain saved owned SSH connections from
+  the existing host agent, withdraw dead routes, and restore with bounded backoff
+  after network recovery. Preserve explicit disconnects, healthy peers and remote
+  identity checks; no background infrastructure bootstrap or host DNS repair.
+- Diagnose mj's hibernation-triggered NetworkManager/Tailscale direct-DNS conflict.
+  Persistent host configuration delegates both to resolved; reloading NM preserved
+  the stub, resolved PID and working voxmani portal. Document this admin-only policy.
