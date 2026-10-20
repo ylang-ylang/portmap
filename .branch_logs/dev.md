@@ -247,3 +247,6 @@
 - Diagnose mj's hibernation-triggered NetworkManager/Tailscale direct-DNS conflict.
   Persistent host configuration delegates both to resolved; reloading NM preserved
   the stub, resolved PID and working voxmani portal. Document this admin-only policy.
+- Integrate final v0.20.1 acceptance: 1418 tests passed; frozen version/Skill HTTP
+  passed; a real isolated SSH outage withdrew its route and recovered automatically
+  in about 8s. Explicit disconnect stayed disconnected; smoke resources removed.
