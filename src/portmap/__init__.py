@@ -2,7 +2,7 @@
 
 from importlib import import_module
 
-__version__ = "0.20.4"
+__version__ = "0.20.5"
 
 # Keep generator helpers lazy until requested.
 _EXPORTS = {
