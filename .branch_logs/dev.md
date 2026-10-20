@@ -253,3 +253,6 @@
 - v0.20.1 is formally published: Actions39367456043 succeeded and tap PR6 merged.
   Explicit Brew activation upgraded only mj to0.20.1; setup completed successfully.
   Existing v0.20.0 and other machine installations were not rewritten/upgraded.
+- hotfix/catalog-host-path-status: stop using the catalog filesystem to classify
+  host project paths. Unknown/untracked stays distinct from host-confirmed deletion;
+  matching agent metadata remains authoritative. Preserve running-service controls.

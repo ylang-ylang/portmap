@@ -123,3 +123,6 @@
   transport loss, with bounded retries/cancellation and preserved user disconnects.
   Publish only already-owned runtime routes; never repeatedly rewrite host DNS or
   restart resolved. Carry forward the verified draft-aware release workflow.
+- Hotfix v0.20.2: prevent false DELETED labels for host paths invisible to catalog,
+  including non-Git projects and missing agent records. Only host authority can
+  establish deletion or Git metadata; retain existing tri-state model and actions.

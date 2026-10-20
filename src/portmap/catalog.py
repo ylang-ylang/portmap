@@ -317,8 +317,6 @@ def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
 
     container_name = first_container_name(container)
     worktree = labels.get("portmap.worktree") or labels.get("com.docker.compose.project.working_dir")
-    root, root_title = worktree_root_from_raw(worktree)
-    status = worktree_status_from_raw(worktree)
     return {
         "container": container_name,
         "image": container.get("Image"),
@@ -326,9 +324,14 @@ def container_to_service(container: dict[str, Any]) -> dict[str, Any] | None:
         "repo_name": labels.get("portmap.repo_name"),
         "branch": labels.get("portmap.branch"),
         "worktree": worktree,
-        **status,
-        "worktree_root": root,
-        "worktree_root_title": root_title,
+        # Labels name host paths, not paths in the catalog filesystem.
+        # Only matching host-agent metadata may establish their state.
+        "worktree_exists": None,
+        "worktree_status": "",
+        "worktree_status_message": "",
+        "worktree_superproject": None,
+        "worktree_root": None,
+        "worktree_root_title": None,
         "compose_project": labels.get("com.docker.compose.project"),
         "compose_service": labels.get("com.docker.compose.service"),
         "docker_network": labels.get("traefik.docker.network"),
@@ -792,15 +795,6 @@ def git_superproject(path: Path) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
-def worktree_root_from_raw(raw_worktree: str | None) -> tuple[str | None, str | None]:
-    if not raw_worktree:
-        return None, None
-    top_level = git_top_level(Path(raw_worktree).expanduser())
-    if top_level is None:
-        return None, None
-    return worktree_root_from_top_level(top_level)
-
-
 def worktree_root_from_top_level(top_level: Path) -> tuple[str, str]:
     common_dir = git_common_dir(top_level)
     if common_dir is None:
@@ -810,6 +804,7 @@ def worktree_root_from_top_level(top_level: Path) -> tuple[str, str]:
 
 
 def worktree_status_from_raw(raw_worktree: str | None, *, top_level: Path | None = None) -> dict[str, Any]:
+    """Inspect a path in the caller's host filesystem, never a container label."""
     if not raw_worktree:
         return {
             "worktree_exists": None,

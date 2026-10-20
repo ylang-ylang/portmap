@@ -14,6 +14,7 @@ import pytest
 
 from portmap.catalog import (
     CatalogServer,
+    catalog_worktree_from_path,
     collect_catalog,
     compose_down_project,
     compose_restart_project,
@@ -24,6 +25,7 @@ from portmap.catalog import (
     merge_catalog_history,
     parse_host_rule,
     select_dns_server,
+    worktree_status_from_raw,
 )
 from portmap.errors import PortmapError
 from portmap.web_static import read_static_asset
@@ -424,7 +426,7 @@ def test_container_to_service_orders_portmap_endpoints_by_toml_order() -> None:
     assert [endpoint["name"] for endpoint in service["endpoints"]] == ["alpha", "beta", "zeta"]
 
 
-def test_container_to_service_marks_deleted_worktree(tmp_path: Path) -> None:
+def test_container_to_service_requires_host_confirmation_of_deletion(tmp_path: Path) -> None:
     missing_worktree = tmp_path / "deleted-worktree"
 
     service = container_to_service(
@@ -449,13 +451,17 @@ def test_container_to_service_marks_deleted_worktree(tmp_path: Path) -> None:
 
     assert service is not None
     assert service["worktree"] == str(missing_worktree)
+    assert service["worktree_exists"] is None
+    assert service["worktree_status"] == ""
+    host_status = worktree_status_from_raw(str(missing_worktree))
+    enrich_services_from_worktrees([service], [{"worktree": str(missing_worktree), **host_status}])
     assert service["worktree_exists"] is False
     assert service["worktree_status"] == "deleted"
     assert service["worktree_status_message"] == "worktree directory not found"
     assert service["worktree_root"] is None
 
 
-def test_container_to_service_marks_submodule_worktree(tmp_path: Path) -> None:
+def test_container_to_service_uses_host_submodule_metadata(tmp_path: Path) -> None:
     parent = tmp_path / "parent"
     child_source = tmp_path / "browserdeck-source"
     submodule_path = parent / "modules" / "browserdeck"
@@ -499,6 +505,11 @@ def test_container_to_service_marks_submodule_worktree(tmp_path: Path) -> None:
     )
 
     assert service is not None
+    assert service["worktree_exists"] is None
+    assert service["worktree_status"] == ""
+    host_worktree = catalog_worktree_from_path(submodule_path, {str(submodule_path.resolve()): [service]})
+    assert host_worktree is not None
+    enrich_services_from_worktrees([service], [host_worktree])
     assert service["worktree_exists"] is True
     assert service["worktree_status"] == "submodule"
     assert service["worktree_superproject"] == str(parent.resolve())
@@ -1787,3 +1798,71 @@ def test_healthz_public_stays_plain_without_snapshot(tmp_path, monkeypatch) -> N
     assert status == 200
     assert headers["Content-Type"].startswith("text/plain")
     assert body == b"ok\n"
+
+
+@pytest.mark.parametrize(
+    ("agent_state", "label_key", "catalog_visible"),
+    [
+        ("empty", "portmap.worktree", False),
+        ("empty", "com.docker.compose.project.working_dir", True),
+        ("unavailable", "portmap.worktree", False),
+        ("unmatched", "com.docker.compose.project.working_dir", False),
+        ("partial", "portmap.worktree", False),
+    ],
+)
+def test_catalog_preserves_unknown_host_path_state(
+    tmp_path: Path, monkeypatch, agent_state: str, label_key: str, catalog_visible: bool
+) -> None:
+    from portmap.agent_client import AgentUnavailable
+
+    host_path = tmp_path / "voxmani"
+    host_path.mkdir()
+    assert host_path.exists() and not (host_path / ".git").exists()
+    container = {
+        "Names": ["/voxmani-app-1"],
+        "Image": "app:latest",
+        "Labels": {
+            "portmap.managed": "true",
+            "portmap.repo_name": "voxmani",
+            "portmap.branch": "dev",
+            label_key: str(host_path),
+            "com.docker.compose.project": "voxmani_dev",
+            "com.docker.compose.service": "app",
+            "portmap.endpoints.voxmani-dev-app.name": "app",
+            "portmap.endpoints.voxmani-dev-app.kind": "http",
+            "portmap.endpoints.voxmani-dev-app.container_port": "8000",
+        },
+    }
+    host_exists = Path.exists
+    if not catalog_visible:
+        # The same absolute path is absent from the catalog's namespace.
+        monkeypatch.setattr(Path, "exists", lambda path: False if path == host_path else host_exists(path))
+
+    def agent_worktrees():
+        if agent_state == "unavailable":
+            raise AgentUnavailable("host agent unavailable")
+        if agent_state == "unmatched":
+            return {"worktrees": [{
+                "worktree": str(tmp_path / "different-project"),
+                "worktree_exists": False,
+                "worktree_status": "deleted",
+            }]}
+        if agent_state == "partial":
+            return {"worktrees": [{"worktree": str(host_path), "branch": "dev"}]}
+        return {"worktrees": []}
+
+    monkeypatch.setattr("portmap.catalog.docker_get", lambda path: [container])
+    monkeypatch.setattr("portmap.catalog.agent_worktrees", agent_worktrees)
+    catalog = collect_catalog()
+    assert catalog["agent"]["available"] is (agent_state != "unavailable")
+    service, = catalog["services"]
+    assert service["worktree"] == str(host_path)
+    assert service["worktree_exists"] is None
+    assert service["worktree_status"] == ""
+    assert service["worktree_status_message"] == ""
+    assert service["worktree_root"] is None
+    assert service["worktree_superproject"] is None
+    assert service["compose_project"] == "voxmani_dev"
+    assert service["compose_service"] == "app"
+    assert service["endpoints"][0]["kind"] == "http"
+    assert service["endpoints"][0]["container_port"] == 8000
