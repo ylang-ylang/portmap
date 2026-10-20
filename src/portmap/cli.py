@@ -45,6 +45,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def cmd_runtime_env(args: argparse.Namespace) -> int:
+    from .runtime_startup import run_action
+
+    # Startup must not load settings or autodetect/contact an API just to
+    # decide whether the external starter has an owned override to consume.
+    return run_action(args.action)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="portmap")
     parser.add_argument("--version", action="version", version=f"portmap {__version__}")
@@ -59,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="gateway catalog JSON URL for query commands",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    runtime_env = subparsers.add_parser(
+        "runtime-env", help="validate persisted Podman helpers at an existing API starter boundary",
+    )
+    runtime_env.add_argument("action", choices=("activate", "verify-api"))
+    runtime_env.set_defaults(func=cmd_runtime_env)
 
     up = subparsers.add_parser("up", help="publish local projects through the shared HTTP gateway")
     up.add_argument("--no-sudo", action="store_true", help="do not invoke sudo for split DNS and HTTP ingress")

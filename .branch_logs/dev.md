@@ -268,3 +268,8 @@
   scan roots without deployment contracts, preserve existing checked-out history,
   and show non-startable rows with real reasons and disabled Start. No extra
   registry, fabricated endpoints, historical-ref directories or lifecycle states.
+- hotfix/brew-runtime-startup: prepare v0.20.6 read-only runtime-env startup
+  boundaries with shared producer ownership/path rules and frozen native-child
+  loader isolation. Preserve idle-repair guards; a one-time authorized external
+  starter bridge consumes future Brew/web updates. Candidate verification is
+  independent; formal publication and live deployment are not recorded as done.

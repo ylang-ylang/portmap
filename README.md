@@ -509,9 +509,48 @@ portmap-owned container or network, `setup` and `run` re-verify the connected
 API - its configuration, network-stack compatibility and ownership - and
 repair only an identified, user-owned, idle mismatch. Running workloads,
 foreign services and uncertain ownership are refused with the concrete reason
-instead of being bypassed. Docker APIs pass this check unchanged. Re-run the
-same standard entry after any workspace rebuild; no separate repair command
-or source checkout is required.
+instead of being bypassed. Docker APIs pass this check unchanged. Re-running
+the standard entry can repair a rebuild regression only while the selected
+API is idle; installing an update does not authorize a live engine restart.
+
+For an external Podman API starter that sets `CONTAINERS_CONF`, persistent
+user drop-ins alone are not enough: Podman ignores them in that mode. Portmap
+0.20.6 adds two read-only startup boundaries:
+
+- `portmap runtime-env activate` validates an existing Portmap-owned override
+  and both helper binaries, proves their effective paths and versions with
+  the real local Podman CLI, then prints **only** a safely quoted shell export.
+  It needs no live API. No owned configuration means success with no output.
+- `portmap runtime-env verify-api` checks that the starter inherited that
+  export and that its already-running Unix-socket API actually selects both
+  persisted helpers. It emits no output on success. Neither command creates
+  configuration, installs helpers, starts/restarts an engine, stops containers,
+  or changes DNS. Explicit foreign overrides, including an empty value, remain
+  authoritative; broken claimed-owned configuration fails instead of falling
+  back. Existing producer file modes are not normalized.
+
+An authorized operator must integrate these boundaries into the **existing
+external starter once**, after installing Portmap 0.20.6 or newer. On Linuxbrew,
+use its stable opt path, not a versioned Cellar path:
+
+```bash
+PORTMAP_STARTUP=/home/linuxbrew/.linuxbrew/opt/portmap/bin/portmap
+helper_env="$("$PORTMAP_STARTUP" runtime-env activate)" || exit "$?"
+eval "$helper_env"
+```
+
+Place activation after the starter's existing base configuration/environment
+setup and before its unchanged Podman API launch. After that API is ready,
+run `"$PORTMAP_STARTUP" runtime-env verify-api` in the same inherited environment
+and propagate failure. Preserve the existing socket, storage and launch command.
+This bridge is not a second engine or a Portmap-managed startup service.
+
+Once that bridge exists, future consumer fixes ship in the normal Brew package
+and are used at the next authorized API startup. Upgrade via Brew or Portmap's
+authenticated web updater; no copied Python helper needs updating. Brew alone
+cannot modify a foreign starter, and upgrading the package does not apply
+environment changes to a live API. If an incompatible API already has running
+workloads, the existing idle-maintenance requirement still applies.
 
 Permission boundaries remain real: the runtime must be able to publish the
 requested ports, the resolver file must be writable through an authorized

@@ -45,8 +45,24 @@ changing system DNS or installing a second gateway without permission.
 - Do not reinstall a working installation. If the existing gateway is stopped,
   and starting it is authorized, recover with `portmap setup` then `portmap up`.
   Surface failures; do not change runtime policy or silently switch DNS backends.
-- Installation persistence and automatic service startup are separate. These
-  commands do not install a Coder startup hook or guarantee recovery after reboot.
+- Installation persistence and automatic service startup are separate. Setup/up
+  do not install a Coder startup hook or guarantee recovery after reboot.
+- An external Podman API starter using `CONTAINERS_CONF` needs a one-time,
+  explicitly authorized bridge to Portmap 0.20.6 or newer: evaluate the output
+  of `portmap runtime-env activate` before its unchanged API launch, then run
+  `portmap runtime-env verify-api` after that API is ready in the inherited
+  environment. Propagate failure; do not clear a foreign override or ignore a
+  broken owned configuration. Activation validates the real local CLI without
+  requiring an API; verification checks the real existing API. Both are
+  read-only and never install helpers, start/restart an engine, stop containers,
+  edit configuration, or change DNS.
+- Use the installed package's stable Brew opt binary for that bridge, not a
+  copied script or versioned Cellar path. Future consumer fixes then arrive via
+  Brew or the authenticated web updater and apply at the next authorized API
+  startup. Brew cannot change the foreign starter by itself, and a package
+  update cannot apply new environment settings to a live API. Existing running
+  workloads still block incompatible-runtime repair pending authorized idle
+  maintenance; do not bypass that guard or start a second engine.
 
 ## 2. Initialize the project contract
 

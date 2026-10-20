@@ -137,3 +137,8 @@
   independently of Compose readiness. Keep non-startable worktrees visible in
   stopped/history lists with diagnostic reasons and disabled Start; preserve
   service/contract qualification for incidental siblings and validate endpoints.
+- Hotfix candidate v0.20.6 (published baseline remains v0.20.5): package
+  read-only persisted-helper activation/API verification and native-child loader
+  isolation. Future fixes use the installed stable Brew opt command after an
+  authorized external-starter bridge; no automatic live-engine change or
+  zero-downtime claim. Formal release is pending; live deployment stays paused.
