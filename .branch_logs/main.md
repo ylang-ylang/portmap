@@ -119,3 +119,7 @@
   publishes source-bound manifests and completes checked Brew distribution.
   Remove dev-triggered publication and CI source/tag writes; preserve immutable
   retries, source-install downloads, the project Skill URL and simplified UI.
+- Hotfix v0.20.1: existing-agent SSH recovery and fresh route availability after
+  transport loss, with bounded retries/cancellation and preserved user disconnects.
+  Publish only already-owned runtime routes; never repeatedly rewrite host DNS or
+  restart resolved. Carry forward the verified draft-aware release workflow.

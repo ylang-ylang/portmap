@@ -249,6 +249,82 @@ def test_stop_signal_during_a_blocked_setup_cancels_and_cleans_up(settings, stat
     assert read_connection(state_dir)["saved.portmap"]["target"] == "user@saved-host"
 
 
+@pytest.mark.parametrize("reuse", [False, True], ids=["owned-worker", "reused-worker"])
+def test_foreground_exit_cancels_only_its_owned_maintenance_before_route_cleanup(settings, state_dir, monkeypatch, reuse):
+    save_connection(state_dir)
+    journal = state_dir / "maintenance-journal"
+    worker_code = """
+import sys
+from portmap import agent, client
+
+def outage(state_dir, stop_event):
+    journal = state_dir / "maintenance-journal"
+    with journal.open("a") as output:
+        output.write("started\\n")
+    if not stop_event.wait(timeout=30):
+        (state_dir / "late-reconnect").write_text("unexpected")
+    with journal.open("a") as output:
+        output.write("stopped\\n")
+
+client.run_connection_maintenance = outage
+raise SystemExit(agent.main(sys.argv[1:]))
+"""
+
+    def worker_command(selected, *, foreground=False):
+        return [
+            sys.executable, "-c", worker_code, "serve",
+            "--socket", str(selected.agent_socket),
+            "--pid-file", str(selected.agent_pid_file), "--foreground-lifetime",
+        ]
+
+    monkeypatch.setattr(agent, "_agent_serve_command", worker_command)
+    external = agent.start_foreground_agent(settings) if reuse else None
+    worker_pid = []
+
+    def setup_with_outage(*args, **kwargs):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if journal.exists() and journal.read_text() == "started\n":
+                break
+            time.sleep(0.01)
+        assert journal.read_text() == "started\n"
+        health = agent_health(socket_path=settings.agent_socket, timeout=1)
+        worker_pid.append(health["pid"])
+        assert health["access_state_dir"] == str(state_dir.resolve())
+        return {"gateway": {"http_port": 80}}
+
+    def retire_owned_routes(*args, **kwargs):
+        if reuse:
+            # The foreground runner must not signal maintenance belonging to
+            # an agent that was already healthy when the runner started.
+            assert journal.read_text() == "started\n"
+            assert agent_health(socket_path=settings.agent_socket, timeout=1)["pid"] == worker_pid[0]
+        else:
+            # Maintenance cancellation finishes before final transport/route
+            # cleanup, so a late reconnect cannot republish retired routes.
+            assert journal.read_text() == "started\nstopped\n"
+            assert agent.process_identity(worker_pid[0]) is None
+            assert not settings.agent_socket.exists()
+        assert not (state_dir / "late-reconnect").exists()
+        return []
+
+    monkeypatch.setattr(lifecycle, "setup_client", setup_with_outage)
+    monkeypatch.setattr(lifecycle, "_report_ready", lambda *_: signal.raise_signal(signal.SIGTERM))
+    monkeypatch.setattr(lifecycle, "stop_tracked_tunnels", lambda: retire_owned_routes())
+    monkeypatch.setattr(lifecycle, "retire_stopped_transports", retire_owned_routes)
+    try:
+        assert lifecycle.run_foreground(settings, use_sudo=False, stream=sys.stdout) == 0
+        assert not lifecycle.runner_owner_path(state_dir).exists()
+        assert read_connection(state_dir)["saved.portmap"]["target"] == "user@saved-host"
+    finally:
+        if external is not None:
+            external.stop()
+    assert journal.read_text() == "started\nstopped\n"
+    assert not settings.agent_socket.exists()
+    assert not settings.agent_pid_file.exists()
+    assert not (state_dir / "late-reconnect").exists()
+
+
 def test_selected_settings_replaces_only_explicit_backends(monkeypatch, tmp_path):
     from portmap import access_cli
 

@@ -12,6 +12,7 @@ import socketserver
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from contextlib import contextmanager
@@ -31,6 +32,8 @@ from .settings import PortmapSettings, pythonpath_dir
 AGENT_CONTAINER_SOCKET = "/run/portmap/agent.sock"
 # Protocol includes independently managed host and container DNS roles.
 AGENT_PROTOCOL = 4
+# Fits within the owned foreground worker's five-second graceful stop window.
+MAINTENANCE_STOP_TIMEOUT = 4.0
 
 
 @dataclass(frozen=True)
@@ -59,8 +62,8 @@ class AgentHandler(BaseHTTPRequestHandler):
     server_version = "portmap-agent/0.1"
 
     def served_access_state_dir(self) -> Path:
-        # A spawned worker pins its served directory through its environment.
-        return client_state_dir()
+        # Owned workers pin the HTTP controls and maintenance to one directory.
+        return getattr(self.server, "access_state_dir", None) or client_state_dir()
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -457,8 +460,13 @@ def _signal_owned_agent(settings: PortmapSettings, pid: int) -> None:
             os.close(descriptor)
 
 
-def _bind_agent_server(socket_path: Path, pid_file: Path | None = None) -> ThreadingUnixHTTPServer:
+def _bind_agent_server(
+    socket_path: Path, pid_file: Path | None = None, *, stop_event: threading.Event | None = None,
+) -> ThreadingUnixHTTPServer:
     """Bind the owned agent socket and record process ownership; never serve."""
+    from .client import run_connection_maintenance
+
+    access_state_dir = client_state_dir()
     resolved_socket = socket_path.expanduser().resolve()
     _private_agent_directory(resolved_socket.parent)
     if resolved_socket.exists() or resolved_socket.is_symlink():
@@ -480,11 +488,27 @@ def _bind_agent_server(socket_path: Path, pid_file: Path | None = None) -> Threa
         _atomic_agent_file(resolved_socket.parent / "agent-owner.json", json.dumps(record))
         _atomic_agent_file(pid_file, f"{os.getpid()}\n")
         server.pid_file = pid_file
+    server.access_state_dir = access_state_dir
+    server.maintenance_stop = stop_event if stop_event is not None else threading.Event()
+    server.maintenance_thread = threading.Thread(
+        target=run_connection_maintenance,
+        args=(server.access_state_dir, server.maintenance_stop),
+        name="portmap-connection-maintenance",
+        daemon=True,
+    )
+    try:
+        server.maintenance_thread.start()
+    except BaseException:
+        _retire_agent_server(server)
+        raise
     return server
 
 
 def _retire_agent_server(server: ThreadingUnixHTTPServer) -> None:
-    """Close a bound server and remove only the metadata it owns."""
+    """Stop maintenance, close the server and remove only owned metadata."""
+    server.maintenance_stop.set()
+    if server.maintenance_thread.ident is not None:
+        server.maintenance_thread.join(timeout=MAINTENANCE_STOP_TIMEOUT)
     server.server_close()
     resolved_socket = Path(str(server.server_address))
     pid_file = getattr(server, "pid_file", None)
@@ -496,11 +520,31 @@ def _retire_agent_server(server: ThreadingUnixHTTPServer) -> None:
 
 
 def run_agent_server(socket_path: Path, *, pid_file: Path | None = None) -> None:
-    server = _bind_agent_server(socket_path, pid_file)
+    stopped = threading.Event()
+    server = None
+    previous_handlers = {}
+
+    def request_stop(_signum: int, _frame: Any) -> None:
+        stopped.set()
+
     try:
-        server.serve_forever()
+        if threading.current_thread() is threading.main_thread():
+            for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                previous_handlers[number] = signal.signal(number, request_stop)
+        # Install cancellation before binding can start maintenance: a stop
+        # during startup must not leave an uncancelled reconnect attempt.
+        server = _bind_agent_server(socket_path, pid_file, stop_event=stopped)
+        # Bounded polling avoids shutdown() deadlocking on the serving thread.
+        server.timeout = 0.2
+        while not stopped.is_set():
+            server.handle_request()
     finally:
-        _retire_agent_server(server)
+        try:
+            if server is not None:
+                _retire_agent_server(server)
+        finally:
+            for number, handler in previous_handlers.items():
+                signal.signal(number, handler)
 
 
 def agent_status(settings: PortmapSettings) -> AgentProcessStatus:

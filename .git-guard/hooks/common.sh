@@ -12,21 +12,29 @@ git_guard_setup() {
   export GG_STATE_JSON="$resolved_git_dir/git-guard-state.json"
   export GG_LOG_PATH="$resolved_git_dir/git-guard-hook.log"
   GG_RUNTIME="$GG_REPO_ROOT/.git-guard/runtime/policy_reference_transaction_hook.py"
+  GG_PYTHON=
+  for candidate in python3.13 python3 python3.14 python3.12 python3.11; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+      GG_PYTHON="$candidate"
+      break
+    fi
+  done
+  [ -n "$GG_PYTHON" ] || { printf "%s\n" "git-guard: Python 3.11 or newer is required on PATH" >&2; exit 1; }
 }
 
 git_guard_exec_runtime() {
   [ -f "$GG_RUNTIME" ] && [ -f "$GG_POLICY_JSON" ] || exit 0
   export PYTHONDONTWRITEBYTECODE=1
-  exec python3 "$GG_RUNTIME" "$@"
+  exec "$GG_PYTHON" "$GG_RUNTIME" "$@"
 }
 
 git_guard_runtime_sync() {
   [ -f "$GG_CONFIG_JSON" ] || return 0
   current_ref="$(git symbolic-ref -q HEAD 2>/dev/null || true)"
   if [ -n "$current_ref" ] && [ -f "$GG_POLICY_JSON" ]; then
-    python3 -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); protected=data.get("protected_refs", []); sys.exit(0 if sys.argv[2] in protected else 1)' "$GG_POLICY_JSON" "$current_ref" && return 0
+    "$GG_PYTHON" -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); protected=data.get("protected_refs", []); sys.exit(0 if sys.argv[2] in protected else 1)' "$GG_POLICY_JSON" "$current_ref" && return 0
   fi
-  python3 -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); runtime=data.get("runtime", {}); value=runtime.get("auto_sync", True) if isinstance(runtime, dict) else True; sys.exit(0 if value is not False else 1)' "$GG_CONFIG_JSON" || return 0
+  "$GG_PYTHON" -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); runtime=data.get("runtime", {}); value=runtime.get("auto_sync", True) if isinstance(runtime, dict) else True; sys.exit(0 if value is not False else 1)' "$GG_CONFIG_JSON" || return 0
   git_guard_command="${GIT_GUARD_BIN:-git-guard}"
   read -r -a git_guard_args <<< "$git_guard_command"
   command -v "${git_guard_args[0]}" >/dev/null 2>&1 || { printf "%s\n" "git-guard: runtime auto-sync skipped; git-guard command not found" >&2; return 0; }

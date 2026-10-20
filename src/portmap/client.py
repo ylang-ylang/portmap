@@ -18,9 +18,11 @@ import ipaddress
 import json
 import os
 import socket
+import stat
 import sys
 import tempfile
 import time
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,10 +50,12 @@ from .client_tunnel import (
 )
 from .infrastructure import (
     infrastructure_status,
+    load_infrastructure,
     preferred_http_port,
     save_public_http_port,
     stop_infrastructure,
     sync_infrastructure,
+    sync_connection_routes,
 )
 from .errors import PortmapError
 from .permissions import ensure_private_directory
@@ -60,6 +64,21 @@ from .settings import PortmapSettings, load_portmap_settings
 
 class SSHSelectionRequired(PortmapError):
     """No authoritative local SSH target was supplied or discovered."""
+
+
+class _SSHCleanupRequired(PortmapError):
+    """Carry newly owned resources back to their saved profile on cleanup failure."""
+
+    def __init__(self, message: str, tunnel: dict[str, Any], socket_path: str | None, remote_port: int | None):
+        super().__init__(message)
+        self.tunnel = tunnel
+        self.socket_path = socket_path
+        self.remote_port = remote_port
+
+
+def _check_maintenance_stop(stop_event: threading.Event | None) -> None:
+    if stop_event is not None and stop_event.is_set():
+        raise PortmapError("connection maintenance cancelled")
 
 
 @contextmanager
@@ -226,6 +245,7 @@ def _open_ssh_upstream(
     timeout: float,
     expected_domain: str | None = None,
     use_sudo: bool = True,
+    stop_event: threading.Event | None = None,
 ) -> tuple[dict[str, Any], GatewayInfo, str]:
     """Start an SSH master and forward the remote HTTP gateway to a Unix socket.
 
@@ -238,14 +258,19 @@ def _open_ssh_upstream(
     failure surfaces, so the caller only ever owns a live transport.
     """
     key = hashlib.sha256(chosen_ssh.encode()).hexdigest()[:20]
-    tunnel = start_tunnel(chosen_ssh, state_dir=state_dir, key=key, config_file=ssh_config, timeout=max(timeout, 30), use_sudo=use_sudo)
+    _check_maintenance_stop(stop_event)
+    cancellation = {"stop_event": stop_event} if stop_event is not None else {}
+    tunnel = start_tunnel(chosen_ssh, state_dir=state_dir, key=key, config_file=ssh_config, timeout=max(timeout, 30), use_sudo=use_sudo, **cancellation)
     socket_path: str | None = None
+    upstream_port: int | None = None
     try:
+        _check_maintenance_stop(stop_event)
         bootstrap_port = _free_port()
         candidate = _port(remote_port) if remote_port is not None else 80
         added = False
         try:
-            add_forward(tunnel, local_address="127.0.0.1", local_port=bootstrap_port, remote_port=candidate)
+            add_forward(tunnel, local_address="127.0.0.1", local_port=bootstrap_port, remote_port=candidate, timeout=timeout)
+            _check_maintenance_stop(stop_event)
             added = True
             info = probe_gateway(_url("127.0.0.1", bootstrap_port), timeout=timeout)
         except PortmapError as exc:
@@ -255,8 +280,9 @@ def _open_ssh_upstream(
             ) from exc
         finally:
             if added:
-                cancel_forward(tunnel, local_address="127.0.0.1", local_port=bootstrap_port, remote_port=candidate)
+                cancel_forward(tunnel, local_address="127.0.0.1", local_port=bootstrap_port, remote_port=candidate, timeout=timeout)
         domain = info.domain
+        _check_maintenance_stop(stop_event)
         _require_domain(domain)
         if expected_domain is not None and domain != expected_domain:
             raise PortmapError(
@@ -264,23 +290,31 @@ def _open_ssh_upstream(
                 "refusing to replace the saved mapping"
             )
         upstream_port = info.http_port
-        socket_path = add_http_forward(tunnel, state_dir=state_dir, domain=domain, remote_port=upstream_port, timeout=max(timeout, 5))
+        socket_path = add_http_forward(tunnel, state_dir=state_dir, domain=domain, remote_port=upstream_port, timeout=timeout if stop_event is not None else max(timeout, 5))
         try:
             info = probe_gateway_socket(socket_path, timeout=timeout, expected_domain=domain)
+            _check_maintenance_stop(stop_event)
         except BaseException as exc:
             failure = str(exc)
             try:
-                cancel_http_forward(tunnel, socket_path=socket_path, remote_port=upstream_port)
+                cancel_http_forward(tunnel, socket_path=socket_path, remote_port=upstream_port, timeout=timeout)
             except Exception as cleanup:
                 failure = f"{failure}; HTTP forward cleanup needs attention: {cleanup}"
             raise PortmapError(failure) from exc
-    except BaseException:
-        stop_tunnel(tunnel)
+    except BaseException as exc:
+        try:
+            stop_tunnel(tunnel, timeout=timeout)
+        except Exception as cleanup:
+            if stop_event is not None:
+                raise _SSHCleanupRequired(
+                    f"{exc}; SSH startup cleanup failed: {cleanup}", tunnel, socket_path, upstream_port,
+                ) from exc
+            raise
         raise
     return tunnel, info, socket_path
 
 
-def _forward_tcp_ports(tunnel: dict[str, Any], info: GatewayInfo, tcp_address: str) -> list[int]:
+def _forward_tcp_ports(tunnel: dict[str, Any], info: GatewayInfo, tcp_address: str, *, timeout: float = 5, stop_event: threading.Event | None = None) -> list[int]:
     """Forward every catalogued raw TCP port onto the connection's address."""
     ports: list[int] = []
     for service in info.catalog["services"]:
@@ -290,14 +324,15 @@ def _forward_tcp_ports(tunnel: dict[str, Any], info: GatewayInfo, tcp_address: s
             host_port = _port(endpoint.get("host_port"))
             if host_port in ports:
                 continue
-            add_forward(tunnel, local_address=tcp_address, local_port=host_port, remote_port=host_port)
+            _check_maintenance_stop(stop_event)
+            add_forward(tunnel, local_address=tcp_address, local_port=host_port, remote_port=host_port, timeout=timeout)
             ports.append(host_port)
     return ports
 
 
 def _cancel_http_forward_quietly(tunnel: dict[str, Any], profile: dict[str, Any]) -> None:
     """Retire a saved profile's socket forward through its ownership checks."""
-    socket_path = profile.get("http_socket")
+    socket_path = profile.get("http_socket") or profile.get("retiring_http_socket")
     if profile.get("tunnel") and isinstance(socket_path, str) and socket_path:
         cancel_http_forward(tunnel, socket_path=socket_path, remote_port=_port(profile.get("remote_http_port") or 80))
 
@@ -326,7 +361,7 @@ def _endpoints(catalog: dict[str, Any], profile: dict[str, Any]) -> list[dict[st
 
 
 def _public(profile: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in profile.items() if key not in {"tunnel", "backend_url", "http_socket", "ssh_config", "legacy_http_forward"}}
+    return {key: value for key, value in profile.items() if key not in {"tunnel", "backend_url", "http_socket", "retiring_http_socket", "ssh_config", "legacy_http_forward"}}
 
 
 def _probe_transport(profile: dict[str, Any], timeout: float) -> GatewayInfo:
@@ -337,7 +372,7 @@ def _probe_transport(profile: dict[str, Any], timeout: float) -> GatewayInfo:
     forward, never through the local aggregate portal.
     """
     if profile.get("via") == "ssh":
-        if profile.get("tunnel") and not tunnel_alive(profile["tunnel"]):
+        if profile.get("tunnel") and not tunnel_alive(profile["tunnel"], timeout=min(timeout, 2)):
             raise PortmapError("SSH tunnel is down")
         socket_path = profile.get("http_socket")
         if not isinstance(socket_path, str) or not socket_path:
@@ -475,6 +510,8 @@ def _prepare_live_ssh(
     for profile in profiles.values():
         if profile.get("via") != "ssh" or not profile.get("tunnel"):
             continue
+        if "retiring_http_socket" in profile:
+            continue  # Cleanup ownership is not a transport eligible for adoption.
         if profile.get("http_socket") and "legacy_http_forward" not in profile:
             continue
         if not tunnel_alive(profile["tunnel"]):
@@ -634,6 +671,16 @@ def _publish(
     return shared
 
 
+def _publish_connection_routes(
+    state_dir: Path, profiles: dict[str, dict[str, Any]], *,
+    stop_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    """Update only the established infrastructure's dynamic connection views."""
+    _check_maintenance_stop(stop_event)
+    _save(state_dir, profiles)
+    return sync_connection_routes(state_dir, profiles, _load_local(state_dir), stop_event=stop_event)
+
+
 def _restore_ssh_profile(
     state_dir: Path,
     profiles: dict[str, dict[str, Any]],
@@ -641,6 +688,7 @@ def _restore_ssh_profile(
     *,
     use_sudo: bool = True,
     timeout: float = 5,
+    stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Revive one dormant or dead saved SSH connection under its saved identity.
 
@@ -655,10 +703,23 @@ def _restore_ssh_profile(
     if not isinstance(profile, dict) or profile.get("via") != "ssh":
         raise PortmapError(f"no saved SSH connection for {domain}")
     stale = profile.get("tunnel")
+    if stale is not None and "retiring_http_socket" in profile:
+        try:
+            _retire_ssh_transport(profile, timeout=timeout)
+        except PortmapError:
+            _save(state_dir, profiles)
+            raise
+        stale = None
+    _check_maintenance_stop(stop_event)
+    def publish(*, cleanup: bool = False) -> dict[str, Any]:
+        if stop_event is not None:
+            return _publish_connection_routes(state_dir, profiles, stop_event=None if cleanup else stop_event)
+        return _publish(state_dir, profiles, use_sudo=use_sudo, timeout=timeout)
+
     if stale is not None and tunnel_alive(stale):
         # A matching native connection needs adoption, never authentication or
         # reconnect. _publish proves its socket and the shared public route.
-        shared = _publish(state_dir, profiles, use_sudo=use_sudo, timeout=timeout)
+        shared = publish()
         result = _public(profiles[domain])
         if shared.get("legacy_forward_failures"):
             result["legacy_forward_failures"] = shared["legacy_forward_failures"]
@@ -681,15 +742,23 @@ def _restore_ssh_profile(
             _cancel_http_forward_quietly(stale, profile)
             profile.pop("tunnel", None)
             stop_tunnel(stale)
-        public = _public_gateway_port(state_dir)
+        if stop_event is None:
+            public = _public_gateway_port(state_dir)
+        else:
+            state = load_infrastructure(state_dir)
+            if not state or state.get("phase") != "ready":
+                raise PortmapError("owned connection infrastructure is not ready")
+            public = _port(state["http_port"])
         tunnel, info, socket_path = _open_ssh_upstream(
             state_dir, identity, ssh_config=ssh_config, remote_port=profile.get("remote_http_port"),
             timeout=timeout, expected_domain=domain, use_sudo=use_sudo,
+            **({"stop_event": stop_event} if stop_event is not None else {}),
         )
         mutated = True
         forward_port = info.http_port
         tcp_address = profile.get("tcp_address") or _tcp_loopback(domain, profiles)
-        tcp_ports = _forward_tcp_ports(tunnel, info, tcp_address) if profile.get("include_tcp") else []
+        _check_maintenance_stop(stop_event)
+        tcp_ports = _forward_tcp_ports(tunnel, info, tcp_address, timeout=timeout, stop_event=stop_event) if profile.get("include_tcp") else []
         profile.update({
             "http_socket": socket_path,
             "remote_http_port": info.http_port,
@@ -702,29 +771,62 @@ def _restore_ssh_profile(
         profile.pop("legacy_http_forward", None)
         profile["endpoints"] = _endpoints(info.catalog, profile)
         profile["tunnel"] = tunnel
-        _publish(state_dir, profiles, use_sudo=use_sudo)
+        _check_maintenance_stop(stop_event)
+        publish()
+        _check_maintenance_stop(stop_event)
         probe_gateway(_url(domain, public), timeout=timeout, expected_domain=domain)
+        _check_maintenance_stop(stop_event)
         return _public(profile)
     except BaseException as exc:
         rollback_errors = []
-        if mutated:
+        if isinstance(exc, _SSHCleanupRequired):
+            tunnel, socket_path, forward_port = exc.tunnel, exc.socket_path, exc.remote_port
+            mutated = True
+        if stop_event is not None and mutated:
+            profile.clear()
+            profile.update(original)
+            for key in ("tunnel", "http_socket", "legacy_http_forward"):
+                profile.pop(key, None)
+            if tunnel is not None:
+                profile["tunnel"] = tunnel
+                profile["retiring_http_socket"] = socket_path
+                if socket_path is not None and forward_port is not None:
+                    profile["remote_http_port"] = forward_port
+            try:
+                # Persist cleanup ownership while immediately withdrawing the
+                # new route, even when shutdown interrupted readiness.
+                publish(cleanup=True)
+            except Exception as cleanup:
+                rollback_errors.append(str(cleanup))
+            if tunnel is not None:
+                try:
+                    _retire_ssh_transport(profile, timeout=timeout)
+                    profile.clear()
+                    profile.update(original)
+                except Exception as cleanup:
+                    rollback_errors.append(str(cleanup))
+                try:
+                    _save(state_dir, profiles)
+                except Exception as cleanup:
+                    rollback_errors.append(str(cleanup))
+        if mutated and stop_event is None:
             profile.clear()
             profile.update(original)
             profile.pop("tunnel", None)
             profile.pop("http_socket", None)
             profile.pop("legacy_http_forward", None)
             try:
-                _publish(state_dir, profiles, use_sudo=use_sudo)
+                publish(cleanup=True)
             except Exception as cleanup:
                 rollback_errors.append(str(cleanup))
-        if tunnel is not None:
+        if tunnel is not None and stop_event is None:
             if socket_path is not None and forward_port is not None:
                 try:
-                    cancel_http_forward(tunnel, socket_path=socket_path, remote_port=forward_port)
+                    cancel_http_forward(tunnel, socket_path=socket_path, remote_port=forward_port, timeout=timeout)
                 except Exception as cleanup:
                     rollback_errors.append(str(cleanup))
             try:
-                stop_tunnel(tunnel)
+                stop_tunnel(tunnel, timeout=timeout)
             except Exception as cleanup:
                 rollback_errors.append(str(cleanup))
         if isinstance(exc, PortmapError):
@@ -790,6 +892,14 @@ def retire_stopped_transports(
             except PortmapError as exc:
                 failures.append(f"{domain}: cannot verify stopped SSH transport: {exc}")
                 continue
+            if "retiring_http_socket" in profile:
+                try:
+                    _retire_ssh_transport(profile, timeout=timeout)
+                except PortmapError as exc:
+                    failures.append(f"{domain}: cannot retire stopped SSH transport: {exc}")
+                    continue
+                changed = True
+                continue
             saved_config = profile["tunnel"].get("config_file")
             if not profile.get("ssh_config") and isinstance(saved_config, str) and saved_config:
                 profile["ssh_config"] = saved_config
@@ -802,6 +912,148 @@ def retire_stopped_transports(
             # never stopped as a side effect of retiring another runner.
             _publish(state_dir, profiles, use_sudo=use_sudo, timeout=timeout)
     return failures
+
+
+@contextmanager
+def _maintenance_lock(state_dir: Path, stop_event: threading.Event) -> Iterator[None]:
+    """Use mutation -> client order, but never block agent shutdown on a lock."""
+    ensure_private_directory(state_dir, message=f"client state is not private and owned: {state_dir}")
+    fd = os.open(state_dir / "connection-operations.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a+") as operations:
+        metadata = os.fstat(operations.fileno())
+        if metadata.st_uid != os.getuid() or not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise PortmapError("connection operation lock is not private and owned")
+        with (state_dir / "client.lock").open("a+") as client_handle:
+            for handle in (operations, client_handle):
+                while True:
+                    _check_maintenance_stop(stop_event)
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        stop_event.wait(0.05)
+            try:
+                yield
+            finally:
+                fcntl.flock(client_handle.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(operations.fileno(), fcntl.LOCK_UN)
+
+
+def _ssh_retry_identity(profile: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(profile.get(key) for key in (
+        "target", "ssh_target", "ssh_config", "remote_http_port", "include_tcp", "tcp_address",
+    ))
+
+
+def _retire_ssh_transport(profile: dict[str, Any], *, timeout: float) -> None:
+    """Retire exact owned resources before discarding their durable descriptor."""
+    tunnel = profile.get("tunnel")
+    if tunnel is not None:
+        if not profile.get("ssh_config") and tunnel.get("config_file"):
+            profile["ssh_config"] = tunnel["config_file"]
+        socket_path = profile.pop("http_socket", None) or profile.get("retiring_http_socket")
+        profile["retiring_http_socket"] = socket_path
+        if socket_path:
+            # Withdraw routing now, retaining exact cleanup ownership if the
+            # master refuses cancellation or exit. No replacement may start.
+            cancel_http_forward(tunnel, socket_path=socket_path, remote_port=_port(profile.get("remote_http_port") or 80), timeout=timeout)
+        stop_tunnel(tunnel, timeout=timeout)
+    for key in ("tunnel", "http_socket", "retiring_http_socket", "legacy_http_forward"):
+        profile.pop(key, None)
+
+
+def _maintenance_infrastructure_ready(state_dir: Path) -> bool:
+    # Runtime ownership/liveness is proved by the route publisher before an
+    # attempt; this local check must not block shutdown on an engine request.
+    state = load_infrastructure(state_dir)
+    return bool(state and state.get("phase") == "ready")
+
+
+def _ssh_socket_present(socket_path: object) -> bool:
+    """Inspect the owned socket, not the health or latency of its remote HTTP app."""
+    if not isinstance(socket_path, str) or not socket_path:
+        return False
+    try:
+        metadata = Path(socket_path).lstat()
+    except OSError:
+        return False
+    return stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == os.getuid()
+
+
+def run_connection_maintenance(state_dir: Path, stop_event: threading.Event) -> None:
+    """Maintain only current active saved SSH profiles until the agent stops.
+
+    Every sweep and attempt reloads connections.json under mutation -> client
+    locks. Disconnected target rows are never consulted; accepted removal or
+    edits therefore win over a prior sweep. Healthy masters/sockets are only
+    inspected; a slow or unavailable remote HTTP app cannot retire SSH/TCP.
+    Dead transports are retired and unavailable routes published before any
+    authentication attempt. Failures retry at 5, 10, 20, 40, then 60 seconds
+    per unchanged saved identity. No infrastructure or resolver is started.
+    """
+    state_dir = Path(state_dir)
+    retries: dict[str, tuple[tuple[Any, ...], float, float]] = {}
+    while not stop_event.is_set():
+        candidates: list[str] = []
+        try:
+            if not (state_dir / "connections.json").is_file():
+                stop_event.wait(5)
+                continue
+            with _maintenance_lock(state_dir, stop_event):
+                profiles = _load(state_dir)
+                retries = {domain: retry for domain, retry in retries.items() if domain in profiles}
+                if _maintenance_infrastructure_ready(state_dir):
+                    changed = False
+                    try:
+                        for domain, profile in profiles.items():
+                            _check_maintenance_stop(stop_event)
+                            if profile.get("via") != "ssh":
+                                continue
+                            identity = _ssh_retry_identity(profile)
+                            retry = retries.get(domain)
+                            if retry and retry[0] == identity and time.monotonic() < retry[2]:
+                                continue
+                            if profile.get("tunnel") and _ssh_socket_present(profile.get("http_socket")):
+                                if tunnel_alive(profile["tunnel"], timeout=1):
+                                    retries.pop(domain, None)
+                                    continue
+                            changed = True
+                            try:
+                                _retire_ssh_transport(profile, timeout=1)
+                            except PortmapError:
+                                delay = min(retry[1] * 2, 60) if retry and retry[0] == identity else 5
+                                retries[domain] = (identity, delay, time.monotonic() + delay)
+                                continue
+                            candidates.append(domain)
+                    finally:
+                        if changed:
+                            _publish_connection_routes(
+                                state_dir, profiles, stop_event=None if stop_event.is_set() else stop_event,
+                            )
+            for domain in candidates:
+                _check_maintenance_stop(stop_event)
+                # Never carry a saved-profile snapshot across the unlocked gap.
+                with _maintenance_lock(state_dir, stop_event):
+                    profiles = _load(state_dir)
+                    profile = profiles.get(domain)
+                    if not profile or profile.get("via") != "ssh" or profile.get("tunnel"):
+                        continue
+                    if not _maintenance_infrastructure_ready(state_dir):
+                        break
+                    identity = _ssh_retry_identity(profile)
+                    retry = retries.get(domain)
+                    try:
+                        _restore_ssh_profile(state_dir, profiles, domain, use_sudo=False, timeout=1, stop_event=stop_event)
+                    except PortmapError:
+                        delay = min(retry[1] * 2, 60) if retry and retry[0] == identity else 5
+                        retries[domain] = (identity, delay, time.monotonic() + delay)
+                    else:
+                        retries.pop(domain, None)
+        except (PortmapError, OSError, ValueError):
+            # Invalid/unavailable owned state cannot justify setup or a DNS
+            # repair. Retry the same bounded sweep after the interruptible wait.
+            pass
+        stop_event.wait(5)
 
 
 def connect(

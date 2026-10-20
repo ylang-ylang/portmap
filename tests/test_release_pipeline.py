@@ -240,16 +240,29 @@ def make_assets(
 
 
 class FakeGh:
-    """Records gh argv and answers from a scripted queue.
+    """Record gh calls and script release states or raw HTTP responses.
 
-    Responses are (returncode, stdout, stderr) triples matching the real
-    gh_runner contract. ``download`` is an optional callable receiving the
-    parsed --dir that materializes the manifest asset for
-    ``gh release download`` calls.
+    Logical absent releases expand to a tag 404 followed by an empty REST
+    listing. Draft documents expand to a tag 404 followed by a listing that
+    contains the draft, matching the real API rather than pretending the tag
+    endpoint returns drafts. ``raw=True`` scripts individual HTTP responses
+    for pagination and failure cases. ``download`` materializes the manifest
+    in the parsed --dir, standing in for gh's draft-aware asset download.
     """
 
-    def __init__(self, responses: list[tuple[int, str, str]], download=None):
-        self.responses = list(responses)
+    def __init__(self, responses: list[tuple[int, str, str]], download=None, *, raw=False):
+        self.responses: list[tuple[int, str, str]] = []
+        for response in responses:
+            if not raw and response == NOT_FOUND:
+                self.responses.extend([NOT_FOUND, (0, "[]", "")])
+            elif not raw and response[0] == 0 and response[1].startswith("{"):
+                document = json.loads(response[1])
+                if document.get("draft") is True:
+                    self.responses.extend([NOT_FOUND, (0, json.dumps([document]), "")])
+                else:
+                    self.responses.append(response)
+            else:
+                self.responses.append(response)
         self.calls: list[list[str]] = []
         self.download = download
 
@@ -302,7 +315,8 @@ def rest_response(
         if name in tamper:
             content_digest = tamper[name]
         entries.append({"name": name, "size": size, "digest": "sha256:" + content_digest})
-    document = {"draft": draft, "assets": entries}
+    tag = manifest.get("source", {}).get("tag", "V0.19")
+    document = {"id": 417475653, "tag_name": tag, "draft": draft, "assets": entries}
     if body:
         document["body"] = body
     return 0, json.dumps(document), ""
@@ -310,6 +324,152 @@ def rest_response(
 
 def call_of(gh: FakeGh, *prefix: str) -> list[str]:
     return next(call for call in gh.calls if call[: len(prefix)] == list(prefix))
+
+
+def lookup_document(tag: str = "v0.20.0", *, release_id: int = 417475653, draft=True) -> dict:
+    return {"id": release_id, "tag_name": tag, "draft": draft, "assets": [], "body": ""}
+
+
+def listing_response(documents: list[dict]) -> tuple[int, str, str]:
+    return 0, json.dumps(documents), ""
+
+
+# --- REST release lookup (published tag endpoint excludes drafts) --------------
+
+
+def test_release_lookup_published_uses_rest_tag_endpoint_and_keeps_digests(tmp_path: Path) -> None:
+    document = lookup_document(draft=False)
+    document["assets"] = [{"name": "release.json", "digest": "sha256:" + "a" * 64}]
+    gh = FakeGh([(0, json.dumps(document), "")], raw=True)
+    assert release_pipeline.gh_release_document("v0.20.0", tmp_path, gh) == document
+    assert gh.calls == [["api", "repos/ylang-ylang/portmap/releases/tags/v0.20.0"]]
+
+
+def test_release_lookup_draft_requires_404_then_exact_list_match(tmp_path: Path) -> None:
+    draft = lookup_document()
+    other = lookup_document("v0.20.0-other", release_id=2)
+    gh = FakeGh([NOT_FOUND, listing_response([other, draft])], raw=True)
+    assert release_pipeline.gh_release_document("v0.20.0", tmp_path, gh) == draft
+    assert gh.calls == [
+        ["api", "repos/ylang-ylang/portmap/releases/tags/v0.20.0"],
+        ["api", "repos/ylang-ylang/portmap/releases?per_page=100&page=1"],
+    ]
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_release_lookup_paginates_before_returning_match_or_absence(tmp_path: Path, present: bool) -> None:
+    first = [lookup_document(f"v1.0.{index}", release_id=index + 1) for index in range(100)]
+    draft = lookup_document()
+    gh = FakeGh(
+        [NOT_FOUND, listing_response(first), listing_response([draft] if present else [])],
+        raw=True,
+    )
+    result = release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
+    assert result == (draft if present else None)
+    assert gh.calls[-1] == ["api", "repos/ylang-ylang/portmap/releases?per_page=100&page=2"]
+    assert gh.responses == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        (1, "", "gh: Bad credentials (HTTP 401)"),
+        (1, "", "gh: Forbidden (HTTP 403)"),
+        (1, "", "gh: Internal Server Error (HTTP 500)"),
+        (1, "", "dial tcp: network is unreachable"),
+        (1, "", "gh: Invalid response (HTTP 4040)"),
+    ],
+)
+def test_release_lookup_tag_failures_never_fall_back(tmp_path: Path, failure) -> None:
+    gh = FakeGh([failure], raw=True)
+    with pytest.raises(release_pipeline.ReleaseError, match="never count as an absent release"):
+        release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
+    assert len(gh.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        (1, "", "gh: Bad credentials (HTTP 401)"),
+        (1, "", "gh: Forbidden (HTTP 403)"),
+        NOT_FOUND,
+        (1, "", "gh: Service Unavailable (HTTP 503)"),
+        (1, "", "TLS handshake timeout"),
+    ],
+)
+def test_release_lookup_list_failures_never_mean_absent(tmp_path: Path, failure) -> None:
+    gh = FakeGh([NOT_FOUND, failure], raw=True)
+    with pytest.raises(release_pipeline.ReleaseError, match="never count as an absent release"):
+        release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
+
+
+def test_release_lookup_later_page_403_fails_even_after_matching_draft(tmp_path: Path) -> None:
+    first = [lookup_document()] + [
+        lookup_document(f"v1.0.{index}", release_id=index + 1) for index in range(99)
+    ]
+    gh = FakeGh(
+        [NOT_FOUND, listing_response(first), (1, "", "gh: Forbidden (HTTP 403)")],
+        raw=True,
+    )
+    with pytest.raises(release_pipeline.ReleaseError, match="never count as an absent release"):
+        release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
+    assert gh.calls[-1][1].endswith("page=2")
+
+
+@pytest.mark.parametrize("payload", ["not-json", "null", "[]", "{}", '{"tag_name":"v0.20.0"}'])
+def test_release_lookup_invalid_tag_metadata_fails_without_fallback(tmp_path: Path, payload: str) -> None:
+    gh = FakeGh([(0, payload, "")], raw=True)
+    with pytest.raises(release_pipeline.ReleaseError, match="REST release metadata"):
+        release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
+    assert len(gh.calls) == 1
+
+
+@pytest.mark.parametrize("payload", ["not-json", "null", "{}", "[null]", '[{"id": 1}]'])
+def test_release_lookup_invalid_listing_never_means_absent(tmp_path: Path, payload: str) -> None:
+    gh = FakeGh([NOT_FOUND, (0, payload, "")], raw=True)
+    with pytest.raises(release_pipeline.ReleaseError, match="REST release"):
+        release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda document: document.update(id=True),
+        lambda document: document.update(draft="false"),
+        lambda document: document.update(body=[]),
+        lambda document: document.update(assets={}),
+        lambda document: document.update(assets=[None]),
+        lambda document: document.update(assets=[{"name": ""}]),
+        lambda document: document.update(assets=[{"name": "release.json"}, {"name": "release.json"}]),
+    ],
+)
+def test_release_lookup_invalid_release_fields_fail(tmp_path: Path, mutation) -> None:
+    document = lookup_document()
+    mutation(document)
+    gh = FakeGh([NOT_FOUND, listing_response([document])], raw=True)
+    with pytest.raises(release_pipeline.ReleaseError, match="REST release"):
+        release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
+
+
+def test_release_lookup_rejects_wrong_tag_from_tag_endpoint(tmp_path: Path) -> None:
+    gh = FakeGh([(0, json.dumps(lookup_document("v0.20.1", draft=False)), "")], raw=True)
+    with pytest.raises(release_pipeline.ReleaseError, match="tag does not match"):
+        release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
+
+
+@pytest.mark.parametrize("same_id", [True, False])
+def test_release_lookup_rejects_ambiguous_matches(tmp_path: Path, same_id: bool) -> None:
+    documents = [lookup_document(), lookup_document(release_id=417475653 if same_id else 2)]
+    gh = FakeGh([NOT_FOUND, listing_response(documents)], raw=True)
+    with pytest.raises(release_pipeline.ReleaseError, match="ambiguous"):
+        release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
+
+
+def test_release_lookup_rejects_duplicate_across_pages(tmp_path: Path) -> None:
+    first = [lookup_document(f"v1.0.{index}", release_id=index + 1) for index in range(100)]
+    gh = FakeGh([NOT_FOUND, listing_response(first), listing_response([first[0]])], raw=True)
+    with pytest.raises(release_pipeline.ReleaseError, match="ambiguous repeated"):
+        release_pipeline.gh_release_document("v0.20.0", tmp_path, gh)
 
 
 # --- validate-tag (trusted bootstrap) ---------------------------------------
@@ -535,6 +695,87 @@ def test_inspect_release_published_complete_needs_no_recovery(tmp_path: Path) ->
 # --- publish-release ----------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "name", ["release.json", "portmap-0.20.0-linux-amd64.tar.gz"]
+)
+@pytest.mark.parametrize("published_digest", [None, "not-a-digest", "sha256:" + "0" * 64])
+def test_inspect_release_rejects_bad_rest_draft_digests(
+    tmp_path: Path, name: str, published_digest: str | None
+) -> None:
+    work = make_repo(tmp_path)
+    peeled = git_text(work, "rev-parse", "v0.20.0^{commit}")
+    _, anchor_text = make_assets(tmp_path / "original", "0.20.0", "v0.20.0", peeled)
+    document = json.loads(rest_response(anchor_text, draft=True)[1])
+    next(asset for asset in document["assets"] if asset["name"] == name)["digest"] = published_digest
+    gh = FakeGh(
+        [(0, json.dumps(document), "")],
+        download=lambda dest: (dest / "release.json").write_text(anchor_text, encoding="utf-8"),
+    )
+    with pytest.raises(release_pipeline.ReleaseError, match="digest"):
+        release_pipeline.inspect_release(work, tag="v0.20.0", runner=gh)
+    assert not any(call[:2] in (["release", "create"], ["release", "upload"], ["release", "edit"]) for call in gh.calls)
+
+
+def test_complete_existing_draft_reuses_original_manifest_without_build_or_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = make_repo(tmp_path)
+    peeled = git_text(work, "rev-parse", "v0.20.0^{commit}")
+    original, anchor_text = make_assets(
+        tmp_path / "original", "0.20.0", "v0.20.0", peeled, payload=b"original-attempt-bytes"
+    )
+    manifest_sha = release_pipeline.digest_bytes(anchor_text.encode("utf-8"))
+    body = draft_body(anchor_text, run_id="39280508837", attempt="1")
+    draft = rest_response(anchor_text, draft=True, body=body)
+
+    def refuse_rebuild(*args, **kwargs):
+        pytest.fail("an existing complete draft must not invoke a build gate")
+
+    monkeypatch.setattr(release_pipeline, "check_build", refuse_rebuild)
+    monkeypatch.setattr(release_pipeline, "smoke_build", refuse_rebuild)
+    plan_gh = FakeGh([draft])
+    plan = release_pipeline.plan_run(
+        work, event_name="workflow_dispatch", event_tag="v0.20.0", runner=plan_gh
+    )
+    assert plan["mode"] == "verify"
+    assert plan["release_present"] is True
+    assert plan["is_draft"] is True
+    assert len(plan_gh.calls) == 2  # the tag endpoint really returned 404
+
+    def download(dest: Path) -> None:
+        (dest / "release.json").write_text(anchor_text, encoding="utf-8")
+
+    inspect_gh = FakeGh([draft], download=download)
+    inspected = release_pipeline.inspect_release(work, tag="v0.20.0", runner=inspect_gh)
+    assert inspected["anchor"] == "release"
+    assert inspected["missing"] == []
+    assert inspected["recover_artifact"] is None
+    assert inspected["origin_run_id"] == "39280508837"
+    assert inspected["origin_run_attempt"] == "1"
+    assert call_of(inspect_gh, "release", "download")[2] == "v0.20.0"
+    assert all(call[0] == "api" or call[:2] == ["release", "download"] for call in inspect_gh.calls)
+
+    # No retained artifact or rebuilt output is needed: all original bytes
+    # already exist on the draft, including the authoritative manifest.
+    empty = tmp_path / "empty-retry-assets"
+    publish_gh = FakeGh([draft, draft, (0, "", "")], download=download)
+    result = release_pipeline.publish_release(
+        work, tag="v0.20.0", assets_dir=empty, run_id="999", run_attempt="2", runner=publish_gh
+    )
+    assert result["anchor"] == "release"
+    assert result["created"] is False
+    assert result["uploaded"] == []
+    assert list(empty.iterdir()) == []
+    assert not any(call[:2] in (["release", "create"], ["release", "upload"]) for call in publish_gh.calls)
+    assert [call for call in publish_gh.calls if call[:2] == ["release", "edit"]] == [
+        ["release", "edit", "v0.20.0", "--draft=false"]
+    ]
+    assert publish_gh.responses == []
+    assert release_pipeline.digest(original / "release.json") == manifest_sha
+    assert f"Portmap-Manifest-Sha256: {manifest_sha}" in body
+    assert json.loads(draft[1])["body"] == body
+
+
 @pytest.mark.parametrize("tag,version", [("v0.20.0", "0.20.0"), ("v0.20.1", "0.20.1")])
 def test_publish_creates_complete_draft_then_publishes(tmp_path: Path, tag: str, version: str) -> None:
     work = make_repo(tmp_path)
@@ -612,6 +853,7 @@ def test_publish_completes_draft_from_original_attempt_bytes(tmp_path: Path) -> 
     upload = call_of(gh, "release", "upload")
     assert upload[2] == "v0.20.0"
     assert upload[3].endswith(archive)
+    assert "--clobber" not in upload  # existing assets are never replaced
     assert "--draft=false" in call_of(gh, "release", "edit")
 
 
@@ -970,6 +1212,7 @@ def test_publish_recovers_draft_without_manifest_asset(tmp_path: Path) -> None:
     ]
     upload = call_of(gh, "release", "upload")
     assert upload[2] == "v0.20.0"
+    assert "--clobber" not in upload
     assert "--draft=false" in call_of(gh, "release", "edit")
     assert not any(call[:2] == ["release", "download"] for call in gh.calls)
 
@@ -1096,7 +1339,7 @@ def test_missing_legacy_release_never_builds_or_publishes(tmp_path: Path, operat
             release_pipeline.publish_release(
                 work, tag="V0.19", assets_dir=assets, run_id="7", runner=gh
             )
-    assert len(gh.calls) == 1
+    assert len(gh.calls) == 2  # tag 404 plus a successful, empty release listing
     assert not any(call[:2] in (["release", "create"], ["release", "upload"], ["release", "edit"]) for call in gh.calls)
 
 

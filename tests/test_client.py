@@ -1,6 +1,8 @@
 import json
 import shutil
+import socket
 import tempfile
+import threading
 import time
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
@@ -1137,6 +1139,446 @@ def test_setup_restores_each_dormant_ssh_once_and_reports_failures(tmp_path: Pat
     published = infra.synced[-1][0]
     assert published["good.portmap"]["http_socket"] == saved["good.portmap"]["http_socket"]
     assert "tunnel" not in published["bad.portmap"]
+
+
+class MaintenanceClock:
+    """An interruptible worker clock without wall-clock retries or sleeps."""
+
+    def __init__(self, monkeypatch, *, until=10, on_wait=None):
+        self.now = 0
+        self.until = until
+        self.stopped = False
+        self.waits = []
+        self.on_wait = on_wait
+        monkeypatch.setattr(client.time, "monotonic", lambda: self.now)
+
+    def is_set(self):
+        return self.stopped
+
+    def set(self):
+        self.stopped = True
+
+    def wait(self, timeout):
+        self.waits.append(timeout)
+        if self.on_wait is not None:
+            self.on_wait(self)
+        if not self.stopped:
+            self.now += timeout
+            if self.now >= self.until:
+                self.set()
+        return self.stopped
+
+
+def saved_ssh_profile(domain="remote.portmap", target="saved-host", *, live=False):
+    profile = {
+        "domain": domain, "target": target, "ssh_target": target, "via": "ssh",
+        "address": "127.0.0.1", "http_port": 80, "remote_http_port": 8080,
+        "ssh_config": "/saved/ssh/config", "tcp_address": "127.77.0.5",
+        "include_tcp": False, "tcp_ports": [],
+    }
+    if live:
+        profile.update(tunnel={"target": target, "dead": True}, http_socket="/tmp/old-http.sock")
+    return profile
+
+
+def maintenance_infrastructure(monkeypatch, *, actual_sockets=False):
+    infra = Infrastructure(monkeypatch, running=True, http_port=80)
+    monkeypatch.setattr(client, "sync_connection_routes", infra._sync)
+    monkeypatch.setattr(client, "load_infrastructure", lambda path: {
+        "phase": "ready" if infra.state["running"] else "stopped", "http_port": 80,
+    })
+    if not actual_sockets:
+        # ssh_transport models forwards without creating host Unix sockets.
+        monkeypatch.setattr(client, "_ssh_socket_present", lambda path: isinstance(path, str) and bool(path))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("runtime maintenance cannot setup infrastructure or host DNS")
+
+    monkeypatch.setattr(client, "sync_infrastructure", forbidden)
+    monkeypatch.setattr(client, "setup_client", forbidden)
+    return infra
+
+
+def test_maintenance_outage_withdraws_before_retry_and_recovers_without_touching_peers(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    dead = saved_ssh_profile(live=True)
+    healthy = saved_ssh_profile("healthy.portmap", "healthy-host", live=True)
+    healthy["tunnel"]["dead"] = False
+    direct = direct_profile("direct.portmap")
+    client._save(tmp_path, {row["domain"]: row for row in (dead, healthy, direct)})
+    clock = MaintenanceClock(monkeypatch)
+    attempts = []
+    start = client.start_tunnel
+
+    def reconnect(target, **kwargs):
+        attempts.append((clock.now, target, kwargs))
+        # Unavailable publication has committed before authentication starts.
+        assert "tunnel" not in infra.synced[-1][0]["remote.portmap"]
+        if clock.now < 5:
+            raise PortmapError("network is still down")
+        return start(target, **kwargs)
+
+    monkeypatch.setattr(client, "start_tunnel", reconnect)
+    monkeypatch.setattr(client, "tunnel_alive", lambda tunnel, **kwargs: not tunnel.get("dead", False))
+    client.run_connection_maintenance(tmp_path, clock)
+
+    assert [attempt[0] for attempt in attempts] == [0, 5]
+    assert all(attempt[1] == "saved-host" for attempt in attempts)
+    assert all(attempt[2]["use_sudo"] is False for attempt in attempts)
+    assert all(attempt[2]["stop_event"] is clock for attempt in attempts)
+    assert all(attempt[2]["timeout"] >= 30 for attempt in attempts)
+    assert calls["configs"] == [Path("/saved/ssh/config")]
+    assert calls["stopped"] == [dead["tunnel"]]
+    saved = client._load(tmp_path)
+    assert saved["healthy.portmap"] == healthy
+    assert saved["direct.portmap"] == direct
+    rows = {row["domain"]: row for row in client.connections(tmp_path, check=True)["connections"]}
+    assert rows["remote.portmap"]["status"] == "reachable"
+    assert "http_socket" not in infra.synced[0][0]["remote.portmap"]
+    assert infra.synced[-1][0]["remote.portmap"]["tunnel"]["target"] == "saved-host"
+    assert clock.waits == [5, 5]
+
+
+def test_maintenance_backoff_is_per_profile_bounded_and_ignores_disconnected_targets(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch)
+    ssh_transport(monkeypatch)
+    clock = MaintenanceClock(monkeypatch, until=200)
+    client._save(tmp_path, {
+        "bad.portmap": saved_ssh_profile("bad.portmap", "bad-host"),
+        "good.portmap": saved_ssh_profile("good.portmap", "good-host"),
+    })
+    (tmp_path / "connection-targets.json").write_text(json.dumps({
+        "version": 1, "targets": [{"id": "disconnected", "target": "never-host", "via": "ssh"}],
+    }))
+    attempts = []
+    start = client.start_tunnel
+
+    def reconnect(target, **kwargs):
+        attempts.append((clock.now, target))
+        if target == "bad-host":
+            raise PortmapError("unreachable peer")
+        return start(target, **kwargs)
+
+    monkeypatch.setattr(client, "start_tunnel", reconnect)
+    monkeypatch.setattr(client, "tunnel_alive", lambda *args, **kwargs: True)
+    monkeypatch.setattr(client, "probe_gateway", lambda target, **kwargs: gateway(domain=kwargs.get("expected_domain") or "good.portmap"))
+    client.run_connection_maintenance(tmp_path, clock)
+
+    assert [stamp for stamp, target in attempts if target == "bad-host"] == [0, 5, 15, 35, 75, 135, 195]
+    assert [stamp for stamp, target in attempts if target == "good-host"] == [0]
+    assert all(target != "never-host" for _, target in attempts)
+    assert "tunnel" in client._load(tmp_path)["good.portmap"]
+    assert "tunnel" not in client._load(tmp_path)["bad.portmap"]
+    assert all(wait == 5 for wait in clock.waits)
+    assert all("good.portmap" in entry[0] for entry in infra.synced)
+
+
+@pytest.mark.parametrize("action", ["disconnect", "delete", "edit"])
+def test_maintenance_rereads_after_accepted_removal_between_sweep_and_attempt(tmp_path, monkeypatch, action):
+    from portmap import connection_config
+
+    maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    client._save(tmp_path, {"remote.portmap": saved_ssh_profile()})
+    clock = MaintenanceClock(monkeypatch, until=5)
+    lock = client._maintenance_lock
+    entered = 0
+
+    @contextmanager
+    def interleaved(path, event):
+        nonlocal entered
+        with lock(path, event):
+            entered += 1
+            yield
+        if entered == 1:
+            connection_config.managed_disconnect(path, "remote.portmap", use_sudo=False)
+            row = connection_config.connection_targets(path)["connections"][0]
+            if action == "delete":
+                connection_config.mutate_connection_target(path, {"action": "delete", "id": row["id"]})
+            elif action == "edit":
+                connection_config.mutate_connection_target(path, {
+                    "action": "save", "id": row["id"], "target": "edited-host", "via": "ssh",
+                })
+
+    # User-requested mutations still use their ordinary publication path.
+    monkeypatch.setattr(client, "sync_infrastructure", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_maintenance_lock", interleaved)
+    client.run_connection_maintenance(tmp_path, clock)
+
+    assert client._load(tmp_path) == {}
+    assert calls["started"] == []
+    assert entered == 2
+
+
+@pytest.mark.parametrize("cancel_at", ["start", "socket", "publish"])
+def test_maintenance_stop_cleans_inflight_tunnel_and_never_leaves_reachable_route(tmp_path, monkeypatch, cancel_at):
+    infra = maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    client._save(tmp_path, {"remote.portmap": saved_ssh_profile()})
+    clock = MaintenanceClock(monkeypatch)
+    start = client.start_tunnel
+    socket_probe = client.probe_gateway_socket
+
+    def reconnect(target, **kwargs):
+        tunnel = start(target, **kwargs)
+        if cancel_at == "start":
+            clock.set()
+        return tunnel
+
+    def probe(path, **kwargs):
+        if cancel_at == "socket":
+            clock.set()
+        return socket_probe(path, **kwargs)
+
+    def publish(path, profiles, local, **kwargs):
+        result = infra._sync(path, profiles, local, **kwargs)
+        if cancel_at == "publish" and profiles["remote.portmap"].get("tunnel"):
+            clock.set()
+        return result
+
+    monkeypatch.setattr(client, "start_tunnel", reconnect)
+    monkeypatch.setattr(client, "probe_gateway_socket", probe)
+    monkeypatch.setattr(client, "sync_connection_routes", publish)
+    client.run_connection_maintenance(tmp_path, clock)
+
+    assert len(calls["started"]) == len(calls["stopped"]) == 1
+    assert "tunnel" not in client._load(tmp_path)["remote.portmap"]
+    assert "http_socket" not in infra.synced[-1][0]["remote.portmap"]
+    if cancel_at != "publish":
+        assert all("tunnel" not in item[0]["remote.portmap"] for item in infra.synced)
+    assert clock.now == 0
+
+
+def test_maintenance_preserves_saved_port_tcp_and_expected_domain(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    profile = saved_ssh_profile()
+    profile.update(include_tcp=True, remote_http_port=18080)
+    client._save(tmp_path, {"remote.portmap": profile})
+    clock = MaintenanceClock(monkeypatch, until=5)
+    bootstrap = []
+
+    def probe(target, **kwargs):
+        bootstrap.append((target, kwargs))
+        return gateway(port=18080, domain=kwargs.get("expected_domain") or "remote.portmap")
+
+    monkeypatch.setattr(client, "probe_gateway", probe)
+
+    def socket_probe(path, **kwargs):
+        info = gateway(port=18080, domain="remote.portmap")
+        info.catalog["services"] = [{"endpoints": [{"kind": "tcp", "host_port": 5432}]}]
+        return info
+
+    monkeypatch.setattr(client, "probe_gateway_socket", socket_probe)
+    client.run_connection_maintenance(tmp_path, clock)
+
+    assert calls["tcp_forwards"][0]["remote_port"] == 18080
+    assert calls["configs"] == [Path(profile["ssh_config"])]
+    assert calls["http_forwards"] == [("saved-host", "remote.portmap", 18080)]
+    saved = client._load(tmp_path)["remote.portmap"]
+    assert saved["tcp_ports"] == [5432]
+    assert calls["tcp_forwards"][-1]["local_address"] == profile["tcp_address"]
+    assert calls["tcp_forwards"][-1]["remote_port"] == 5432
+    for key in ("target", "ssh_target", "ssh_config", "include_tcp", "tcp_address", "remote_http_port"):
+        assert saved[key] == profile[key]
+    assert bootstrap[-1][1]["expected_domain"] == "remote.portmap"
+    assert infra.synced[-1][0]["remote.portmap"]["tunnel"]
+
+
+def test_maintenance_domain_change_keeps_saved_mapping_unavailable(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    profile = saved_ssh_profile()
+    client._save(tmp_path, {"remote.portmap": profile})
+    clock = MaintenanceClock(monkeypatch, until=5)
+    monkeypatch.setattr(client, "probe_gateway", lambda *args, **kwargs: gateway(domain="other.portmap"))
+
+    client.run_connection_maintenance(tmp_path, clock)
+
+    assert client._load(tmp_path)["remote.portmap"] == profile
+    assert len(calls["stopped"]) == 1
+    assert calls["http_forwards"] == []
+    assert all("tunnel" not in item[0]["remote.portmap"] for item in infra.synced)
+
+
+def test_maintenance_waits_when_owned_infrastructure_is_not_ready(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    client._save(tmp_path, {"remote.portmap": saved_ssh_profile(live=True)})
+    infra.state["running"] = False
+    clock = MaintenanceClock(monkeypatch)
+
+    client.run_connection_maintenance(tmp_path, clock)
+
+    assert infra.synced == []
+    assert calls["started"] == calls["stopped"] == []
+    assert clock.waits == [5, 5]
+
+
+def test_maintenance_preserves_live_ssh_and_tcp_when_remote_http_is_unavailable(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch, actual_sockets=True)
+    calls = ssh_transport(monkeypatch)
+    profile = saved_ssh_profile(live=True)
+    profile.update(include_tcp=True, tcp_ports=[5432], http_socket=str(tmp_path / "http.sock"))
+    client._save(tmp_path, {"remote.portmap": profile})
+    clock = MaintenanceClock(monkeypatch)
+    http_probes = []
+
+    def unavailable(*args, **kwargs):
+        http_probes.append(args)
+        raise PortmapError("remote HTTP timed out")
+
+    monkeypatch.setattr(client, "tunnel_alive", lambda *args, **kwargs: True)
+    monkeypatch.setattr(client, "probe_gateway_socket", unavailable)
+    monkeypatch.setattr(client, "probe_gateway", unavailable)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(profile["http_socket"])
+        client.run_connection_maintenance(tmp_path, clock)
+        assert http_probes == []
+        assert client._load(tmp_path)["remote.portmap"] == profile
+        assert calls["started"] == calls["stopped"] == calls["cancelled_http"] == []
+        assert infra.synced == []
+        # Explicit HTTP health remains meaningful without retiring SSH/TCP.
+        row = client.connections(tmp_path, check=True)["connections"][0]
+        assert row["status"] == "unreachable"
+        assert calls["stopped"] == []
+
+
+@pytest.mark.parametrize("socket_kind", ["missing", "regular_file", "symlink"])
+def test_maintenance_recovers_structurally_missing_or_invalid_socket_with_live_master(tmp_path, monkeypatch, socket_kind):
+    infra = maintenance_infrastructure(monkeypatch, actual_sockets=True)
+    calls = ssh_transport(monkeypatch)
+    profile = saved_ssh_profile(live=True)
+    path = tmp_path / "http.sock"
+    profile["http_socket"] = str(path)
+    if socket_kind == "regular_file":
+        path.write_text("not a socket")
+    elif socket_kind == "symlink":
+        target = tmp_path / "other.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(target))
+        path.symlink_to(target)
+    client._save(tmp_path, {"remote.portmap": profile})
+    clock = MaintenanceClock(monkeypatch, until=5)
+    monkeypatch.setattr(client, "tunnel_alive", lambda *args, **kwargs: True)
+
+    client.run_connection_maintenance(tmp_path, clock)
+
+    assert calls["stopped"] == [profile["tunnel"]]
+    assert calls["started"] == ["saved-host"]
+    assert "http_socket" not in infra.synced[0][0]["remote.portmap"]
+    assert client._load(tmp_path)["remote.portmap"]["http_socket"] != profile["http_socket"]
+
+
+def test_maintenance_failed_retirement_withdraws_route_but_retains_cleanup_ownership(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    profile = saved_ssh_profile(live=True)
+    client._save(tmp_path, {"remote.portmap": profile})
+    clock = MaintenanceClock(monkeypatch, until=5)
+
+    def refused(*args, **kwargs):
+        raise PortmapError("master refused cancellation")
+
+    monkeypatch.setattr(client, "cancel_http_forward", refused)
+    client.run_connection_maintenance(tmp_path, clock)
+
+    pending = client._load(tmp_path)["remote.portmap"]
+    assert pending["tunnel"] == profile["tunnel"]
+    assert pending["retiring_http_socket"] == profile["http_socket"]
+    assert "http_socket" not in pending
+    assert "http_socket" not in infra.synced[-1][0]["remote.portmap"]
+    assert calls["started"] == []
+    row = client.connections(tmp_path, check=True)["connections"][0]
+    assert row["status"] == "unreachable"
+    assert "retiring_http_socket" not in row
+
+    # Setup/adoption must not revive a transport waiting for exact cleanup.
+    monkeypatch.setattr(client, "sync_infrastructure", infra._sync)
+    monkeypatch.setattr(client, "tunnel_alive", lambda *args, **kwargs: True)
+    client.set_local_server(tmp_path, None)
+    assert calls["http_forwards"] == []
+    monkeypatch.setattr(client, "cancel_http_forward", lambda tunnel, **kwargs: calls["cancelled_http"].append(kwargs))
+    client.disconnect(tmp_path, "remote.portmap", use_sudo=False)
+    assert client._load(tmp_path) == {}
+    assert calls["cancelled_http"][-1]["socket_path"] == profile["http_socket"]
+    assert calls["stopped"] == [profile["tunnel"]]
+
+
+def test_maintenance_stop_during_retirement_commits_unavailable_view(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    profile = saved_ssh_profile(live=True)
+    client._save(tmp_path, {"remote.portmap": profile})
+    clock = MaintenanceClock(monkeypatch)
+
+    def cancel(*args, **kwargs):
+        clock.set()
+
+    monkeypatch.setattr(client, "cancel_http_forward", cancel)
+    client.run_connection_maintenance(tmp_path, clock)
+
+    assert calls["started"] == []
+    assert calls["stopped"] == [profile["tunnel"]]
+    assert "tunnel" not in client._load(tmp_path)["remote.portmap"]
+    assert "http_socket" not in infra.synced[-1][0]["remote.portmap"]
+    assert clock.now == 0
+
+
+def test_maintenance_startup_cleanup_failure_keeps_new_transport_owned_and_unrouted(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    client._save(tmp_path, {"remote.portmap": saved_ssh_profile()})
+    clock = MaintenanceClock(monkeypatch, until=5)
+
+    def unavailable(*args, **kwargs):
+        raise PortmapError("catalog unavailable")
+
+    def refused(*args, **kwargs):
+        raise PortmapError("master exit refused")
+
+    monkeypatch.setattr(client, "probe_gateway", unavailable)
+    monkeypatch.setattr(client, "stop_tunnel", refused)
+    client.run_connection_maintenance(tmp_path, clock)
+
+    pending = client._load(tmp_path)["remote.portmap"]
+    assert calls["started"] == ["saved-host"]
+    assert pending["tunnel"]["target"] == "saved-host"
+    assert "retiring_http_socket" in pending
+    assert "http_socket" not in pending
+    assert "http_socket" not in infra.synced[-1][0]["remote.portmap"]
+
+
+def test_maintenance_stop_interrupts_waiting_for_user_mutation_lock(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch)
+    calls = ssh_transport(monkeypatch)
+    client._save(tmp_path, {"remote.portmap": saved_ssh_profile()})
+    waiting = threading.Event()
+
+    class ObservedStop(threading.Event):
+        def wait(self, timeout=None):
+            waiting.set()
+            return super().wait(timeout)
+
+    stopped = ObservedStop()
+    path = tmp_path / "connection-operations.lock"
+    path.touch(mode=0o600)
+    with path.open("a+") as operations:
+        client.fcntl.flock(operations.fileno(), client.fcntl.LOCK_EX)
+        worker = threading.Thread(target=client.run_connection_maintenance, args=(tmp_path, stopped))
+        worker.start()
+        try:
+            assert waiting.wait(2)
+            stopped.set()
+            worker.join(2)
+            assert not worker.is_alive()
+        finally:
+            stopped.set()
+            client.fcntl.flock(operations.fileno(), client.fcntl.LOCK_UN)
+            worker.join(2)
+    assert calls["started"] == []
+    assert infra.synced == []
 
 
 # ---------------------------------------------------------------------------
