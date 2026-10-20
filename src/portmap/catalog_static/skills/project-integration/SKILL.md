@@ -34,6 +34,12 @@ changing system DNS or installing a second gateway without permission.
   environment and production deployment arrangements.
 - If no Compose setup exists, explain the required containerization changes and
   obtain approval before changing the project's deployment architecture.
+- For Git-based identity and worktree discovery, confirm the directory is a valid
+  Git checkout/worktree on this host. A `.git` file is normal for a linked worktree,
+  but its target must exist and be readable. A synchronized copy with a broken
+  `.git` pointer (for example, after Unison synchronization) is a separate Git
+  prerequisite failure, not a Compose-path discovery failure. Report it; do not
+  rewrite Git metadata or change synchronization policy as part of integration.
 - Run `portmap --version` and `portmap status --check` on the project host.
   A working Docker or Podman API and a Compose client are prerequisites.
 - Do not reinstall a working installation. If the existing gateway is stopped,
@@ -44,11 +50,49 @@ changing system DNS or installing a second gateway without permission.
 
 ## 2. Initialize the project contract
 
-From the repository/worktree root, run `portmap init` only when the project has not
-already been initialized. For a non-default Compose file use
-`portmap init --compose-file <actual-compose-file>`. Replace angle-bracket values
-with paths discovered in the repository. Never use `--force` to overwrite an
-existing contract without reviewing and obtaining approval for the changes.
+Run commands from the intended repository/worktree root, or select it with
+Portmap's `--project-dir`. Keep `.portmap/` at that root for broker and host-agent
+discovery. This is a **Portmap-supported layout**, not a Git or Compose standard.
+An existing Compose file and real service/container-port information are required;
+a nested/non-default file also needs recorded or explicit Compose selection.
+
+Run `portmap init` only when the project has not already been initialized. Default
+discovery searches only that root, in order: `docker-compose.yml`,
+`docker-compose.yaml`, `compose.yml`, `compose.yaml`; it does not search nested
+directories. For a nested file, for example:
+
+```bash
+portmap init --compose-file docker/compose.yaml
+```
+
+Successful explicit selection is recorded even if `init` creates an empty
+endpoint scaffold. Fill in real endpoint declarations before generation/runtime:
+
+```toml
+[compose]
+file = "docker/compose.yaml"
+```
+
+Relative Compose paths are resolved from the Portmap project root, not from
+`.portmap/` or the TOML file's directory. `init`/`generate --compose-file` takes
+priority over `[compose].file`, which takes priority over root-level discovery.
+For `generate --config <path>`, the selected TOML supplies `[compose].file`.
+Successful explicit CLI selection or custom-config generation saves a normalized
+root-relative path in both the selected TOML and canonical
+`.portmap/endpoints.toml` for later broker/host-agent Down and Restart discovery.
+An absent canonical config is copied from the full custom endpoint contract;
+an existing canonical config retains its endpoints and comments. Review it if
+custom endpoints differ. Generation/custom-contract canonical copying requires
+a non-empty endpoint contract; fresh `init` scaffolding does not.
+A bad explicit/configured path is an error, not a reason to
+fall back: diagnostics identify `--compose-file` or `[compose].file` and the
+resolved missing/non-file path; invalid TOML values identify the field/config.
+Do not add Compose `--project-directory` to make nested files appear root-based:
+preserve the Compose file's own relative bind-mount and build-context semantics.
+
+Replace angle-bracket values with paths discovered in the repository. Never use
+`--force` to overwrite an existing contract without reviewing and obtaining
+approval for the changes.
 
 Read the generated `.portmap/README.md`. Declare only the services the user wants
 exposed in `.portmap/endpoints.toml`. For example, if the actual Compose service is
@@ -81,15 +125,18 @@ Keep each session's edits and generated state in its own worktree.
 
 ## 3. Start the current project instance
 
-For an auto-discovered standard Compose file, use the explicit broker entry,
-independent of shell/plugin integration:
+For a root-discovered file or a file recorded in canonical
+`.portmap/endpoints.toml`, use the explicit broker entry, independent of
+shell/plugin integration:
 
 ```bash
 portmap docker-compose -- up -d
 ```
 
-**Explicit `-f` options bypass automatic Portmap injection.** For a non-default
-Compose file, generate the override first and include it yourself:
+**Explicit Compose `-f` options bypass automatic Portmap injection.** A nested
+file recorded in `[compose].file` does not require `-f` with the broker above.
+If the project intentionally uses explicit `-f` options, generate the override
+first and include it yourself:
 
 ```bash
 portmap generate --compose-file <actual-compose-file> --config .portmap/endpoints.toml --out-dir .portmap
@@ -103,9 +150,10 @@ the generated override. Rendered configurations can contain secrets: keep them
 local and git-ignored. Verify the final merged config includes Portmap routes.
 
 Do not use `portmap compose`: it is not an alias for the explicit broker command.
-For later project operations use the same worktree. These short examples apply to
-the auto-discovered case; explicit-file setups must repeat the same generated `-p`
-and complete `-f` options used at startup:
+For later project operations use the same worktree. These short examples apply
+to both root-discovered files and canonical `[compose].file` selection;
+explicit-`-f` setups must repeat the same generated `-p` and complete `-f` options
+used at startup:
 
 ```bash
 portmap docker-compose -- ps

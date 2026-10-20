@@ -6,7 +6,8 @@ branch/worktree instance.
 
 ## Required Repo Shape
 
-The repo should provide a normal Docker Compose file:
+The repo should provide an existing Docker Compose file. The file selected when
+this guide was generated is:
 
 ```text
 {{COMPOSE_FILE}}
@@ -14,6 +15,56 @@ The repo should provide a normal Docker Compose file:
 
 Managed services must use Docker bridge networking. Do not use
 `network_mode: host` for services declared in `{{ENDPOINT_CONFIG}}`.
+
+This is a **Portmap-supported layout**, not a Git or Compose standard: keep
+canonical `.portmap/endpoints.toml` at the Portmap project/worktree root.
+Run broker commands from that root. Portmap `init`/`generate --project-dir`
+can select the root when invoked elsewhere; relative CLI/config paths are
+resolved from that root, not from this guide or the endpoint TOML's directory.
+Known service names and container-internal ports are required for endpoint
+declarations; fixed host ports are not required for HTTP routing.
+
+An explicit Compose path is optional when root-only discovery finds, in order,
+`docker-compose.yml`, `docker-compose.yaml`, `compose.yml`, or `compose.yaml`.
+Discovery does not recurse into nested directories. For a nested file:
+
+```bash
+portmap init --compose-file docker/compose.yaml
+```
+
+Successful explicit selection is recorded even when `init` creates an empty
+endpoint scaffold. Initialization does not require already-configured endpoints;
+fill in actual endpoint declarations before generation/runtime. The Compose
+selection itself is:
+
+```toml
+[compose]
+file = "docker/compose.yaml"
+```
+
+Selection priority is `init`/`generate --compose-file`, then the selected TOML's
+`[compose].file`, then root-only discovery. `generate --config <path>` reads
+Compose selection from that endpoint TOML. Successful explicit selection or
+custom-config generation saves a normalized root-relative path to both selected
+and canonical `.portmap/endpoints.toml` for later broker/host-agent project
+Down/Restart discovery. If canonical config is absent, the full custom endpoint
+contract is copied; if present, its endpoints and comments are preserved.
+Review the canonical endpoints if the custom config differs. Generation and
+custom-contract canonical copying require a non-empty endpoint contract; this
+does not block fresh `init` scaffolding or persistence of its Compose selection.
+
+Invalid explicit/configured paths fail without falling back to a root-level
+file. Missing/non-file diagnostics identify `--compose-file` or `[compose].file`
+and the resolved path; invalid TOML values identify the field/config.
+Keep relative bind mounts and build contexts anchored according to the base
+Compose file's semantics. Do not add Compose `--project-directory` to rebase
+them to the Portmap root; Portmap does not force that option.
+
+Git-based identity and worktree discovery separately require a valid Git
+checkout/worktree on this host. A linked worktree's `.git` file is normal, but
+its target must be present and readable. A broken pointer in a synchronized
+copy (including Unison copies) is a Git prerequisite failure, not a Compose
+selection error; this integration does not repair Git metadata or sync policy.
 
 ## Docker Compose Rules For Portmap
 
@@ -196,12 +247,30 @@ portmap generate \
   --config {{ENDPOINT_CONFIG}} \
   --out-dir {{OUT_DIR}} \
   --branch "$BRANCH"
+```
 
+For the canonical `.portmap/` layout, the broker can now use either a
+root-discovered file or the recorded nested file without explicit `-f`:
+
+```bash
+portmap docker-compose -- up -d
+```
+
+If using explicit `-f` options instead, automatic Portmap injection is bypassed.
+Read `compose_project` from `{{OUT_DIR}}/state.json` and set `COMPOSE_PROJECT`
+to that actual value, then include both files in this order:
+
+```bash
 docker compose \
+  -p "$COMPOSE_PROJECT" \
   -f {{COMPOSE_FILE}} \
   -f {{OVERRIDE_FILE}} \
   up -d
 ```
+
+Repeat that project name and complete file list for explicit-file `ps`, logs,
+Down and Restart operations. Do not use Portmap's global `down` command to stop
+only this project.
 
 Each worktree/branch runs the same source compose file plus its own generated
 override. Portmap uses the repo identity and branch/worktree instance to assign
