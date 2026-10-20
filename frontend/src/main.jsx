@@ -295,7 +295,6 @@ function buildCatalogTree(catalog) {
   }
 
   for (const record of catalog?.worktrees || []) {
-    if (!record.running && !record.startable) continue;
     const project = ensureProject(record.repo_id, record.repo_name);
     const worktree = ensureWorktree(project, record);
     if (!record.running) {
@@ -842,11 +841,13 @@ function DeadInstancesMenu({ instances, onStart }) {
                 <WorktreeStatusBadges entry={instance} />
                 <span className="branch-path-note" title={instance.worktree}>{instance.worktree_title}</span>
                 {instance.source === "history" ? <span className="dead-note">history</span> : null}
+                {!instance.startable ? <span className="dead-note">{instance.start_error || "not configured to start"}</span> : null}
               </div>
               <button
                 className="action-button start-button"
-                title={`docker compose up -d in ${instance.worktree}`}
+                title={instance.startable ? `docker compose up -d in ${instance.worktree}` : instance.start_error || "not configured to start"}
                 type="button"
+                disabled={!instance.startable}
                 onClick={() => onStart(instance)}
               >
                 <Play className="button-icon" aria-hidden="true" />

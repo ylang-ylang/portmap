@@ -997,9 +997,17 @@ is measured through the actual direct or SSH HTTP path, not ICMP; unavailable
 measurements stay unavailable. No bandwidth or speed statistics are collected.
 The public catalog excludes this connection manager and imported machines.
 
-When the selected machine's agent is running, stopped worktrees from the same
-Git repo are startable from the UI. `Down` removes the selected managed Compose
-project's containers and networks, not the access infrastructure. JSON is at:
+When the selected machine's agent is running, every valid Git worktree directly
+discovered under its explicit `PORTMAP_CATALOG_WORKTREE_ROOTS` is listed, including
+worktrees without a Compose/endpoint contract. Other discovered siblings still
+need a running service or project contract. Existing checked-out worktrees remain
+in catalog history; Git refs that are not checked out never create projects.
+Expand the stopped/dead group to see stopped branches. Start is enabled only when
+the worktree has a usable Compose selection and `.portmap/endpoints.toml`; otherwise
+the row explains the missing configuration and disables Start. Listing a worktree
+does not create containers or copy another branch's deployment configuration.
+`Down` removes the selected managed Compose project's containers and networks,
+not the access infrastructure. JSON is at:
 
 ```text
 http://<detected-host-ip>/registry.json
