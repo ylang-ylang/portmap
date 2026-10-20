@@ -4,13 +4,9 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .project_compose import find_compose_file
 
-COMPOSE_FILENAMES = (
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "compose.yml",
-    "compose.yaml",
-)
+
 
 GENERATED_OVERRIDE = ".portmap/docker-compose.override.generated.yml"
 GENERATED_STATE = ".portmap/state.json"
@@ -122,12 +118,6 @@ def first_compose_command(args: list[str]) -> str | None:
     return None
 
 
-def find_compose_file(cwd: Path) -> Path | None:
-    for name in COMPOSE_FILENAMES:
-        candidate = cwd / name
-        if candidate.exists():
-            return candidate
-    return None
 
 
 def generated_compose_project(cwd: Path) -> str | None:

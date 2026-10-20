@@ -859,6 +859,17 @@ override, and how to query the shared catalog. `portmap generate` should also
 add the README and `.gitignore` when they are missing, but it should not
 overwrite existing project-local docs.
 
+Compose selection is part of that endpoint contract: optional `[compose].file`
+stores a project-root-relative path, including nested files. The broker and
+host agent use canonical `.portmap/endpoints.toml`; generation can select a
+custom endpoint TOML with `--config` and persists successful explicit/custom
+selection back to the canonical contract for later project actions. Root-only
+fallback discovery remains available when no selection is configured.
+See [Integrating a Compose project](../README.md#integrating-a-compose-project)
+for the supported layout, exact precedence, persistence and diagnostics.
+Compose's file-relative mount/build semantics remain unchanged; a valid Git
+worktree is a separate discovery prerequisite.
+
 Raw TCP/UDP endpoints may need additional generated state because they consume
 host ports:
 

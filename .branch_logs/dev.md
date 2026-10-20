@@ -249,3 +249,7 @@
   check availability on Settings entry, and keep diagnostics/credentials collapsed.
   Preserve explicit confirmation and reject stale status responses. Translate the
   agent-guide heading, copy action and complete integration prompt to English.
+- hotfix/explicit-compose-path: share CLI/TOML/root-only Compose selection across
+  generation, broker and host catalog; persist explicit selection in the existing
+  endpoint contract. Preserve file-relative Compose semantics and explicit errors.
+  Valid-Git isolated up/down/agent-restart and real build/bind HTTP proof passed.

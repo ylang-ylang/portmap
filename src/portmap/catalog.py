@@ -38,7 +38,7 @@ from .update_control import (
     SIGNATURE_HEADER,
     TIMESTAMP_HEADER,
 )
-from .broker import ENDPOINT_CONFIG, ensure_generated_override
+from .broker import ensure_generated_override
 from .catalog_access import (
     LOCAL_MACHINE_ID,
     AccessSnapshot,
@@ -62,8 +62,9 @@ from .downloads import (
     install_script_body,
     resolve_archive,
 )
-from .errors import PortmapError
-from .compose_takeover import find_compose_file, generated_compose_project, plan_docker_compose_command
+from .errors import ConfigError, PortmapError
+from .compose_takeover import generated_compose_project, plan_docker_compose_command
+from .project_compose import ENDPOINT_CONFIG, find_compose_file
 from .repo_identity import git, git_branch, resolve_repo_identity, stable_hash
 from .settings import load_portmap_settings
 from .slug import slugify
@@ -457,7 +458,11 @@ def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str,
         worktree = catalog_worktree_from_path(path, running_by_worktree)
         if worktree is None:
             continue
-        if not worktree.get("running") and not worktree.get("startable"):
+        if (
+            not worktree.get("running")
+            and not worktree.get("startable")
+            and not (Path(worktree["worktree"]) / ENDPOINT_CONFIG).is_file()
+        ):
             continue
         worktrees.append(worktree)
     worktrees.sort(key=catalog_worktree_sort_key)
@@ -483,7 +488,9 @@ def merge_catalog_history(
         if not raw_worktree:
             continue
         record = catalog_worktree_from_path(Path(raw_worktree), running_by_worktree)
-        if record is None or not record.get("startable"):
+        if record is None or (
+            not record.get("startable") and not (Path(record["worktree"]) / ENDPOINT_CONFIG).is_file()
+        ):
             continue
         historical_branch = slugify(str(historical.get("branch") or record["branch"]))
         if historical_branch != record["branch"]:
@@ -562,7 +569,7 @@ def write_catalog_history(worktrees: list[dict[str, Any]], *, generated_at: str)
         raw_path = str(worktree.get("worktree") or "").strip()
         if not raw_path:
             continue
-        if not worktree.get("startable"):
+        if not worktree.get("startable") and not (Path(raw_path) / ENDPOINT_CONFIG).is_file():
             continue
         entries.append(
             {
@@ -923,14 +930,19 @@ def catalog_worktree_from_path(
     )
     running_services = running_by_worktree.get(str(top_level), [])
     compose_project = generated_compose_project(top_level) or first_service_value(running_services, "compose_project")
-    compose_file = find_compose_file(top_level)
     endpoint_config = top_level / ENDPOINT_CONFIG
-    startable = compose_file is not None and endpoint_config.exists()
     start_error = ""
-    if compose_file is None:
-        start_error = "missing compose file"
-    elif not endpoint_config.exists():
-        start_error = f"missing {ENDPOINT_CONFIG}"
+    try:
+        compose_file = find_compose_file(top_level)
+    except ConfigError as exc:
+        compose_file = None
+        start_error = str(exc)
+    if not start_error:
+        if compose_file is None:
+            start_error = "missing compose file"
+        elif not endpoint_config.exists():
+            start_error = f"missing {ENDPOINT_CONFIG}"
+    startable = not start_error
 
     endpoint_total = sum(len(service.get("endpoints") or []) for service in running_services)
     return {

@@ -29,6 +29,7 @@ from .infrastructure import container_dns_address
 from .host_dns import DEFAULT_RESOLVED_CONF_DIR, set_resolved_dropin, unset_resolved_dropin
 from .model import GenerateRequest
 from .planner import generate_plan
+from .project_compose import ENDPOINT_CONFIG, load_project_config, persist_compose_file, require_compose_file
 from .registry import get_instance, list_repos, read_catalog, read_registry
 from .scaffold import ensure_portmap_support_files, init_portmap
 from .settings import load_portmap_settings
@@ -81,10 +82,29 @@ def build_parser() -> argparse.ArgumentParser:
     restart.add_argument("--no-sudo", action="store_true")
     restart.set_defaults(func=cmd_restart)
 
-    init = subparsers.add_parser("init", help="create .portmap scaffold files for a compose project")
-    init.add_argument("--project-dir", type=Path, default=Path.cwd())
-    init.add_argument("--compose-file", type=Path)
-    init.add_argument("--out-dir", type=Path, default=Path(".portmap"))
+    init = subparsers.add_parser(
+        "init",
+        help="create .portmap scaffold files for an existing Compose project",
+        epilog=(
+            "Selection: --compose-file, then [compose].file in the endpoint TOML, then root-only "
+            "docker-compose.yml, docker-compose.yaml, compose.yml, compose.yaml. "
+            "For a nested file: portmap init --compose-file docker/compose.yaml. "
+            "Review the scaffold endpoints before starting. --project-dir does not rebase "
+            "Compose build contexts or bind mounts."
+        ),
+    )
+    init.add_argument(
+        "--project-dir", type=Path, default=Path.cwd(),
+        help="Portmap project/worktree root (default: current directory)",
+    )
+    init.add_argument(
+        "--compose-file", type=Path,
+        help="Compose file relative to project root; overrides [compose].file and root discovery; saved for later project actions",
+    )
+    init.add_argument(
+        "--out-dir", type=Path, default=Path(".portmap"),
+        help="scaffold directory relative to project root (default: .portmap)",
+    )
     init.add_argument("--force", action="store_true", help="overwrite existing scaffold files")
     init.set_defaults(func=cmd_init)
 
@@ -193,10 +213,16 @@ def build_parser() -> argparse.ArgumentParser:
     broker_doctor.set_defaults(func=cmd_broker_status)
 
     generate = subparsers.add_parser("generate", help="generate compose override and registry files")
-    generate.add_argument("--compose-file", type=Path, default=Path("docker-compose.yml"))
+    generate.add_argument(
+        "--compose-file", type=Path,
+        help="Compose file relative to project root; overrides [compose].file from --config; saved for later project actions",
+    )
     generate.add_argument("--compose-json", type=Path)
-    generate.add_argument("--project-dir", type=Path, default=Path.cwd())
-    generate.add_argument("--config", type=Path, required=True)
+    generate.add_argument(
+        "--project-dir", type=Path, default=Path.cwd(),
+        help="Portmap project/worktree root (default: current directory)",
+    )
+    generate.add_argument("--config", type=Path, required=True, help="endpoint TOML relative to project root; may contain [compose].file")
     generate.add_argument("--out-dir", type=Path, default=Path(".portmap"))
     generate.add_argument("--branch")
     generate.add_argument("--repo-root", type=Path)
@@ -254,14 +280,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def cmd_init(args: argparse.Namespace) -> int:
     project_dir = args.project_dir.resolve()
-    compose_file = resolve_compose_file(project_dir, args.compose_file)
     out_dir = resolve_project_path(project_dir, args.out_dir)
+    config_file = out_dir / "endpoints.toml"
+    selection_config = config_file if config_file.exists() else project_dir / ENDPOINT_CONFIG
+    compose_file = require_compose_file(project_dir, args.compose_file, config_file=selection_config)
+    compose_settings = load_project_config(selection_config).get("compose", {}) if selection_config.exists() else {}
+    configured = isinstance(compose_settings, dict) and "file" in compose_settings
     result = init_portmap(
         project_directory=project_dir,
         compose_file=compose_file,
         out_dir=out_dir,
         force=args.force,
     )
+    if args.compose_file is not None or configured:
+        persist_compose_file(project_dir, compose_file, config_file=config_file, allow_empty_endpoints=True)
     print(
         json.dumps(
             {
@@ -462,12 +494,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
     for name, value in env_generate_defaults().items():
         if getattr(args, name) is None:
             setattr(args, name, value)
-    compose_file = None if args.compose_json else args.compose_file
     project_dir = args.project_dir.resolve()
     out_dir = resolve_project_path(project_dir, args.out_dir)
-    resolved_compose_file = resolve_project_path(project_dir, compose_file) if compose_file is not None else None
-    resolved_compose_json = resolve_project_path(project_dir, args.compose_json) if args.compose_json is not None else None
     config_file = resolve_project_path(project_dir, args.config)
+    resolved_compose_file = (
+        None if args.compose_json else require_compose_file(project_dir, args.compose_file, config_file=config_file)
+    )
+    resolved_compose_json = resolve_project_path(project_dir, args.compose_json) if args.compose_json is not None else None
     repo_root = resolve_project_path(project_dir, args.repo_root) if args.repo_root is not None else None
     request = GenerateRequest(
         compose_file=resolved_compose_file,
@@ -498,6 +531,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
             compose_file=resolved_compose_file,
             out_dir=out_dir,
         )
+        if args.compose_file is not None or config_file != project_dir / ENDPOINT_CONFIG:
+            persist_compose_file(project_dir, resolved_compose_file, config_file=config_file)
     print(
         json.dumps(
             {
@@ -554,14 +589,6 @@ def resolve_project_path(project_dir: Path, path: Path) -> Path:
     return project_dir / path
 
 
-def resolve_compose_file(project_dir: Path, compose_file: Path | None) -> Path:
-    if compose_file is not None:
-        return resolve_project_path(project_dir, compose_file)
-    for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
-        candidate = project_dir / name
-        if candidate.exists():
-            return candidate
-    return project_dir / "docker-compose.yml"
 
 
 def env_generate_defaults() -> dict[str, Any]:

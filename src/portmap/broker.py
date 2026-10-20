@@ -5,16 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from .compose_takeover import find_compose_file, first_compose_command, should_passthrough, strip_remainder_separator
+from .compose_takeover import first_compose_command, should_passthrough, strip_remainder_separator
 from .client_runtime import client_state_dir
 from .infrastructure import container_dns_address
 from .model import GenerateRequest
 from .planner import generate_plan
+from .project_compose import ENDPOINT_CONFIG, find_compose_file
 from .scaffold import ensure_portmap_support_files
 from .settings import load_portmap_settings
 
-
-ENDPOINT_CONFIG = ".portmap/endpoints.toml"
 
 AUTO_GENERATE_COMMANDS = {
     "up",
