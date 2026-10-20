@@ -401,6 +401,16 @@ The agent scans Git worktrees and performs host-side Compose operations;
 Traefik, CoreDNS and the catalog retain gateway-network access on both Docker
 and rootless Podman.
 
+Docker labels contain host paths, not paths in the catalog container. The
+catalog must not stat those paths or run Git against them. A discovered
+running service starts with `worktree_exists: null` and an empty
+`worktree_status` (unknown/untracked); missing Git metadata, an unavailable
+agent, or an unmatched/partial agent record does not mean deletion.
+Matching host-agent metadata is authoritative for existence, Git roots and
+submodule state. Only host-confirmed absence yields `worktree_exists: false`
+and `worktree_status: "deleted"`. Unknown directory state does not suppress
+service discovery, endpoints, Restart or Down.
+
 The gateway publishes three distinct loopback high ports: private access,
 local web, and management/readiness. The catalog's private/public listeners
 have no independent host publication. On the web entrypoint, application Host
