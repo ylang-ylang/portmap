@@ -242,3 +242,6 @@
 - Diagnose mj's hibernation-triggered NetworkManager/Tailscale direct-DNS conflict.
   Persistent host configuration delegates both to resolved; reloading NM preserved
   the stub, resolved PID and working voxmani portal. Document this admin-only policy.
+- hotfix/catalog-host-path-status: stop using the catalog filesystem to classify
+  host project paths. Unknown/untracked stays distinct from host-confirmed deletion;
+  matching agent metadata remains authoritative. Preserve running-service controls.

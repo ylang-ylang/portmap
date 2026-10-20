@@ -1,6 +1,6 @@
 [project]
 name = "portmap"
-version = "0.20.1"
+version = "0.20.2"
 description = "Unified local and remote development gateway with isolated split DNS."
 readme = "README.md"
 requires-python = ">=3.11"
