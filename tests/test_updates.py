@@ -374,6 +374,19 @@ def test_local_status_check_uses_cache(monkeypatch, tmp_path):
     assert stale["latest_version"] is None
 
 
+def test_upgraded_updater_rechecks_failure_cached_by_old_version(monkeypatch, tmp_path):
+    old_error = "latest release is outside the project tags"
+    with monkeypatch.context() as previous:
+        previous.setattr(updates, "__version__", "0.18.0")
+        updates._write_check_cache(tmp_path, latest_version=None, reason=old_error, tag=None)
+
+    monkeypatch.setattr(updates, "fetch_latest_tag", lambda: "v0.20.7")
+    monkeypatch.setattr(updates, "fetch_release_manifest", lambda tag: release_for("0.20.7"))
+    status = updates.local_status(state_dir=tmp_path, check=True)
+    assert status["latest_version"] == "0.20.7"
+    assert old_error not in (status["reason"] or "")
+
+
 def test_local_status_check_failure_is_explicit(monkeypatch, tmp_path):
     def boom():
         raise UpdateError("github unreachable")

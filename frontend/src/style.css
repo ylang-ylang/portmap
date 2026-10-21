@@ -1142,6 +1142,18 @@ pre {
   flex-wrap: wrap;
 }
 
+.machine-update-status > .upd-ver,
+.machine-update-status > .action-button {
+  flex: 0 0 auto;
+}
+
+.machine-update-status > .upd-muted,
+.machine-update-status > .upd-error-inline {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .machine-card-details {
   border-top: 1px solid #e6ebf1;
 }
