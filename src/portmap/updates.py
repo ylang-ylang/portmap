@@ -592,6 +592,8 @@ def _read_check_cache(state_dir: Path) -> dict[str, Any] | None:
 
 
 def _cache_fresh(cache: Mapping[str, Any]) -> bool:
+    if cache.get("checked_with") != __version__:
+        return False
     checked_at = cache.get("checked_at")
     if not isinstance(checked_at, str):
         return False

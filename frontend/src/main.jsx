@@ -1353,8 +1353,8 @@ const JOB_TERMINAL_STATES = new Set(["succeeded", "failed", "interrupted"]);
 const BATCH_TERMINAL_STATES = new Set(["succeeded", "failed", "partial"]);
 const JOB_POLL_MS = 2000;
 const JOB_POLL_MAX_DELAY_MS = 8000;
-// A local update restarts the server this page is served from; keep retrying
-// long enough to ride out the restart window before declaring a lost job.
+// A local update restarts this page's server. Allow a longer reconnect window
+// without treating unavailable status as a failed update.
 const JOB_POLL_MAX_FAILURES = 4;
 const JOB_POLL_MAX_FAILURES_LOCAL = 90;
 
@@ -1384,13 +1384,55 @@ function machineLabel(machine) {
   return text(machine?.label) || text(machine?.id) || "machine";
 }
 
-function machineHasActiveJob(machine) {
-  const state = text(machine?.active_job?.state);
-  return Boolean(state) && !JOB_TERMINAL_STATES.has(state);
+function machineUpdateEligible(machine, job = machine?.active_job) {
+  const state = text(job?.state);
+  return machine?.can_update === true && machine?.update_available === true
+    && (!state || JOB_TERMINAL_STATES.has(state));
 }
 
-function machineUpdateEligible(machine) {
-  return machine?.can_update === true && machine?.update_available === true && !machineHasActiveJob(machine);
+function updateCreatedAt(record) {
+  return Date.parse(record?.created_at || "") || 0;
+}
+
+function updateBatchFromResponse(data) {
+  const job = data?.job || data;
+  if (!text(job?.id) || !text(job?.state) || !Array.isArray(job?.targets)) {
+    throw new Error("The server returned no identifiable update batch");
+  }
+  return job;
+}
+
+// The polled batch replaces its cached copy, not another machine's job.
+// Compare creation times: revisiting old history must not replace newer work.
+function machineUpdateJob(machine, batches) {
+  const owner = batches.find((item) => (item.targets || []).some((target) => target.machine_id === machine.id));
+  const target = owner?.targets?.find((item) => item.machine_id === machine.id);
+  const active = machine.active_job;
+  const last = machine.last_job;
+  const snapshot = active && (!last || updateCreatedAt(active) >= updateCreatedAt(last)) ? active : last;
+  if (!target) return { job: snapshot || null, batchId: "" };
+  const sameJob = text(target.job_id) && text(target.job_id) === text(snapshot?.id);
+  if (snapshot && !sameJob && (
+    updateCreatedAt(snapshot) > updateCreatedAt(owner)
+    || (active === snapshot && updateCreatedAt(snapshot) === updateCreatedAt(owner)
+      && JOB_TERMINAL_STATES.has(text(target.state)))
+    || (active === snapshot && (!updateCreatedAt(owner) || !updateCreatedAt(snapshot)))
+    || (!updateCreatedAt(snapshot) && JOB_TERMINAL_STATES.has(text(target.state)))
+  )) return { job: snapshot, batchId: "" };
+  return { job: sameJob ? { ...snapshot, ...target } : target, batchId: text(owner.id) };
+}
+
+function updateJobSummary(job) {
+  const state = text(job?.state);
+  if (state === "succeeded") {
+    const version = text(job.version_after) || text(job.target_version);
+    return version ? `Last attempt succeeded → ${version}` : "Last attempt succeeded";
+  }
+  if (state === "failed" || state === "interrupted") {
+    return `Last attempt ${state === "failed" ? "reported an error" : state}: ${shortIdentity(text(job.error) || text(job.message) || "No details reported", 160)}`;
+  }
+  const phase = state ? state.charAt(0).toUpperCase() + state.slice(1) : "Updating";
+  return text(job?.message) ? `${phase}: ${shortIdentity(job.message, 160)}` : `${phase}…`;
 }
 
 function compareUpdateMachines(left, right) {
@@ -1506,8 +1548,13 @@ function MachineCard({
   updatesAvailable,
   mutating,
   submitting,
+  submissionUnknown,
   checking,
   batchActive,
+  updateJob,
+  requestFeedback,
+  statusError,
+  statusChecking,
   formState,
   formError,
   onFormChange,
@@ -1518,34 +1565,54 @@ function MachineCard({
   onEdit,
   onDelete,
   onUpdate,
+  onCheckStatus,
   onAuthorized,
 }) {
   const showUpdate = Boolean(updatesAvailable && machine);
   const multi = conns.length > 1;
   const single = conns.length === 1 ? conns[0] : null;
   const vias = Array.from(new Set(conns.map((conn) => text(conn.actual_via || conn.via)).filter(Boolean)));
-  const eligible = showUpdate && machineUpdateEligible(machine) && !submitting && !batchActive && !checking;
-  const activeJob = showUpdate ? machine.active_job || null : null;
-  const lastJob = showUpdate ? machine.last_job || null : null;
+  const job = updateJob?.job || null;
+  const jobActive = Boolean(job && !JOB_TERMINAL_STATES.has(text(job.state)));
+  const eligible = showUpdate && machineUpdateEligible(machine, job)
+    && !submitting && !batchActive && !checking;
+  const lastJob = job && !jobActive ? job : null;
   const current = showUpdate ? text(machine.current_version) : "";
   const installed = showUpdate ? text(machine.installed_version) : "";
   const mismatch = Boolean(installed && installed !== current);
   const reason = showUpdate ? text(machine.reason) : "";
   const editing = Boolean(formState && formState.id) && conns.some((conn) => conn.id === formState.id);
-  const disabledTitle = !showUpdate
-    ? ""
+  const availability = checking
+    ? "Checking updates…"
     : batchActive
-      ? "another update batch is already active; follow it below"
-      : checking
-        ? "checking for updates…"
-        : machineHasActiveJob(machine)
-          ? "an update is already running on this machine"
-          : reason || (!text(machine.latest_version)
-            ? "update availability is unknown"
-            : machine.update_available !== true ? "no update available" : "this machine cannot be updated right now");
-
-  // Button label: Updating… when active job, Checking… when global check in progress, else Update
-  const updateBtnLabel = machineHasActiveJob(machine) ? "Updating…" : checking ? "Checking…" : "Update";
+      ? "Another update is active"
+      : submitting
+        ? submissionUnknown ? "Another update request is unconfirmed" : "Another update is being requested…"
+        : text(machine?.error)
+          ? `Status unavailable: ${text(machine.error)}`
+          : !machine
+            ? "Update status not checked — Check updates"
+            : !text(machine.latest_version)
+              ? reason ? `Latest version unknown · ${shortIdentity(reason, 160)}` : "Latest version unknown — Check updates"
+              : machine.can_update !== true
+                ? reason || "Update unavailable"
+                : machine.update_available === true
+                  ? `${text(machine.latest_version)} available`
+                  : "Up to date";
+  let status = job ? updateJobSummary(job) : availability;
+  let statusIsError = text(job?.state) === "failed" || text(job?.state) === "interrupted";
+  if (job && !jobActive && !eligible) status += ` · ${availability}`;
+  if (jobActive && statusError) status = `Status unavailable · Last: ${status}`;
+  if (!jobActive && statusError) status = job ? `${updateJobSummary(job)} · Status unavailable — Retry status` : "Status unavailable — Retry status";
+  if (requestFeedback && (requestFeedback.state !== "rejected" || !jobActive)) {
+    status = requestFeedback.message;
+    statusIsError = requestFeedback.state === "rejected";
+  }
+  const retryStatus = requestFeedback?.state === "unknown"
+    || Boolean(statusError || machine?.error || (showUpdate && !text(machine.latest_version)));
+  const updateBtnLabel = requestFeedback?.state === "requesting"
+    ? "Starting…"
+    : jobActive ? "Updating…" : checking ? "Checking…" : "Update";
   // Available update = most prominent action; unavailable = muted/disabled
   const updateBtnClass = eligible
     ? "action-button conn-connect-btn upd-btn-available"
@@ -1590,7 +1657,7 @@ function MachineCard({
                   disabled={!eligible}
                   title={eligible
                     ? `Update ${label} to ${text(machine.latest_version) || "the latest release"}`
-                    : disabledTitle}
+                    : status}
                   onClick={() => onUpdate(machine)}
                 >
                   <Play className="button-icon" aria-hidden="true" />
@@ -1618,16 +1685,15 @@ function MachineCard({
             <span className="conn-error-inline" title={text(single.error)}>{text(single.error)}</span>
           </div>
         ) : null}
-        {showUpdate && machine.error ? (
-          <div className="machine-card-flag">
-            <span className="upd-error-inline" title={text(machine.error)}>{text(machine.error)}</span>
-          </div>
-        ) : null}
-        {activeJob ? (
-          <div className="machine-card-flag" data-upd-active-job>
-            <StateBadge state={activeJob.state} />
-            <span className="upd-muted">{text(activeJob.message) || "update in progress"}</span>
-            <JobLogTail job={activeJob} label="log" />
+        {updatesAvailable ? (
+          <div className="machine-card-flag machine-update-status" role="status" aria-live="polite" aria-atomic="true" data-upd-active-job={jobActive || undefined}>
+            {current ? <span className="upd-ver">running <b>{current}</b></span> : null}
+            <span className={statusIsError ? "upd-error-inline" : "upd-muted"}>{status}</span>
+            {retryStatus ? (
+              <button className="action-button" type="button" disabled={statusChecking || requestFeedback?.state === "requesting"} onClick={() => onCheckStatus(machine?.id || cardKey)}>
+                {statusChecking ? "Checking…" : requestFeedback?.state === "unknown" ? "Check status" : "Retry status"}
+              </button>
+            ) : null}
           </div>
         ) : null}
         {editing ? (
@@ -1692,10 +1758,11 @@ function MachineCard({
           {showUpdate && text(machine.via) === "direct" && machine.authorized === false ? (
             <CredentialEnrollment machineId={machine.id} machineName={label} onAuthorized={onAuthorized} />
           ) : null}
+          {jobActive ? <JobLogTail job={job} label="Update log" /> : null}
           {lastJob ? (
             <div className="machine-detail-row" data-upd-last-job>
               <span className="upd-muted">
-                last update {text(lastJob.state)}
+                Last attempt {text(lastJob.state)}
                 {text(lastJob.version_after) ? ` → ${text(lastJob.version_after)}` : ""}
                 {text(lastJob.updated_at) ? ` · ${formatCheckedAt(lastJob.updated_at)}` : ""}
               </span>
@@ -1817,13 +1884,17 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
   const [batch, setBatch] = useState(null);
   const [batchError, setBatchError] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
-  const [updPanelError, setUpdPanelError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [updateRequest, setUpdateRequest] = useState(null);
+  const [statusChecking, setStatusChecking] = useState(false);
   const [tokenBox, setTokenBox] = useState(null);
   const [pollEpoch, setPollEpoch] = useState(0);
   const [notice, setNotice] = useState("");
   const batchRef = useRef(null);
   const tokenRequestRef = useRef(null);
+  const updateRequestRef = useRef(null);
+  const statusCheckingRef = useRef(false);
+  const submittingRef = useRef(false);
 
   useEffect(() => { batchRef.current = batch; }, [batch]);
   useEffect(() => {
@@ -1976,13 +2047,27 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
       const machines = Array.isArray(data?.machines) ? data.machines : [];
       const batches = Array.isArray(data?.batches) ? data.batches : [];
       setUpdatesData({ machines, batches });
-      if (resume && batches.length) {
+      const pending = updateRequestRef.current;
+      if (pending?.state === "unknown") {
+        const found = batches.find((item) => !pending.knownBatchIds.includes(text(item.id))
+          && pending.ids.every((id) => (item.targets || []).some((target) => target.machine_id === id)));
+        if (found) {
+          updateRequestRef.current = null;
+          setUpdateRequest(null);
+          setBatch(found);
+          setBatchError("");
+        } else {
+          setUpdateRequest({ ...pending, message: "Submission unconfirmed — no matching update found. Check status." });
+        }
+      }
+      if (batches.length) {
         const running = batches.find((item) => !BATCH_TERMINAL_STATES.has(text(item.state)));
-        const target = running || batches[0];
         const current = batchRef.current;
         const currentActive = current && !BATCH_TERMINAL_STATES.has(text(current.state));
-        if (!currentActive || text(target.id) !== text(current?.id)) setBatch(target);
+        const target = running || (resume && !currentActive ? batches[0] : null);
+        if (target) setBatch(target);
       }
+      return { machines, batches };
     } catch (err) {
       if (!request.signal.aborted) setUpdatesError(`Failed to load updates: ${err.message || err}`);
     } finally {
@@ -2012,8 +2097,8 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
       try {
         const res = await fetch(`/api/updates/jobs/${encodeURIComponent(id)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const job = data && typeof data.job === "object" && data.job ? data.job : data;
+        const job = updateBatchFromResponse(await res.json());
+        if (text(job.id) !== id) throw new Error("The server returned a different update batch");
         if (stopped) return;
         failures = 0;
         setReconnecting(false);
@@ -2031,12 +2116,10 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
           const includesLocal = (batchRef.current?.targets || []).some((t) => t.machine_id === "local");
           const limit = includesLocal ? JOB_POLL_MAX_FAILURES_LOCAL : JOB_POLL_MAX_FAILURES;
           delay = Math.min(JOB_POLL_MS * failures, JOB_POLL_MAX_DELAY_MS);
+          setBatchError(`Update status unavailable; the job may still be running. ${err.message || err}`);
           if (failures > limit) {
             done = true;
             setReconnecting(false);
-            setBatchError(includesLocal
-              ? `Lost contact while ${batchLocalName} updated itself. Reload later. Last error: ${err.message || err}`
-              : `Lost contact with the update job: ${err.message || err}`);
             return;
           }
           if (includesLocal) setReconnecting(true);
@@ -2053,9 +2136,17 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
 
   async function startUpdate(machineIds) {
     const ids = Array.from(new Set(machineIds.map(text).filter(Boolean)));
-    if (!ids.length) return;
+    if (!ids.length || submittingRef.current || updateRequestRef.current || batchActive || checkingRef.current) return;
+    const pending = {
+      ids,
+      knownBatchIds: knownBatches.map((item) => text(item.id)),
+      state: "requesting",
+      message: "Starting update — requesting server confirmation…",
+    };
+    updateRequestRef.current = pending;
+    submittingRef.current = true;
+    setUpdateRequest(pending);
     setSubmitting(true);
-    setUpdPanelError("");
     setNotice("");
     try {
       const res = await fetch("/api/updates", {
@@ -2065,27 +2156,49 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
       });
       let data = {};
       try { data = await res.json(); } catch { data = {}; }
-      if (res.status === 409 && data && typeof data.job === "object" && data.job) {
-        setBatch(data.job);
+      const job = data?.job || data;
+      const hasJob = text(job?.id) && text(job?.state) && Array.isArray(job?.targets);
+      if (res.status === 409 && hasJob) {
+        setBatch(job);
         setBatchError("");
-        setNotice(`An update batch is already active — following batch ${shortIdentity(data.job.id, 8)} instead.`);
+        updateRequestRef.current = null;
+        setUpdateRequest(null);
+        setNotice("Another update is active; showing its actual targets.");
         await refreshUpdates();
         return;
       }
-      if (!res.ok) throw new Error(text(data.error) || `HTTP ${res.status}`);
-      const job = data && typeof data.job === "object" && data.job ? data.job : data;
+      if (!res.ok) {
+        if (res.status >= 400 && res.status < 500 && res.status !== 408 && text(data.error)) {
+          updateRequestRef.current = null;
+          setUpdateRequest({ ...pending, state: "rejected", message: `Request not accepted: ${text(data.error)}` });
+          await refreshUpdates({ resume: true });
+          return;
+        }
+        throw new Error(text(data.error) || `HTTP ${res.status}`);
+      }
+      if (!hasJob) throw new Error("The server returned no identifiable update batch");
       setBatch(job);
       setBatchError("");
+      updateRequestRef.current = null;
+      setUpdateRequest(null);
       await refreshUpdates();
     } catch (err) {
-      setUpdPanelError(`Update request failed: ${err.message || err}`);
-      await refreshUpdates();
+      const unknown = {
+        ...pending,
+        state: "unknown",
+        message: `Submission status unknown — Check status before retrying. ${shortIdentity(err.message || `${err}`, 120)}`,
+      };
+      updateRequestRef.current = unknown;
+      setUpdateRequest(unknown);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
 
   function requestSingleUpdate(machine) {
+    if (submittingRef.current || updateRequestRef.current || batchActive || checkingRef.current
+      || !machineUpdateEligible(machine, jobsByMachineId.get(machine.id)?.job)) return;
     const label = machineLabel(machine);
     const from = text(machine.current_version) || "unknown";
     const to = text(machine.latest_version) || "latest";
@@ -2106,7 +2219,8 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
   }
 
   function requestUpdateAll() {
-    const eligible = (updatesData?.machines || []).filter(machineUpdateEligible).sort(compareUpdateMachines);
+    if (submittingRef.current || updateRequestRef.current || batchActive || checkingRef.current) return;
+    const eligible = updMachines.filter((machine) => machineUpdateEligible(machine, jobsByMachineId.get(machine.id)?.job));
     if (!eligible.length) return;
     const lines = eligible.map((m) => `• ${machineLabel(m)}: ${text(m.current_version) || "unknown"} → ${text(m.latest_version) || "latest"}`);
     const notes = [];
@@ -2142,31 +2256,67 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
     }
   }
 
+  async function checkUpdateStatus(machineId = "") {
+    if (statusCheckingRef.current || submittingRef.current) return;
+    statusCheckingRef.current = true;
+    setStatusChecking(true);
+    try {
+      if (updateRequestRef.current?.state === "unknown") {
+        await refreshUpdates({ resume: true });
+        return;
+      }
+      const tracked = batchRef.current;
+      const ownsTarget = !machineId || (tracked?.targets || []).some((target) => target.machine_id === machineId);
+      if (tracked && ownsTarget && (batchError || !BATCH_TERMINAL_STATES.has(text(tracked.state)))) {
+        try {
+          const res = await fetch(`/api/updates/jobs/${encodeURIComponent(tracked.id)}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const job = updateBatchFromResponse(await res.json());
+          if (text(job.id) !== text(tracked.id)) throw new Error("The server returned a different update batch");
+          setBatch(job);
+          setBatchError("");
+          setReconnecting(false);
+          setPollEpoch((epoch) => epoch + 1);
+          if (BATCH_TERMINAL_STATES.has(text(job.state))) await refreshUpdates();
+        } catch (err) {
+          setBatchError(`Update status unavailable; the job may still be running. ${err.message || err}`);
+        }
+      } else {
+        await refreshUpdates({ check: true, resume: true });
+      }
+    } finally {
+      statusCheckingRef.current = false;
+      setStatusChecking(false);
+    }
+  }
+
   async function viewBatch(id) {
     const clean = text(id);
-    if (!clean) return;
+    if (!clean || batchActive || updateRequestRef.current) return;
     setBatchError("");
     try {
       const res = await fetch(`/api/updates/jobs/${encodeURIComponent(clean)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const job = data && typeof data.job === "object" && data.job ? data.job : data;
+      const job = updateBatchFromResponse(await res.json());
+      if (text(job.id) !== clean) throw new Error("The server returned a different update batch");
       setBatch(job);
     } catch (err) {
       setBatchError(`Could not load batch ${shortIdentity(clean, 8)}: ${err.message || err}`);
     }
   }
 
+  const knownBatches = (updatesData?.batches || []).filter((item) => text(item.id) !== text(batch?.id));
+  if (batch) knownBatches.push(batch);
+  knownBatches.sort((left, right) => updateCreatedAt(right) - updateCreatedAt(left)
+    || (Date.parse(right.updated_at || "") || 0) - (Date.parse(left.updated_at || "") || 0));
   const updMachines = (updatesData?.machines || []).slice().sort(compareUpdateMachines);
-  const eligibleCount = updMachines.filter(machineUpdateEligible).length;
-  const history = (updatesData?.batches || []).filter((item) => text(item.id) !== text(batch?.id)).slice(0, 5);
-  const batchActive = (batch && !BATCH_TERMINAL_STATES.has(text(batch.state)))
-    || (updatesData?.batches || []).some((item) => !BATCH_TERMINAL_STATES.has(text(item.state)));
+  const jobsByMachineId = new Map(updMachines.map((machine) => [machine.id, machineUpdateJob(machine, knownBatches)]));
+  const eligibleCount = updMachines.filter((machine) => machineUpdateEligible(machine, jobsByMachineId.get(machine.id)?.job)).length;
+  const history = knownBatches.filter((item) => text(item.id) !== text(batch?.id)).slice(0, 5);
+  const batchActive = knownBatches.some((item) => !BATCH_TERMINAL_STATES.has(text(item.state)));
+  const updateBlocked = submitting || updateRequest?.state === "unknown";
   const localMachine = updMachines.find((m) => m.id === "local") || null;
   const localName = localMachine ? machineLabel(localMachine) : "the host machine";
-  const batchLocalName = text(
-    (batch?.targets || []).find((t) => t.machine_id === "local")?.label,
-  ) || localName;
 
   // Build a map of update machine info keyed by id for merging into machine cards.
   const updByMachineId = useMemo(() => {
@@ -2227,7 +2377,7 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
               <button
                 className="action-button"
                 type="button"
-                onClick={() => void refreshUpdates({ check: true })}
+                onClick={() => void refreshUpdates({ check: true, resume: true })}
                 disabled={checking || submitting}
                 title="Check every machine against the trusted release source"
               >
@@ -2240,7 +2390,7 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
                 className="action-button conn-connect-btn"
                 type="button"
                 onClick={requestUpdateAll}
-                disabled={!eligibleCount || submitting || checking || batchActive}
+                disabled={!eligibleCount || updateBlocked || checking || batchActive}
                 title={batchActive
                   ? "An update batch is already active"
                   : eligibleCount
@@ -2288,7 +2438,6 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
             </div>
           ) : null}
           {tokenBox?.error ? <div className="conn-panel-error" role="alert">{tokenBox.error}</div> : null}
-          {updPanelError ? <div className="conn-panel-error" role="alert">{updPanelError}</div> : null}
           {notice ? <p className="upd-reconnect" role="status" data-upd-notice>{notice}</p> : null}
 
           {/* Errors */}
@@ -2302,7 +2451,7 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
           {updatesError && (
             <div className="empty load-error" role="alert">
               {updatesError}{" "}
-              <button className="action-button" type="button" onClick={() => void refreshUpdates({ resume: true })}>Retry</button>
+              <button className="action-button" type="button" disabled={statusChecking || submitting} onClick={() => void checkUpdateStatus()}>Retry status</button>
             </div>
           )}
 
@@ -2341,9 +2490,15 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
               machine={localMachine}
               updatesAvailable={updatesAvailable}
               mutating={mutating}
-              submitting={submitting}
+              submitting={updateBlocked}
+              submissionUnknown={updateRequest?.state === "unknown"}
               checking={checking}
               batchActive={batchActive}
+              updateJob={jobsByMachineId.get(localMachine.id)}
+              requestFeedback={updateRequest?.ids.includes(localMachine.id) ? updateRequest : null}
+              statusError={jobsByMachineId.get(localMachine.id)?.batchId === text(batch?.id) ? batchError || updatesError : updatesError}
+              statusChecking={statusChecking}
+              onCheckStatus={checkUpdateStatus}
               onUpdate={requestSingleUpdate}
               onAuthorized={() => refreshUpdates()}
             />
@@ -2379,9 +2534,15 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
                         machine={updMachine}
                         updatesAvailable={updatesAvailable}
                         mutating={mutating}
-                        submitting={submitting}
+                        submitting={updateBlocked}
+                        submissionUnknown={updateRequest?.state === "unknown"}
                         checking={checking}
                         batchActive={batchActive}
+                        updateJob={jobsByMachineId.get(updMachine?.id)}
+                        requestFeedback={updateRequest?.ids.includes(updMachine?.id) ? updateRequest : null}
+                        statusError={jobsByMachineId.get(updMachine?.id)?.batchId === text(batch?.id) ? batchError || updatesError : updatesError}
+                        statusChecking={statusChecking}
+                        onCheckStatus={checkUpdateStatus}
                         formState={formState}
                         formError={formError}
                         onFormChange={setFormState}
@@ -2415,14 +2576,14 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
               </div>
               {reconnecting ? (
                 <div className="upd-reconnect" role="status">
-                  {batchLocalName} is updating itself; waiting for its catalog server to come back…
+                  Reconnecting to update status…
                 </div>
               ) : null}
               {batchError ? (
                 <div className="conn-panel-error" role="alert">
                   {batchError}{" "}
-                  <button className="action-button" type="button" onClick={() => { setBatchError(""); setPollEpoch((e) => e + 1); }}>
-                    Retry
+                  <button className="action-button" type="button" disabled={statusChecking || submitting} onClick={() => void checkUpdateStatus()}>
+                    {statusChecking ? "Checking…" : "Retry status"}
                   </button>
                 </div>
               ) : null}
@@ -2445,7 +2606,7 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
                     {(item.targets || []).length} machine(s)
                     {text(item.updated_at) ? ` · ${formatCheckedAt(item.updated_at)}` : ""}
                   </span>
-                  <button className="action-button" type="button" onClick={() => void viewBatch(item.id)}>View</button>
+                  <button className="action-button" type="button" disabled={batchActive || updateBlocked} onClick={() => void viewBatch(item.id)}>View</button>
                 </div>
               ))}
             </div>

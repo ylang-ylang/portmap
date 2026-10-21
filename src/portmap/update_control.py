@@ -884,7 +884,7 @@ def start_batch(payload: Any, *, state_dir: Path) -> dict[str, Any]:
             batch_id,
             lambda record: (
                 record.__setitem__("state", "failed"),
-                [target.__setitem__("error", message) for target in record["targets"]],
+                [target.update(state="failed", error=message) for target in record["targets"]],
             ),
         )
         raise PortmapError(message) from exc
@@ -958,6 +958,8 @@ def _poll_remote_job(machine: Any, credential: str, batch_id: str, machine_id: s
                     "job_id": job_id,
                     "target_version": None,
                 }
+            if failures == 1:
+                _set_target(state_dir, batch_id, machine_id, message="Waiting for the remote updater to reconnect")
             time.sleep(TARGET_POLL_INTERVAL)
             continue
         failures = 0
@@ -965,6 +967,7 @@ def _poll_remote_job(machine: Any, credential: str, batch_id: str, machine_id: s
             job = body["job"]
             if _job_terminal(job):
                 return _target_from_job(job)
+            _set_target(state_dir, batch_id, machine_id, **_target_from_job(job))
         elif status == 404:
             return {
                 "state": "failed",
@@ -1030,6 +1033,7 @@ def _run_remote_target(batch_id: str, machine_id: str, *, state_dir: Path) -> No
         return
     credential = credential_for(machine_id, state_dir=state_dir)
     if machine.via == "ssh" and machine.backend_url:
+        _set_target(state_dir, batch_id, machine_id, state="running", message="Authorizing over the existing SSH connection")
         # Explicit updates may refresh a capability after a workspace rebuild.
         # Only the authenticated private tunnel can reveal the target's key.
         credential = _pair_over_tunnel(machine, state_dir=state_dir) or credential
@@ -1053,7 +1057,7 @@ def _run_remote_target(batch_id: str, machine_id: str, *, state_dir: Path) -> No
         return
     request_id = f"{batch_id}:{machine_id}"
     version = _mutate_batch_value(state_dir, batch_id, "version_requested")
-    _set_target(state_dir, batch_id, machine_id, state="running")
+    _set_target(state_dir, batch_id, machine_id, state="running", message="Starting the remote updater")
     try:
         status, body, _raw, _server = _request_machine(machine, "/api/update-agent/start", state_dir=state_dir, method="POST",
         payload={"version": version, "request_id": request_id},
@@ -1087,7 +1091,7 @@ def _run_remote_target(batch_id: str, machine_id: str, *, state_dir: Path) -> No
 def _run_local_target(batch_id: str, *, state_dir: Path) -> None:
     request_id = f"{batch_id}:{LOCAL_MACHINE_ID}"
     version = _mutate_batch_value(state_dir, batch_id, "version_requested")
-    _set_target(state_dir, batch_id, LOCAL_MACHINE_ID, state="running")
+    _set_target(state_dir, batch_id, LOCAL_MACHINE_ID, state="running", message="Starting the local updater")
     # A snapshot worker must ask the real installed agent to start updates.
     # Never infer an installation from its own snapshot or run a fallback.
     answer = _agent_local_start(version, request_id, state_dir=state_dir)
@@ -1260,8 +1264,9 @@ def get_batch(identifier: str, *, state_dir: Path, heal: bool = True) -> dict[st
                         lambda record: (
                             record.__setitem__("state", "failed"),
                             [
-                                target.__setitem__(
-                                    "error", target.get("error") or "update worker is not running; retry the update"
+                                target.update(
+                                    state="failed",
+                                    error=target.get("error") or "update worker is not running; retry the update",
                                 )
                                 for target in record["targets"]
                                 if target.get("state") not in ("succeeded", "failed")
