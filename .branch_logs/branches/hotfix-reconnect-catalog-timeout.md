@@ -1,0 +1,11 @@
+# hotfix/reconnect-catalog-timeout
+
+- Base: main v0.20.6, commit 025c7fd9a24d548201d3307e1e33a3a85caba881. Prepare patch version 0.20.7 through hotfix -> dev -> main, then push the existing version tag for immutable GitHub Release/Brew distribution.
+- Incident: mj's saved voxmani SSH transport closed with `Broken pipe`. The initiating remote closure remains unexplained; current evidence does not identify a Portmap upgrade, Pod replacement or engine change as its cause.
+- Reproduced recovery blocker: background maintenance passed a one-second timeout into remote catalog validation. The healthy catalog took 1.69–1.84 seconds, and the exact installed one-second Unix-socket probe timed out after 1.002 seconds.
+- Fix: use the existing restoration default of five seconds per probe. Keep the one-second local control checks, bounded per-profile backoff, cancellation, saved-domain verification, ownership and route-only publication unchanged. No DNS/runtime bootstrap or healthy-session teardown is added.
+- Regression: a real Unix HTTP server delays its catalog by 1.5 seconds; maintenance must retain the recovered route and preserve the unrelated peer. The regression fails against the original v0.20.6 source because no HTTP socket is retained, and passes with the fix.
+- Independent GPT Sol 6.1 verification: tests/test_client.py and tests/test_client_discovery.py ran once, 131 passed in 2.87 seconds. Isolated baseline regression: 1 failed in 1.72 seconds. Evidence: /tmp/pm-rv-F64hGa.
+- Read-only operational smoke: the existing mj-to-vox Unix forward validated the real catalog using the unchanged probe's default five-second budget, HTTP 200, five services, 1.987883 seconds. No new tunnel, deployment or live state mutation was used for this probe.
+- The earlier scoped operational restore used the installed route-only recovery path with a ten-second budget. mj core/agent, other saved profiles, durable targets, resolver and SSH configuration were preserved.
+- Deployment boundary: the user separately authorized publication and updating only mj's Portmap to apply this correction. The completed voxmani upgrade remains 0.20.6. Publication itself never upgrades machines; use the authenticated updater/Brew lifecycle, never installed-source replacement, and preserve remote business workloads.

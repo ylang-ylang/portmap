@@ -142,3 +142,12 @@
   isolation. Future fixes use the installed stable Brew opt command after an
   authorized external-starter bridge; no automatic live-engine change or
   zero-downtime claim. Formal release is pending; live deployment stays paused.
+- Completed v0.20.6 publication: GitHub Release and Brew formula PR #11 succeeded.
+  The authorized voxmani-only maintenance upgraded CLI/catalog/agent to 0.20.6,
+  selected owned 1.9.0 helpers, and restored the seven original business IDs;
+  this did not deploy the external Coder starter bridge or replace its Pod.
+- Hotfix v0.20.7: use the normal five-second remote catalog probe budget during
+  saved SSH restoration instead of the one-second local control-check budget.
+  Preserve bounded backoff, domain/ownership checks, route-only publication,
+  cancellation and healthy peers. Real delayed-HTTP regression fails before
+  and passes after; focused client/discovery verification passed 131 tests.
