@@ -262,3 +262,8 @@
   loader isolation. Preserve idle-repair guards; a one-time authorized external
   starter bridge consumes future Brew/web updates. Candidate verification is
   independent; formal publication and live deployment are not recorded as done.
+- hotfix/reconnect-catalog-timeout: prepare 0.20.7 with the existing five-second
+  remote catalog restoration budget. Keep one-second local SSH health checks
+  and all ownership, cancellation, peer-preservation and route-only boundaries.
+  A real 1.5-second Unix HTTP response failed recovery before this change and
+  recovered afterward; client/discovery tests passed 131 cases independently.
