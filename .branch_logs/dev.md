@@ -278,3 +278,9 @@
   and all ownership, cancellation, peer-preservation and route-only boundaries.
   A real 1.5-second Unix HTTP response failed recovery before this change and
   recovered afterward; client/discovery tests passed 131 cases independently.
+- hotfix/update-feedback: prepare 0.20.8 with concise machine-local update
+  feedback, duplicate-submit protection and GET-only reconciliation of unknown
+  submissions. Use the latest matching batch target rather than stale machine
+  snapshots; retain real running versions and accurately labeled past failures.
+  Propagate remote phases/log tails during polling, finish failed worker targets
+  consistently, and scope cached release checks to their updater version.

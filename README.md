@@ -263,11 +263,22 @@ an unavailable version endpoint leaves the footer hidden instead of guessing.
 The private portal's **Settings → Machines** automatically checks the trusted
 Portmap release source when opened. Each machine has one **Update** button:
 highlighted when an update is available and permitted, muted/disabled otherwise.
-Checking and updating are shown on the button; version/build/install metadata and
-direct-connection authorization stay in collapsed **Details**. Routine SSH
-authorization explanations are not shown. Checks never start an installation.
+Checking, submission and active updates are shown on the button. One compact
+status line shows the running version and the current phase or last attempt's
+result. Unknown availability and errors are visible without hovering;
+build/install metadata, detailed logs and direct-connection authorization
+stay in collapsed **Details**. Checks never submit a new installation.
 **Check updates** refreshes availability manually; **Update all eligible** retains
 its confirmation and updates the machine serving the portal last.
+
+Submitting an update immediately blocks duplicate requests. If the response is
+lost, **Check status** uses GET requests to find the accepted batch; it
+does not silently submit another update. Missing status is reported as
+unconfirmed, not as proof that installation failed. Remote installer/restart/
+verification phases are persisted in the manager's batch as they arrive, so
+the machine card does not stay on its initial queued snapshot until completion.
+An older failed attempt remains labeled as history even when a separate
+authorized recovery has advanced the observed running version.
 
 Explicit release checks and update starts have a longer request budget than
 cached status reads: resolving the latest tag and downloading its manifest can
@@ -282,6 +293,10 @@ Use a one-time standard Brew upgrade first. If Brew reports that automatic setup
 was not run (for example, no systemd user manager), activate the installed package
 with `portmap setup`; verify the running agent/catalog version before trying
 web-managed updates. Never patch installed updater files or rewrite old tags.
+
+Release-check caches belong to the updater version that wrote them. After an
+upgrade, the new updater rechecks instead of retaining an old parser's cached
+discovery failure.
 
 Each target executes its own fixed updater through an authenticated HTTP API.
 SSH connections carry that API through Portmap's owned SSH forward; they do not

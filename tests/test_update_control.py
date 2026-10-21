@@ -1,6 +1,7 @@
 """Update control: capability pairing, signed remote updates, durable batches."""
 import http.client
 import json
+import queue
 import subprocess
 import sys
 import threading
@@ -809,6 +810,7 @@ def test_worker_launch_failure_fails_the_batch_explicitly(engine, state_dir, mon
         engine.launch_durable_worker = original
     batch = update_control.recent_batches(state_dir=state_dir)[0]
     assert batch["state"] == "failed"
+    assert batch["targets"][0]["state"] == "failed"
     assert batch["targets"][0]["error"]
 
 
@@ -912,6 +914,97 @@ def test_invalid_capability_is_not_silently_rotated(state_dir, invalid):
     with pytest.raises(PortmapError):
         update_control.local_capability(state_dir=state_dir)
     assert json.loads(path.read_text()) == invalid
+
+
+def test_failed_worker_relaunch_finishes_only_pending_targets(engine, state_dir, monkeypatch):
+    names = ("finished.portmap", "broken.portmap", "pending.portmap")
+    use_snapshot(monkeypatch, {name: machine(name, None) for name in names})
+    batch = update_control.start_batch({"machines": list(names), "version": "0.16.0"}, state_dir=state_dir)
+
+    def checkpoint(record):
+        record.update(state="running", resume_attempted_at="2000-01-01T00:00:00+00:00")
+        record["targets"][0].update(state="succeeded", target_version="0.16.0")
+        record["targets"][1].update(state="failed", error="earlier failure")
+        record["targets"][2].update(state="installing", job_id="remote-in-progress")
+
+    update_control._mutate_batch(state_dir, batch["id"], checkpoint)
+
+    def cannot_resume(*args, **kwargs):
+        raise PortmapError("worker snapshot unavailable")
+
+    monkeypatch.setattr(engine, "launch_durable_worker", cannot_resume)
+    healed = update_control.get_batch(batch["id"], state_dir=state_dir)
+    assert healed["state"] == "failed"
+    finished, broken, pending = healed["targets"]
+    assert finished["state"] == "succeeded"
+    assert finished["target_version"] == "0.16.0"
+    assert broken["state"] == "failed"
+    assert broken["error"] == "earlier failure"
+    assert pending["state"] == "failed"
+    assert pending["job_id"] == "remote-in-progress"
+    assert pending["error"]
+
+
+def test_remote_update_progress_is_observable_before_completion(engine, state_dir, monkeypatch):
+    remote_state = state_dir / "progress-remote"
+    remote_state.mkdir(mode=0o700)
+    original_start = engine.start_update
+    original_get = engine.get_job
+    requested = queue.Queue()
+    advance = threading.Semaphore(0)
+    finish = threading.Event()
+    phases = ("installing", "restarting", "verifying", "succeeded")
+    calls = 0
+
+    def start(version, request_id, *, state_dir):
+        job = original_start(version, request_id, state_dir=state_dir)
+        job.update(state="queued", version_after=None, message="", log_tail="")
+        return job
+
+    def get(job_id, *, state_dir):
+        nonlocal calls
+        index = calls
+        calls += 1
+        requested.put(index)
+        if not advance.acquire(timeout=10):
+            raise RuntimeError("test did not release the remote update phase")
+        phase = "succeeded" if finish.is_set() else phases[index]
+        job = original_get(job_id, state_dir=state_dir)
+        job.update(state=phase, message=f"remote phase {index}", log_tail=f"log entry {index}")
+        return job
+
+    monkeypatch.setattr(engine, "start_update", start)
+    monkeypatch.setattr(engine, "get_job", get)
+    monkeypatch.setattr(update_control, "TARGET_POLL_INTERVAL", 0)
+    with remote_target(remote_state) as remote:
+        use_snapshot(monkeypatch, {"desk.portmap": machine("desk.portmap", remote.url)})
+        update_control._store_credential(
+            "desk.portmap", update_control.local_capability(state_dir=remote_state), state_dir=state_dir
+        )
+        batch = update_control.start_batch(
+            {"machines": ["desk.portmap"], "version": "0.16.0"}, state_dir=state_dir
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            worker = pool.submit(update_control.run_batch, batch["id"], state_dir=state_dir)
+            try:
+                assert requested.get(timeout=5) == 0
+                for index, phase in enumerate(phases[:-1]):
+                    advance.release()
+                    # The following HTTP request starts only after the prior
+                    # response has been consumed and its progress persisted.
+                    assert requested.get(timeout=5) == index + 1
+                    observed = update_control.get_batch(batch["id"], state_dir=state_dir, heal=False)
+                    assert observed["state"] == "running"
+                    target = observed["targets"][0]
+                    assert target["state"] == phase
+                    assert target["message"] == f"remote phase {index}"
+                    assert target["log_tail"] == f"log entry {index}"
+                    assert target["job_id"] == "job-1"
+            finally:
+                finish.set()
+                advance.release()
+                worker.result(timeout=10)
+        assert update_control.get_batch(batch["id"], state_dir=state_dir, heal=False)["state"] == "succeeded"
 
 
 def test_running_local_update_keeps_live_phase_until_completion(engine, state_dir, monkeypatch):

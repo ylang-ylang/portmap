@@ -151,3 +151,9 @@
   Preserve bounded backoff, domain/ownership checks, route-only publication,
   cancellation and healthy peers. Real delayed-HTTP regression fails before
   and passes after; focused client/discovery verification passed 131 tests.
+- Hotfix v0.20.8: expose immediate submission and per-machine update progress,
+  terminal attempt results and status uncertainty without expanding Details.
+  Persist remote nonterminal phases, fail unfinished targets when durable-worker
+  launch/relaunch fails, and invalidate release-check caches from older updaters.
+  Keep legacy tag migration as an explicit official Brew bootstrap, not a
+  source patch or compatibility fallback; preserve failed job history.
