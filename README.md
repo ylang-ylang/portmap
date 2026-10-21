@@ -754,6 +754,10 @@ owned socket forwards are withdrawn from the routing snapshot, then restored
 using their saved identity/options when connectivity returns. Failed attempts
 back off independently for 5, 10, 20, 40, then 60 seconds; healthy SSH/TCP
 sessions are not torn down merely because a remote HTTP catalog is slow.
+Restoration gives each remote catalog probe the normal five-second request
+budget; the one-second local SSH-control health check is not reused as the
+catalog deadline. This lets a healthy but slower catalog pass validation
+without relaxing saved-domain checks or changing the retry/backoff policy.
 Explicitly disconnected targets stay disconnected. The agent never repairs
 system DNS, bootstraps missing infrastructure, prompts for credentials/sudo,
 or starts a second daemon as part of reconnection.

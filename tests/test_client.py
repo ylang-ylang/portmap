@@ -6,13 +6,15 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from socketserver import UnixStreamServer
 from types import SimpleNamespace
 
 import pytest
 
 from portmap import client, infrastructure
-from portmap.client_discovery import GatewayInfo
+from portmap.client_discovery import GatewayInfo, probe_gateway_socket
 from portmap.errors import PortmapError
 
 
@@ -1197,6 +1199,58 @@ def maintenance_infrastructure(monkeypatch, *, actual_sockets=False):
     monkeypatch.setattr(client, "sync_infrastructure", forbidden)
     monkeypatch.setattr(client, "setup_client", forbidden)
     return infra
+
+
+def test_maintenance_recovers_when_real_catalog_takes_more_than_one_second(tmp_path, monkeypatch):
+    infra = maintenance_infrastructure(monkeypatch, actual_sockets=True)
+    calls = ssh_transport(monkeypatch)
+    profile = saved_ssh_profile()
+    peer = direct_profile("peer.portmap")
+    client._save(tmp_path, {profile["domain"]: profile, peer["domain"]: peer})
+
+    class OneSweep(threading.Event):
+        def wait(self, timeout=None):
+            self.set()
+            return True
+
+    class SlowCatalog(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/registry.json":
+                self.send_error(404)
+                return
+            time.sleep(1.5)
+            payload = json.dumps(gateway().catalog).encode()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except BrokenPipeError:
+                # The old one-second deadline closes the actual socket.
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    # Keep AF_UNIX paths short regardless of pytest's configured basetemp.
+    with tempfile.TemporaryDirectory(prefix="pm-slow-") as directory:
+        socket_path = str(Path(directory) / "http.sock")
+        with UnixStreamServer(socket_path, SlowCatalog) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            monkeypatch.setattr(client, "add_http_forward", lambda *args, **kwargs: socket_path)
+            monkeypatch.setattr(client, "probe_gateway_socket", probe_gateway_socket)
+            try:
+                client.run_connection_maintenance(tmp_path, OneSweep())
+                saved = client._load(tmp_path)
+                assert saved["remote.portmap"]["http_socket"] == socket_path
+                assert saved["remote.portmap"]["tunnel"]["target"] == "saved-host"
+                assert saved["peer.portmap"] == peer
+                assert infra.synced[-1][0]["remote.portmap"] == saved["remote.portmap"]
+                assert calls["stopped"] == []
+            finally:
+                server.shutdown()
+                worker.join(timeout=5)
 
 
 def test_maintenance_outage_withdraws_before_retry_and_recovers_without_touching_peers(tmp_path, monkeypatch):
