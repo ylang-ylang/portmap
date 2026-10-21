@@ -1043,7 +1043,9 @@ def run_connection_maintenance(state_dir: Path, stop_event: threading.Event) -> 
                     identity = _ssh_retry_identity(profile)
                     retry = retries.get(domain)
                     try:
-                        _restore_ssh_profile(state_dir, profiles, domain, use_sudo=False, timeout=1, stop_event=stop_event)
+                        # Catalog validation needs the normal restore budget,
+                        # not the one-second local SSH-control health check.
+                        _restore_ssh_profile(state_dir, profiles, domain, use_sudo=False, stop_event=stop_event)
                     except PortmapError:
                         delay = min(retry[1] * 2, 60) if retry and retry[0] == identity else 5
                         retries[domain] = (identity, delay, time.monotonic() + delay)
