@@ -60,6 +60,58 @@ h1 {
   gap: 14px;
 }
 
+.inventory-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 13px;
+}
+
+.inventory-status-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.inventory-status-warning {
+  border-color: #d97706;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.inventory-status > .action-button {
+  flex: 0 0 auto;
+}
+
+.project-details {
+  max-width: 520px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.project-details summary {
+  cursor: pointer;
+  color: #52606d;
+}
+
+.project-details > div {
+  margin-top: 6px;
+}
+
+@media (max-width: 760px) {
+  .inventory-status {
+    flex-wrap: wrap;
+  }
+}
+
 .project-group,
 .worktree-group,
 .branch-group,
@@ -258,13 +310,6 @@ button {
   white-space: nowrap;
 }
 
-.running-main .branch-name-label {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  font-weight: 700;
-  color: #14532d;
-}
-
 .dead-main .branch-name-label {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
@@ -274,7 +319,6 @@ button {
 
 .branch-name-deleted,
 .branch-running-name.branch-name-deleted,
-.running-main .branch-name-deleted,
 .dead-main .branch-name-deleted {
   color: #dc2626;
 }
@@ -721,96 +765,11 @@ a {
   font-size: 14px;
 }
 
-.running-menu,
-.dead-menu {
-  position: relative;
-  flex: 0 0 auto;
-}
-
-.running-menu-button,
-.dead-menu-button {
-  border: 1px solid #9aa7b4;
-  background: #f8fafc;
-  color: #18202a;
-  box-sizing: border-box;
-  inline-size: 144px;
-  min-width: 144px;
-  min-height: 32px;
-  padding: 7px 8px;
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  white-space: nowrap;
-}
-
-.running-menu-button {
-  border-color: #16a34a;
-  background: #f0fdf4;
-  color: #15803d;
-}
-
-.dead-menu-button.has-items {
-  border-color: #c2410c;
-  background: #fff7ed;
-  color: #9a3412;
-}
-
-.running-menu-button:focus,
-.dead-menu-button:focus {
-  outline: 2px solid #0ea5e9;
-  outline-offset: 2px;
-}
-
-.running-menu-button:disabled,
-.dead-menu-button:disabled {
-  cursor: default;
-}
-
-.running-menu-button.is-empty,
-.dead-menu-button.is-empty {
-  border-color: #cbd5e1;
-  background: #eef2f6;
-  color: #7b8794;
-  opacity: 1;
-}
-
-.running-menu-button span,
-.dead-menu-button span {
-  border: 1px solid #cbd5e1;
-  background: #ffffff;
-  color: #52606d;
-  min-width: 18px;
-  padding: 1px 5px;
-  font-size: 11px;
-  font-weight: 700;
-  text-align: center;
-}
-
-.running-menu-button.is-empty span,
-.dead-menu-button.is-empty span {
-  border-color: #cbd5e1;
-  background: #e2e8f0;
-  color: #697586;
-}
-
-.running-list,
-.dead-list {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 20;
-  display: grid;
-  width: min(460px, calc(100vw - 32px));
+.stopped-branches {
   border: 1px solid #d9e0e8;
   background: #ffffff;
-  box-shadow: 0 12px 28px rgb(15 23 42 / 14%);
 }
 
-.running-row,
 .dead-row {
   display: flex;
   align-items: center;
@@ -820,27 +779,26 @@ a {
   border-top: 1px solid #edf1f5;
 }
 
-.running-row:first-child,
 .dead-row:first-child {
   border-top: 0;
 }
 
-.running-main,
 .dead-main {
   min-width: 0;
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
   gap: 8px;
 }
 
-.running-row .branch-path-note,
 .dead-row .branch-path-note {
   max-width: 160px;
 }
 
-.running-row .action-button,
 .dead-row .action-button {
   min-width: 78px;
+  flex: 0 0 auto;
   justify-content: center;
   padding: 5px 8px;
 }
@@ -849,7 +807,9 @@ a {
   color: #52606d;
   font-size: 12px;
   font-weight: 700;
-  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .utility-panel {
@@ -1967,9 +1927,6 @@ pre {
   .branch-header,
   .branch-body,
   .quick-setup-body,
-  .running-list,
-  .running-row,
-  .dead-list,
   .dead-row,
   th,
   td {
@@ -1977,9 +1934,7 @@ pre {
   }
 
   .action-button,
-  .copy-button,
-  .running-menu-button,
-  .dead-menu-button {
+  .copy-button {
     color: #eef2f6;
     border-color: #52606d;
   }
@@ -2054,8 +2009,7 @@ pre {
   .worktree-path,
   .branch-path-note,
   .dead-note,
-  .running-menu-button span,
-  .dead-menu-button span {
+  .project-details summary {
     color: #a7b2bf;
   }
 
@@ -2063,40 +2017,25 @@ pre {
     color: #4ade80;
   }
 
-  .running-menu-button {
-    background: #12331f;
-    color: #bbf7d0;
-    border-color: #16a34a;
+  .inventory-status,
+  .stopped-branches {
+    background: #171d23;
+    color: #cbd5e1;
+    border-color: #52606d;
   }
 
-  .dead-menu-button.has-items {
-    background: #3a2112;
-    color: #fed7aa;
-    border-color: #c2410c;
+  .inventory-status-warning {
+    background: #302312;
+    color: #fcd34d;
+    border-color: #b7791f;
   }
 
-  .running-menu-button.is-empty,
-  .dead-menu-button.is-empty {
-    background: #202832;
-    color: #7d8997;
-    border-color: #3b4652;
+  .dead-main .branch-name-label {
+    color: #cbd5e1;
   }
 
-  .running-menu-button span,
-  .running-list,
-  .running-row,
-  .dead-menu-button,
-  .dead-menu-button span,
-  .dead-list,
-  .dead-row {
-    background: #151b22;
-  }
-
-  .running-menu-button.is-empty span,
-  .dead-menu-button.is-empty span {
-    background: #151b22;
-    color: #7d8997;
-    border-color: #3b4652;
+  .dead-main .branch-name-deleted {
+    color: #f87171;
   }
 
   .access-status {

@@ -23,9 +23,10 @@ def resolve_repo_identity(
     repo_root: Path | None,
     repo_id: str | None,
     repo_name: str | None,
+    repo_override: dict[str, str] | None = None,
 ) -> RepoIdentity:
     root = repo_root or git_root(project_directory)
-    override = load_repo_override(root or project_directory)
+    override = load_repo_override(root or project_directory) if repo_override is None else repo_override
     display_name = repo_name or override.get("display_name") or infer_display_name(root or project_directory)
     repo_id = repo_id or override.get("repo_id")
     if repo_id:

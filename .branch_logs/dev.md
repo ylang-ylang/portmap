@@ -273,3 +273,10 @@
   snapshots; retain real running versions and accurately labeled past failures.
   Propagate remote phases/log tails during polling, finish failed worker targets
   consistently, and scope cached release checks to their updater version.
+- hotfix/worktree-inventory: prepare 0.20.9 with request-local Git discovery
+  reuse, one expansion per worktree family and a four-second inventory RPC.
+  Project only unambiguous host-confirmed family identities for display,
+  preserving raw routing and project files. Flatten single-root branches and
+  expose refresh/last-known inventory without retaining stale service endpoints
+  or enabling Start during incomplete scans. Independent backend, actual-Git,
+  read-only Vox candidate and Chromium verification passed; compiled assets included.
