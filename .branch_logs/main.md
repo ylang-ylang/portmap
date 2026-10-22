@@ -157,3 +157,10 @@
   launch/relaunch fails, and invalidate release-check caches from older updaters.
   Keep legacy tag migration as an explicit official Brew bootstrap, not a
   source patch or compatibility fallback; preserve failed job history.
+- Hotfix v0.20.9: eliminate repeated sibling/submodule/history Git work within
+  a scan and reconcile unambiguous family display identity without changing
+  raw IDs or project files. Surface incomplete inventories and refresh progress,
+  retain explicitly last-known branches only for the same target, and show
+  single-root branches directly. Candidate Vox scan used 171 Git commands in
+  0.426 seconds; backend and real-browser verification passed. Deployment is a
+  separate authorized Brew/web operation, never a side effect of publication.

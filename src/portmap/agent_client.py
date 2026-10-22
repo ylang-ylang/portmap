@@ -87,7 +87,7 @@ def agent_health(*, socket_path: Path | None = None, timeout: float = 1.0) -> di
 
 
 def agent_worktrees(*, socket_path: Path | None = None) -> dict[str, Any]:
-    return request_json("GET", "/worktrees", socket_path=socket_path)
+    return request_json("GET", "/worktrees", socket_path=socket_path, timeout=4.0)
 
 
 def agent_compose_up_worktree(worktree: str, *, socket_path: Path | None = None) -> dict[str, Any]:

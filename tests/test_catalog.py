@@ -342,8 +342,9 @@ def host_collected_catalog() -> dict:
         for container in containers
         if (service := container_to_service(container)) is not None
     ]
-    worktrees = discover_catalog_worktrees(services)
-    worktrees = merge_catalog_history(worktrees, services, generated_at=GENERATED_AT)
+    scan = catalog_module.WorktreeScan()
+    worktrees = discover_catalog_worktrees(services, scan=scan)
+    worktrees = merge_catalog_history(worktrees, services, generated_at=GENERATED_AT, scan=scan)
     enrich_services_from_worktrees(services, worktrees)
     return {"services": services, "worktrees": worktrees}
 

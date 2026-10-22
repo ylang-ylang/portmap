@@ -140,7 +140,7 @@ function branchNote(seed) {
 }
 
 function repoKey(entry) {
-  return text(entry.repo_id || entry.repo_name || "unknown");
+  return text(entry.display_repo_id || entry.repo_id || entry.repo_name || "unknown");
 }
 
 function worktreeDeleted(entry) {
@@ -205,10 +205,10 @@ function applyWorktreeStatus(target, seed) {
 function buildCatalogTree(catalog) {
   const projects = new Map();
 
-  function ensureProject(repoId, repoName) {
-    const cleanRepoId = text(repoId || "unknown");
-    const cleanRepoName = text(repoName || cleanRepoId);
-    const projectKey = repoKey({ repo_id: cleanRepoId, repo_name: cleanRepoName });
+  function ensureProject(seed) {
+    const cleanRepoId = repoKey(seed);
+    const cleanRepoName = text(seed.display_repo_name || seed.repo_name || cleanRepoId);
+    const projectKey = cleanRepoId;
     if (!projects.has(projectKey)) {
       projects.set(projectKey, {
         repo_id: cleanRepoId,
@@ -294,27 +294,26 @@ function buildCatalogTree(catalog) {
     return branch;
   }
 
+  const runningPaths = new Set((catalog?.services || []).map((service) => text(service.worktree)).filter(Boolean));
   for (const record of catalog?.worktrees || []) {
-    const project = ensureProject(record.repo_id, record.repo_name);
+    const project = ensureProject(record);
     const worktree = ensureWorktree(project, record);
-    if (!record.running) {
+    if (!runningPaths.has(text(record.worktree))) {
       worktree.dead_instances.push({
         ...record,
         branch: branchName(record),
         raw_branch: text(record.branch || ""),
         worktree_title: branchNote(record),
-        dead: true,
+        running: false,
       });
-      continue;
     }
-    ensureBranch(worktree, branchName(record), record);
   }
 
   for (const service of catalog?.services || []) {
     const repoId = text(service.repo_id || "unknown");
     const repoName = text(service.repo_name || repoId);
     const cleanBranchName = branchName(service);
-    const project = ensureProject(repoId, repoName);
+    const project = ensureProject(service);
     const worktree = ensureWorktree(project, {
       repo_id: repoId,
       repo_name: repoName,
@@ -560,7 +559,7 @@ function WorktreeStatusBadges({ entry }) {
   if (worktreeDeleted(entry)) {
     badges.push({
       key: "deleted",
-      label: "deleted",
+      label: "Deleted",
       title: text(entry.worktree_status_message || "worktree directory not found"),
       className: "worktree-status-deleted",
     });
@@ -677,45 +676,6 @@ function BranchActions({ branch, onAction }) {
   );
 }
 
-function RunningBranchesMenu({ branches, onAction }) {
-  const [open, setOpen] = useState(false);
-  const hasItems = branches.length > 0;
-  const Chevron = open ? ChevronDown : ChevronRight;
-  return (
-    <div className="running-menu" data-running-branch-menu>
-      <button
-        className={`running-menu-button ${hasItems ? "has-items" : "is-empty"}`}
-        type="button"
-        title="running branches"
-        disabled={!hasItems}
-        aria-expanded={open}
-        onClick={() => {
-          if (hasItems) setOpen(!open);
-        }}
-      >
-        <Chevron className="button-icon" aria-hidden="true" />
-        <GitBranch className="button-icon" aria-hidden="true" />
-        <span>{branches.length}</span>
-        running
-      </button>
-      {open && hasItems ? (
-        <div className="running-list" role="menu">
-          {branches.map((branch) => (
-            <div className="running-row" key={branch.branch}>
-              <div className="running-main">
-                <BranchName entry={branch} />
-                <WorktreeStatusBadges entry={branch} />
-                <span className="branch-path-note" title={branch.worktree}>{branch.worktree_title}</span>
-              </div>
-              <BranchActions branch={branch} onAction={onAction} />
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function EndpointExternal({ endpoint }) {
   if (endpoint.transport_supported === false) {
     return <span>{text(endpoint.reason) || "Unavailable from this client"}</span>;
@@ -803,68 +763,49 @@ function BranchPanel({ branch, onAction }) {
 
 function projectStats(project) {
   const branches = project.worktrees.flatMap((worktree) => worktree.branches);
-  const deadInstances = project.worktrees.flatMap((worktree) => worktree.dead_instances);
+  const inactive = project.worktrees.flatMap((worktree) => worktree.dead_instances);
   return {
     worktreeTotal: project.worktrees.length,
     runningBranchTotal: branches.length,
-    deadBranchTotal: deadInstances.length,
+    stoppedBranchTotal: inactive.filter((entry) => !worktreeDeleted(entry)).length,
+    deletedBranchTotal: inactive.filter(worktreeDeleted).length,
   };
 }
 
-function DeadInstancesMenu({ instances, onStart }) {
-  const [open, setOpen] = useState(false);
-  const hasItems = instances.length > 0;
-  const Chevron = open ? ChevronDown : ChevronRight;
+function StoppedBranches({ instances, onStart, scanAvailable }) {
+  if (!instances.length) return null;
   return (
-    <div className="dead-menu" data-dead-panel>
-      <button
-        className={`dead-menu-button ${hasItems ? "has-items" : "is-empty"}`}
-        type="button"
-        title="dead branches"
-        disabled={!hasItems}
-        aria-expanded={open}
-        onClick={() => {
-          if (hasItems) setOpen(!open);
-        }}
-      >
-        <Chevron className="button-icon" aria-hidden="true" />
-        <GitBranch className="button-icon" aria-hidden="true" />
-        <span>{instances.length}</span>
-        dead
-      </button>
-      {open && hasItems ? (
-        <div className="dead-list" role="menu">
-          {instances.map((instance) => (
-            <div className="dead-row" key={`${instance.worktree}-${instance.branch}-${instance.compose_project || ""}`}>
-              <div className="dead-main">
-                <BranchName entry={instance} />
-                <WorktreeStatusBadges entry={instance} />
-                <span className="branch-path-note" title={instance.worktree}>{instance.worktree_title}</span>
-                {instance.source === "history" ? <span className="dead-note">history</span> : null}
-                {!instance.startable ? <span className="dead-note">{instance.start_error || "not configured to start"}</span> : null}
-              </div>
-              <button
-                className="action-button start-button"
-                title={instance.startable ? `docker compose up -d in ${instance.worktree}` : instance.start_error || "not configured to start"}
-                type="button"
-                disabled={!instance.startable}
-                onClick={() => onStart(instance)}
-              >
-                <Play className="button-icon" aria-hidden="true" />
-                Start
-              </button>
-            </div>
-          ))}
+    <section className="stopped-branches" aria-label="Branches without running services">
+      {instances.map((instance) => (
+        <div className="dead-row" key={`${instance.worktree}-${instance.branch}-${instance.compose_project || ""}`}>
+          <div className="dead-main">
+            <GitBranch className="button-icon" aria-hidden="true" />
+            <BranchName entry={instance} />
+            <WorktreeStatusBadges entry={instance} />
+            {!worktreeDeleted(instance) ? <span className="dead-note">Stopped</span> : null}
+            <span className="branch-path-note" title={instance.worktree}>{instance.worktree_title}</span>
+            {instance.source === "history" ? <span className="dead-note">history</span> : null}
+            {!instance.startable ? <span className="dead-note">{instance.start_error || "not configured to start"}</span> : null}
+          </div>
+          <button
+            className="action-button start-button"
+            title={!scanAvailable ? "Refresh the branch scan successfully before starting" : instance.startable ? `docker compose up -d in ${instance.worktree}` : instance.start_error || "not configured to start"}
+            type="button"
+            disabled={!scanAvailable || !instance.startable || worktreeDeleted(instance)}
+            onClick={() => onStart(instance)}
+          >
+            <Play className="button-icon" aria-hidden="true" />
+            Start
+          </button>
         </div>
-      ) : null}
-    </div>
+      ))}
+    </section>
   );
 }
 
-function WorktreePanel({ worktree, onAction, onStart }) {
+function WorktreePanel({ worktree, onAction, onStart, scanAvailable }) {
   const [open, setOpen] = useState(true);
   const Chevron = open ? ChevronDown : ChevronRight;
-  const hasBranches = worktree.branches.length > 0;
   const pathLabel = text(worktree.worktree_path_label || worktree.worktree);
   const pathTitle = text(worktree.worktree_path_title || worktree.worktree);
   return (
@@ -880,23 +821,23 @@ function WorktreePanel({ worktree, onAction, onStart }) {
               submodule
             </span>
           ) : null}
-          {pathLabel ? <span className="worktree-path" title={pathTitle}>{pathLabel}</span> : null}
+          {pathLabel ? <span className="worktree-path" title={pathTitle}>{worktree.worktree}</span> : null}
         </button>
         <div className="worktree-header-right">
-          <RunningBranchesMenu branches={worktree.branches} onAction={onAction} />
-          <DeadInstancesMenu instances={worktree.dead_instances} onStart={onStart} />
+          <StatPill label={`${worktree.branches.length} running`} />
+          <StatPill label={`${worktree.dead_instances.filter((entry) => !worktreeDeleted(entry)).length} stopped`} />
         </div>
       </div>
-      {open && hasBranches ? (
+      {open ? (
         <div className="worktree-body">
-          <BranchStack worktree={worktree} onAction={onAction} onStart={onStart} />
+          <BranchStack worktree={worktree} onAction={onAction} onStart={onStart} scanAvailable={scanAvailable} />
         </div>
       ) : null}
     </section>
   );
 }
 
-function ProjectPanel({ project, onAction, onStart }) {
+function ProjectPanel({ project, onAction, onStart, scanAvailable }) {
   const [open, setOpen] = useState(true);
   const stats = projectStats(project);
   const Chevron = open ? ChevronDown : ChevronRight;
@@ -909,22 +850,32 @@ function ProjectPanel({ project, onAction, onStart }) {
           <span className="project-name">{project.repo_name || project.repo_id}</span>
         </button>
         <div className="project-header-right">
-          <div className="project-id">repo_id <CodeText value={project.repo_id || ""} /></div>
+          <details className="project-details">
+            <summary>Details</summary>
+            <div>Display repo ID <CodeText value={project.repo_id} /></div>
+            {project.worktrees.map((worktree) => (
+              <div key={worktree.worktree}>Worktree root <CodeText value={worktree.worktree} /></div>
+            ))}
+          </details>
           <div className="summary-pills">
-            <StatPill label={`${stats.worktreeTotal} wt root`} />
+            {stats.worktreeTotal > 1 ? <StatPill label={`${stats.worktreeTotal} wt roots`} /> : null}
             <StatPill label={`${stats.runningBranchTotal} running`} />
-            {stats.deadBranchTotal ? <StatPill label={`${stats.deadBranchTotal} dead`} /> : null}
+            {stats.stoppedBranchTotal ? <StatPill label={`${stats.stoppedBranchTotal} ${scanAvailable ? "" : "last-known "}stopped`} /> : null}
+            {stats.deletedBranchTotal ? <StatPill label={`${stats.deletedBranchTotal} ${scanAvailable ? "" : "last-known "}deleted`} /> : null}
           </div>
         </div>
       </div>
       {open ? (
         <div className="project-body">
-          {project.worktrees.map((worktree) => (
+          {project.worktrees.length === 1 ? (
+            <BranchStack worktree={project.worktrees[0]} onAction={onAction} onStart={onStart} scanAvailable={scanAvailable} />
+          ) : project.worktrees.map((worktree) => (
             <WorktreePanel
               worktree={worktree}
-              key={worktree.id || worktree.worktree}
+              key={worktree.worktree || worktree.id}
               onAction={onAction}
               onStart={onStart}
+              scanAvailable={scanAvailable}
             />
           ))}
         </div>
@@ -933,22 +884,23 @@ function ProjectPanel({ project, onAction, onStart }) {
   );
 }
 
-function BranchStack({ worktree, onAction, onStart }) {
+function BranchStack({ worktree, onAction, onStart, scanAvailable }) {
   return (
     <>
       {worktree.branches.map((branch) => (
         <BranchPanel branch={branch} key={branch.branch} onAction={onAction} />
       ))}
+      <StoppedBranches instances={worktree.dead_instances} onStart={onStart} scanAvailable={scanAvailable} />
     </>
   );
 }
 
-function CatalogTree({ catalog, onAction, onStart }) {
+function CatalogTree({ catalog, onAction, onStart, scanAvailable }) {
   const projects = useMemo(() => buildCatalogTree(catalog), [catalog]);
   if (!projects.length) {
     return (
       <section className="catalog-tree" data-catalog-tree>
-        <div className="empty">No portmap-managed services are currently visible.</div>
+        <div className="empty">{scanAvailable ? "No portmap-managed services or branches are currently visible." : "Branch inventory is unknown. No running services are currently visible."}</div>
       </section>
     );
   }
@@ -960,6 +912,7 @@ function CatalogTree({ catalog, onAction, onStart }) {
           key={project.repo_id || project.repo_name}
           onAction={onAction}
           onStart={onStart}
+          scanAvailable={scanAvailable}
         />
       ))}
     </section>
@@ -2619,6 +2572,47 @@ function MachineManager({ active, canManageConnections, onMachinesRefresh, onCon
 
 
 
+function machineInventoryKey(machine) {
+  if (!machine) return "";
+  return JSON.stringify([machine.id, machine.domain, machine.via, machine.target].map(text));
+}
+
+// Only reuse host-scanned structure; services and their endpoints always come
+// from the current catalog response. Nothing is persisted across page loads.
+function branchInventoryCatalog(catalog, snapshot) {
+  if (!catalog || catalog.agent?.available !== false || !snapshot) return catalog;
+  const records = new Map(snapshot.worktrees.map((record) => [text(record.worktree), record]));
+  for (const record of catalog.worktrees || []) {
+    const path = text(record.worktree);
+    records.set(path, { ...records.get(path), ...record });
+  }
+  const structuralKeys = [
+    "display_repo_id", "display_repo_name", "display_branch",
+    "display_worktree_root", "display_worktree_root_title",
+    "worktree_root", "worktree_root_title",
+    "submodule_branch", "submodule_relative_path", "submodule_sha",
+    "superproject_branch", "superproject_repo_id", "superproject_repo_name", "superproject_worktree",
+  ];
+  const services = (catalog.services || []).map((service) => {
+    const record = records.get(text(service.worktree));
+    if (!record) return service;
+    const metadata = {};
+    for (const key of structuralKeys) {
+      const branchSpecific = key === "display_branch" || key.startsWith("submodule_") || key.startsWith("superproject_");
+      if (branchSpecific && text(record.branch) !== text(service.branch)) continue;
+      if (record[key] && !service[key]) metadata[key] = record[key];
+    }
+    return { ...service, ...metadata };
+  });
+  const runningPaths = new Set(services.map((service) => text(service.worktree)));
+  const worktrees = Array.from(records.values()).map((record) => (
+    runningPaths.has(text(record.worktree))
+      ? { ...record, running: true, worktree_exists: null, worktree_status: worktreeSubmodule(record) ? "submodule" : "", worktree_status_message: "" }
+      : { ...record, running: false }
+  ));
+  return { ...catalog, services, worktrees };
+}
+
 function CatalogApp() {
   const [activePage, setActivePage] = useState("catalog");
   // null = not yet fetched (loading or failed); [] or [...] = loaded
@@ -2629,6 +2623,11 @@ function CatalogApp() {
   const [catalog, setCatalog] = useState(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState("");
+  const [catalogRefreshing, setCatalogRefreshing] = useState(false);
+  const [catalogIdentity, setCatalogIdentity] = useState("");
+  const [branchSnapshot, setBranchSnapshot] = useState(null);
+  const selectedMachine = machines ? machines.find((machine) => machine.id === selectedMachineId) : null;
+  const selectedInventoryKey = machineInventoryKey(selectedMachine);
   const [actionMessage, setActionMessage] = useState(null);
   const [actionLog, setActionLog] = useState([]);
   const [canManageConnections, setCanManageConnections] = useState(false);
@@ -2733,6 +2732,23 @@ function CatalogApp() {
   // Both the useEffect and reloadCatalog write to this ref after aborting the prior value,
   // so whichever started last is the one that may apply its result.
   const catalogAbortRef = useRef(null);
+  const catalogPendingRef = useRef(false);
+
+  function acceptCatalog(data) {
+    if (data.machine && machineInventoryKey(data.machine) !== selectedInventoryKey) {
+      throw new Error("Catalog machine identity changed; refresh the machine list before retrying");
+    }
+    setCatalog(data);
+    setCatalogIdentity(selectedInventoryKey);
+    setCatalogError("");
+    if (data.agent?.available !== false) {
+      setBranchSnapshot({
+        identity: selectedInventoryKey,
+        worktrees: Array.isArray(data.worktrees) ? data.worktrees : [],
+        scannedAt: data.agent?.generated_at || data.generated_at || new Date().toISOString(),
+      });
+    }
+  }
 
   // Fetch machine list. keepSelection=true updates the list without changing selectedMachineId.
   // Failures are surfaced as errors; no silent fallback. /api/machines works in both private
@@ -2757,14 +2773,17 @@ function CatalogApp() {
     }
   }
 
-  // When selectedMachineId changes: abort any in-flight catalog request, clear the tree,
-  // fetch the new machine's catalog. Always sends machine= — omitting it causes the server
-  // to select by Host header, which returns the wrong catalog on SSH-apex URLs.
+  // Clear both current and last-known inventory whenever the actual target changes.
+  // Always send machine=; Host-based selection can refer to another SSH-apex catalog.
   useEffect(() => {
-    if (selectedMachineId === null) return;
+    if (selectedMachineId === null || !selectedInventoryKey) return;
     if (catalogAbortRef.current) catalogAbortRef.current.abort();
     const controller = new AbortController();
     catalogAbortRef.current = controller;
+    catalogPendingRef.current = true;
+    setBranchSnapshot(null);
+    setCatalogIdentity("");
+    setCatalogRefreshing(false);
     setCatalog(null);
     setCatalogLoading(true);
     setCatalogError("");
@@ -2776,19 +2795,20 @@ function CatalogApp() {
       })
       .then((data) => {
         if (catalogAbortRef.current === controller) {
-          setCatalog(data);
-          setCatalogError("");
+          acceptCatalog(data);
+          catalogPendingRef.current = false;
           setCatalogLoading(false);
         }
       })
       .catch((err) => {
         if (err.name !== "AbortError" && catalogAbortRef.current === controller) {
           setCatalogError(`Failed to load catalog: ${err.message || err}`);
+          catalogPendingRef.current = false;
           setCatalogLoading(false);
         }
       });
     return () => controller.abort();
-  }, [selectedMachineId]);
+  }, [selectedMachineId, selectedInventoryKey]);
 
   useEffect(() => { loadMachines(); }, []);
 
@@ -2797,10 +2817,12 @@ function CatalogApp() {
   // if an older reloadCatalog for A then finishes, its controller !== catalogAbortRef.current
   // and the result is silently discarded without touching state.
   async function reloadCatalog() {
-    if (selectedMachineId === null) return;
+    if (selectedMachineId === null || !selectedInventoryKey || catalogPendingRef.current) return;
     if (catalogAbortRef.current) catalogAbortRef.current.abort();
     const controller = new AbortController();
     catalogAbortRef.current = controller;
+    catalogPendingRef.current = true;
+    setCatalogRefreshing(true);
     try {
       const res = await fetch(
         `/registry.json?machine=${encodeURIComponent(selectedMachineId)}`,
@@ -2809,12 +2831,16 @@ function CatalogApp() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (catalogAbortRef.current === controller) {
-        setCatalog(data);
-        setCatalogError("");
+        acceptCatalog(data);
       }
     } catch (err) {
       if (err.name !== "AbortError" && catalogAbortRef.current === controller) {
         setCatalogError(`Failed to reload catalog: ${err.message || err}`);
+      }
+    } finally {
+      if (catalogAbortRef.current === controller) {
+        catalogPendingRef.current = false;
+        setCatalogRefreshing(false);
       }
     }
     // Refresh machines list; never changes selection.
@@ -2872,7 +2898,7 @@ function CatalogApp() {
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", visibilityChanged);
     };
-  }, [activePage, selectedMachineId, catalogLoading]);
+  }, [activePage, selectedMachineId, selectedInventoryKey, catalogLoading]);
 
   function handleSelectMachine(id) {
     setActivePage("catalog");
@@ -2918,6 +2944,7 @@ function CatalogApp() {
   }
 
   async function handleStart(worktree) {
+    if (!scanAvailable) return;
     const machineId = selectedMachineId;
     const machine = machines ? machines.find((m) => m.id === machineId) : null;
     const machineLabel = machine
@@ -2950,7 +2977,6 @@ function CatalogApp() {
     if (!result.failed) await reloadCatalog();
   }
 
-  const selectedMachine = machines ? machines.find((m) => m.id === selectedMachineId) : null;
   const machineDisappeared = machines !== null && machines.length > 0
     && selectedMachineId !== null && !selectedMachine;
   // machineUnavailable: declared unavailable by machines API OR live probe confirms failure.
@@ -2958,6 +2984,15 @@ function CatalogApp() {
   // where the backend still reports available:true (AccessSnapshot is stale on catalog path).
   const machineUnavailable = selectedMachine && (
     !selectedMachine.available || isMachineKnownFailed(selectedMachine, connHealth)
+  );
+  const currentCatalog = catalogIdentity === selectedInventoryKey ? catalog : null;
+  const currentSnapshot = branchSnapshot?.identity === selectedInventoryKey ? branchSnapshot : null;
+  const scanAvailable = Boolean(currentCatalog) && currentCatalog.agent?.available !== false && !catalogError;
+  const partialInventory = currentCatalog?.agent?.available === false;
+  const staleInventory = partialInventory && Boolean(currentSnapshot);
+  const visibleCatalog = useMemo(
+    () => branchInventoryCatalog(currentCatalog, currentSnapshot),
+    [currentCatalog, currentSnapshot],
   );
 
   let catalogContent;
@@ -3004,7 +3039,7 @@ function CatalogApp() {
         </div>
       </section>
     );
-  } else if (catalogLoading) {
+  } else if (catalogLoading || (!currentCatalog && !catalogError)) {
     catalogContent = (
       <section className="catalog-tree" data-catalog-tree>
         <div className="empty">
@@ -3016,13 +3051,12 @@ function CatalogApp() {
     catalogContent = (
       <section className="catalog-tree" data-catalog-tree>
         <div className="empty load-error">
-          {catalogError}{" "}
-          <button className="action-button" type="button" onClick={() => reloadCatalog()}>Retry</button>
+          {catalogError}
         </div>
       </section>
     );
   } else {
-    catalogContent = <CatalogTree catalog={catalog} onAction={handleAction} onStart={handleStart} />;
+    catalogContent = <CatalogTree catalog={visibleCatalog} onAction={handleAction} onStart={handleStart} scanAvailable={scanAvailable} />;
   }
 
   return (
@@ -3030,7 +3064,7 @@ function CatalogApp() {
       <header className="app-header">
         <div className="title-row">
           <h1>portmap catalog</h1>
-          {activePage === "catalog" && <AccessStatus catalog={catalog} />}
+          {activePage === "catalog" && <AccessStatus catalog={currentCatalog} />}
         </div>
         <CatalogTabs
           machines={machines || []}
@@ -3056,6 +3090,39 @@ function CatalogApp() {
             <button className="action-button" type="button" onClick={() => loadMachines({ keepSelection: true })}>Retry</button>
           </p>
         )}
+        {selectedMachine && !machineDisappeared && !machineUnavailable ? (
+          <div
+            className={`inventory-status ${partialInventory || catalogError ? "inventory-status-warning" : ""}`}
+            role="status"
+            aria-live="polite"
+            aria-busy={catalogLoading || catalogRefreshing}
+          >
+            <div className="inventory-status-copy">
+              <strong>
+                {partialInventory
+                  ? "Branch scan failed — list incomplete."
+                  : catalogError ? "Branch inventory could not be refreshed."
+                    : catalogLoading || catalogRefreshing ? "Refreshing branch inventory…" : "Branch inventory up to date."}
+              </strong>
+              {partialInventory ? (
+                <span>{staleInventory ? "Last-known branches are stale; running services are current." : "Branch inventory is unknown; only currently visible services are shown."} Start is disabled until a successful scan.</span>
+              ) : null}
+              {(catalogLoading || catalogRefreshing) && partialInventory ? <span>Refreshing…</span> : null}
+              <span title={currentSnapshot?.scannedAt || ""}>
+                Last successful branch scan: {currentSnapshot ? formatCheckedAt(currentSnapshot.scannedAt) : "not yet available"}.
+              </span>
+            </div>
+            <button
+              className="action-button"
+              type="button"
+              disabled={catalogLoading || catalogRefreshing}
+              onClick={() => reloadCatalog()}
+            >
+              <RefreshCw className="button-icon" aria-hidden="true" />
+              {catalogLoading || catalogRefreshing ? "Refreshing…" : partialInventory || catalogError ? "Retry" : "Refresh"}
+            </button>
+          </div>
+        ) : null}
         <ActionMessage message={actionMessage} />
         <ActionLog entries={actionLog} />
         {catalogContent}

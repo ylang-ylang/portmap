@@ -336,7 +336,7 @@ def _single_check_flag(query: str) -> bool | None:
 
 
 def collect_agent_worktrees() -> dict[str, Any]:
-    from .catalog import container_to_service, discover_catalog_worktrees, docker_get, merge_catalog_history
+    from .catalog import WorktreeScan, container_to_service, discover_catalog_worktrees, docker_get, merge_catalog_history
 
     containers = docker_get("/containers/json?all=0")
     services = [
@@ -345,8 +345,9 @@ def collect_agent_worktrees() -> dict[str, Any]:
         if (service := container_to_service(container)) is not None
     ]
     generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
-    worktrees = discover_catalog_worktrees(services)
-    worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at)
+    scan = WorktreeScan()
+    worktrees = discover_catalog_worktrees(services, scan=scan)
+    worktrees = merge_catalog_history(worktrees, services, generated_at=generated_at, scan=scan)
     return {
         "ok": True,
         "generated_at": generated_at,
