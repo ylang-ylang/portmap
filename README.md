@@ -1043,9 +1043,15 @@ shared across local, direct, and SSH views.
 
 While the catalog is visible, it reloads after each 15-second idle interval
 and when the browser window regains focus or the tab becomes visible. Hidden
-tabs pause polling. Updates preserve the selected machine; requests that fail
-offer **Retry** rather than requiring a persistent Refresh button. This updates
-the displayed data, not the underlying SSH connection or remote services.
+tabs pause polling. A compact status row shows refresh progress, the last
+successful branch scan, and **Refresh** or **Retry**; overlapping requests are
+coalesced. This updates displayed data, not SSH connections or remote services.
+An unavailable agent means the branch inventory is incomplete, not empty.
+The page can retain the last successful inventory in memory for the same machine
+and connection target, explicitly marked as last-known; it disables Start until
+a successful scan. Fresh service data still supplies running endpoints and
+service actions. Switching targets discards this snapshot, and a successful
+empty scan clears it rather than retaining branches indefinitely.
 
 The private connection list accepts a host/IP/URL or SSH alias, with direct
 or SSH mode. Add, edit, connect, disconnect, delete, and check use the same
@@ -1060,10 +1066,27 @@ discovered under its explicit `PORTMAP_CATALOG_WORKTREE_ROOTS` is listed, includ
 worktrees without a Compose/endpoint contract. Other discovered siblings still
 need a running service or project contract. Existing checked-out worktrees remain
 in catalog history; Git refs that are not checked out never create projects.
-Expand the stopped/dead group to see stopped branches. Start is enabled only when
+Stopped branches are listed directly, separately from host-confirmed deleted
+directories. A project with one worktree root shows its branches without a
+redundant root panel; the root path remains in Details. Multiple roots remain
+separate. Start is enabled only when
 the worktree has a usable Compose selection and `.portmap/endpoints.toml`; otherwise
 the row explains the missing configuration and disables Start. Listing a worktree
 does not create containers or copy another branch's deployment configuration.
+
+Discovery reuses Git queries and materialized records within one host-agent
+collection, expands each Git worktree family once, and skips already scanned
+history paths. Each collection starts fresh; there is no cross-request Git cache.
+The worktree RPC has a four-second budget, separate from short health checks.
+
+For display grouping, the host agent can apply one unambiguous explicit
+`.portmap/repo.toml` identity to worktrees sharing a verified Git common directory,
+including siblings without that branch-local file. Conflicting explicit
+identities or names are not arbitrarily reconciled. This is display metadata
+only: original repository IDs, Compose identities, endpoint routes and project
+files remain unchanged. Matching names or Git ancestry alone do not merge
+independent roots, and logical submodule groups keep their existing boundaries.
+
 `Down` removes the selected managed Compose project's containers and networks,
 not the access infrastructure. JSON is at:
 

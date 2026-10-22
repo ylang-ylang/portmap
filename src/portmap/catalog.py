@@ -15,7 +15,7 @@ import time
 import urllib.parse
 from http.server import ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .agent_client import (
     AgentRequestError,
@@ -66,7 +66,7 @@ from .downloads import (
 from .errors import ConfigError, PortmapError
 from .compose_takeover import generated_compose_project, plan_docker_compose_command
 from .project_compose import ENDPOINT_CONFIG, find_compose_file
-from .repo_identity import git, git_branch, resolve_repo_identity, stable_hash
+from .repo_identity import RepoIdentity, git, git_branch, load_repo_override, resolve_repo_identity, stable_hash
 from .settings import load_portmap_settings
 from .slug import slugify
 from .web_static import STATIC_ROOT, StaticHandler, vite_public_root_asset
@@ -93,6 +93,8 @@ AGENT_AUTHORITATIVE_WORKTREE_KEYS = {
     "branch_tip_epoch",
     "branch_tip_time",
     "branch_tip_sha",
+    "display_repo_id",
+    "display_repo_name",
     "display_branch",
     "display_worktree_root",
     "display_worktree_root_title",
@@ -274,6 +276,8 @@ def enrich_services_from_worktrees(services: list[dict[str, Any]], worktrees: li
             "branch_tip_epoch",
             "branch_tip_time",
             "branch_tip_sha",
+            "display_repo_id",
+            "display_repo_name",
             "display_branch",
             "display_worktree_root",
             "display_worktree_root_title",
@@ -436,30 +440,125 @@ def parse_host_rule(rule: str) -> str | None:
     return match.group(1)
 
 
-def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    running_by_worktree = running_services_by_worktree(services)
+class WorktreeScan:
+    """Read-only host queries shared only for one inventory collection."""
+
+    def __init__(self) -> None:
+        self._queries: dict[tuple[Any, Path], Any] = {}
+        self._siblings: dict[Path, tuple[Path, ...]] = {}
+        self._identities: dict[Path, RepoIdentity] = {}
+        self.records: dict[Path, dict[str, Any] | None] = {}
+
+    def query(self, reader: Callable[[Path], Any], path: Path) -> Any:
+        key = (reader, path)
+        if key not in self._queries:
+            self._queries[key] = reader(path)
+        return self._queries[key]
+
+    def top_level(self, path: Path) -> Path | None:
+        top_level = self.query(git_top_level, path)
+        if top_level is not None:
+            self._queries[(git_top_level, top_level)] = top_level
+        return top_level
+
+    def siblings(self, path: Path) -> tuple[Path, ...]:
+        top_level = self.top_level(path)
+        if top_level is None:
+            return ()
+        family = self.query(git_common_dir, top_level) or top_level
+        if family not in self._siblings:
+            paths = (top_level, *git_worktree_paths(top_level))
+            siblings = dict.fromkeys(
+                sibling_top
+                for sibling in paths
+                if (sibling_top := self.top_level(sibling)) is not None
+            )
+            self._siblings[family] = tuple(siblings)
+        return self._siblings[family]
+
+    def identity(self, path: Path) -> RepoIdentity:
+        if path not in self._identities:
+            self._identities[path] = resolve_repo_identity(
+                project_directory=path,
+                repo_root=path,
+                repo_id=None,
+                repo_name=None,
+                repo_override=self.query(load_repo_override, path),
+            )
+        return self._identities[path]
+
+    def reconcile_display_identity(self, records: list[dict[str, Any]]) -> None:
+        families: dict[Path, list[dict[str, Any]]] = {}
+        for record in records:
+            record.pop("display_repo_id", None)
+            record.pop("display_repo_name", None)
+            path = self.top_level(Path(record["worktree"]))
+            if path is None:
+                continue
+            common_dir = self.query(git_common_dir, path)
+            if common_dir is not None:
+                families.setdefault(common_dir, []).append(record)
+        explicit_by_family: dict[Path, set[tuple[str, str]]] = {}
+        # Include materialized but unqualified siblings: an invisible conflicting
+        # override must not cause the visible part of its family to collapse.
+        known_paths = set(self.records) | {Path(record["worktree"]) for record in records}
+        for path in known_paths:
+            common_dir = self.query(git_common_dir, path)
+            if common_dir not in families:
+                continue
+            if self.query(load_repo_override, path).get("repo_id"):
+                identity = self.identity(path)
+                explicit_by_family.setdefault(common_dir, set()).add(
+                    (identity.repo_id, identity.display_name)
+                )
+        for common_dir, members in families.items():
+            explicit = explicit_by_family.get(common_dir, set())
+            # No guessing from IDs/names, nor choosing among conflicting config.
+            if len(explicit) != 1:
+                continue
+            repo_id, repo_name = next(iter(explicit))
+            for member in members:
+                member["display_repo_id"] = repo_id
+                member["display_repo_name"] = repo_name
+
+
+def discover_catalog_worktrees(
+    services: list[dict[str, Any]], *, scan: WorktreeScan | None = None,
+) -> list[dict[str, Any]]:
+    scan = scan if scan is not None else WorktreeScan()
+    running_by_worktree = running_services_by_worktree(services, scan=scan)
     candidates: dict[str, Path] = {}
     configured_worktrees: dict[str, Path] = {}
+    expanded_families: set[Path] = set()
+
+    def add_siblings(path: Path) -> None:
+        top_level = scan.top_level(path)
+        if top_level is None:
+            return
+        family = scan.query(git_common_dir, top_level) or top_level
+        if family in expanded_families:
+            return
+        expanded_families.add(family)
+        for sibling in scan.siblings(top_level):
+            add_existing_worktree_candidate(candidates, sibling, scan=scan)
 
     for worktree in running_by_worktree:
         path = Path(worktree)
-        add_existing_worktree_candidate(candidates, path)
-        for sibling in git_worktree_paths(path):
-            add_existing_worktree_candidate(candidates, sibling)
+        add_existing_worktree_candidate(candidates, path, scan=scan)
+        add_siblings(path)
 
     for root in catalog_worktree_roots():
         for candidate in root_worktree_candidates(root):
-            add_existing_worktree_candidate(configured_worktrees, candidate)
-            for sibling in git_worktree_paths(candidate):
-                add_existing_worktree_candidate(candidates, sibling)
+            add_existing_worktree_candidate(configured_worktrees, candidate, scan=scan)
+            add_siblings(candidate)
 
     candidates.update(configured_worktrees)
 
-    add_submodule_worktree_candidates(candidates)
+    add_submodule_worktree_candidates(candidates, scan=scan)
 
     worktrees = []
     for path in candidates.values():
-        worktree = catalog_worktree_from_path(path, running_by_worktree)
+        worktree = catalog_worktree_from_path(path, running_by_worktree, scan=scan)
         if worktree is None:
             continue
         if (
@@ -470,6 +569,7 @@ def discover_catalog_worktrees(services: list[dict[str, Any]]) -> list[dict[str,
         ):
             continue
         worktrees.append(worktree)
+    scan.reconcile_display_identity(worktrees)
     worktrees.sort(key=catalog_worktree_sort_key)
     return worktrees
 
@@ -479,25 +579,31 @@ def merge_catalog_history(
     services: list[dict[str, Any]],
     *,
     generated_at: str,
+    scan: WorktreeScan | None = None,
 ) -> list[dict[str, Any]]:
-    running_by_worktree = running_services_by_worktree(services)
+    scan = scan if scan is not None else WorktreeScan()
+    running_by_worktree = running_services_by_worktree(services, scan=scan)
     merged = {
         worktree_instance_key(worktree): dict(worktree, source="current")
         for worktree in current_worktrees
     }
     current_worktree_paths = {str(worktree.get("worktree") or "") for worktree in current_worktrees}
+    seen_paths = set(current_worktree_paths)
     previous = read_catalog_history()
 
     for historical in previous:
         raw_worktree = str(historical.get("worktree") or "").strip()
-        if not raw_worktree:
+        if not raw_worktree or raw_worktree in current_worktree_paths:
             continue
-        record = catalog_worktree_from_path(Path(raw_worktree), running_by_worktree)
+        record = catalog_worktree_from_path(Path(raw_worktree), running_by_worktree, scan=scan)
         if record is None:
             continue
         historical_branch = slugify(str(historical.get("branch") or record["branch"]))
         if historical_branch != record["branch"]:
             continue
+        if record["worktree"] in seen_paths:
+            continue
+        seen_paths.add(record["worktree"])
         key = worktree_instance_key(record)
         if key in merged:
             continue
@@ -510,6 +616,7 @@ def merge_catalog_history(
         if worktree.get("source") == "current":
             worktree["last_seen_at"] = generated_at
 
+    scan.reconcile_display_identity(worktrees)
     worktrees.sort(key=catalog_worktree_sort_key)
     write_catalog_history(worktrees, generated_at=generated_at)
     return worktrees
@@ -598,13 +705,15 @@ def write_catalog_history(worktrees: list[dict[str, Any]], *, generated_at: str)
         return
 
 
-def running_services_by_worktree(services: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def running_services_by_worktree(
+    services: list[dict[str, Any]], *, scan: WorktreeScan | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for service in services:
         raw_worktree = str(service.get("worktree") or "").strip()
         if not raw_worktree:
             continue
-        key = canonical_worktree_path(Path(raw_worktree))
+        key = canonical_worktree_path(Path(raw_worktree), scan=scan)
         grouped.setdefault(key, []).append(service)
     return grouped
 
@@ -642,63 +751,64 @@ def root_worktree_candidates(root: Path) -> list[Path]:
             candidates.extend(grandchild for grandchild in child.iterdir() if grandchild.is_dir())
         except OSError:
             continue
-    return candidates
+    return list(dict.fromkeys(candidates))
 
 
 def looks_like_worktree_container(path: Path) -> bool:
     return path.name.endswith(("@wt", "@worktree"))
 
 
-def add_existing_worktree_candidate(candidates: dict[str, Path], path: Path) -> None:
-    top_level = git_top_level(path)
+def add_existing_worktree_candidate(
+    candidates: dict[str, Path], path: Path, *, scan: WorktreeScan | None = None,
+) -> None:
+    top_level = scan.top_level(path) if scan is not None else git_top_level(path)
     if top_level is None or not top_level.exists():
         return
     candidates[str(top_level)] = top_level
 
 
-def add_submodule_worktree_candidates(candidates: dict[str, Path]) -> None:
-    seed_paths = list(candidates.values())
-    for path in seed_paths:
-        for candidate in submodule_worktree_candidates(path):
-            add_existing_worktree_candidate(candidates, candidate)
+def add_submodule_worktree_candidates(
+    candidates: dict[str, Path], *, scan: WorktreeScan | None = None,
+) -> None:
+    scan = scan if scan is not None else WorktreeScan()
+    expanded: set[tuple[Path, Path | None]] = set()
+    for path in tuple(candidates.values()):
+        superproject = scan.query(git_superproject, path)
+        root = superproject or path
+        family = scan.query(git_common_dir, root) or root
+        relative = relative_path_under(path, superproject) if superproject is not None else None
+        key = (family, relative)
+        if key in expanded:
+            continue
+        expanded.add(key)
+        for candidate in submodule_worktree_candidates(path, scan=scan):
+            add_existing_worktree_candidate(candidates, candidate, scan=scan)
 
 
-def submodule_worktree_candidates(path: Path) -> list[Path]:
-    top_level = git_top_level(path)
+def submodule_worktree_candidates(path: Path, *, scan: WorktreeScan | None = None) -> list[Path]:
+    scan = scan if scan is not None else WorktreeScan()
+    top_level = scan.top_level(path)
     if top_level is None:
         return []
 
-    superproject = git_superproject(top_level)
+    superproject = scan.query(git_superproject, top_level)
     if superproject is not None:
         relative = relative_path_under(top_level, superproject)
         if relative is None:
             return []
         return [
             sibling / relative
-            for sibling in worktree_self_and_siblings(superproject)
+            for sibling in scan.siblings(superproject)
             if (sibling / relative).exists()
         ]
 
     candidates: list[Path] = []
-    for superproject_worktree in worktree_self_and_siblings(top_level):
-        for submodule_path in git_submodule_paths(superproject_worktree):
+    for superproject_worktree in scan.siblings(top_level):
+        for submodule_path in scan.query(git_submodule_paths, superproject_worktree):
             candidate = superproject_worktree / submodule_path
             if candidate.exists():
                 candidates.append(candidate)
     return candidates
-
-
-def worktree_self_and_siblings(path: Path) -> list[Path]:
-    top_level = git_top_level(path)
-    if top_level is None:
-        return []
-    siblings = [top_level, *git_worktree_paths(top_level)]
-    deduped: dict[str, Path] = {}
-    for sibling in siblings:
-        sibling_top_level = git_top_level(sibling)
-        if sibling_top_level is not None:
-            deduped[str(sibling_top_level)] = sibling_top_level
-    return list(deduped.values())
 
 
 def git_submodule_paths(path: Path) -> list[Path]:
@@ -751,8 +861,8 @@ def relative_path_under(child: Path, parent: Path) -> Path | None:
     return relative
 
 
-def canonical_worktree_path(path: Path) -> str:
-    top_level = git_top_level(path)
+def canonical_worktree_path(path: Path, *, scan: WorktreeScan | None = None) -> str:
+    top_level = scan.top_level(path) if scan is not None else git_top_level(path)
     if top_level is not None:
         return str(top_level)
     try:
@@ -803,15 +913,19 @@ def git_superproject(path: Path) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
-def worktree_root_from_top_level(top_level: Path) -> tuple[str, str]:
-    common_dir = git_common_dir(top_level)
+def worktree_root_from_top_level(
+    top_level: Path, *, scan: WorktreeScan | None = None,
+) -> tuple[str, str]:
+    common_dir = scan.query(git_common_dir, top_level) if scan is not None else git_common_dir(top_level)
     if common_dir is None:
         return str(top_level), top_level.name
     title = common_dir.parent.name if common_dir.name == ".git" else common_dir.name
     return str(common_dir), title
 
 
-def worktree_status_from_raw(raw_worktree: str | None, *, top_level: Path | None = None) -> dict[str, Any]:
+def worktree_status_from_raw(
+    raw_worktree: str | None, *, top_level: Path | None = None, scan: WorktreeScan | None = None,
+) -> dict[str, Any]:
     """Inspect a path in the caller's host filesystem, never a container label."""
     if not raw_worktree:
         return {
@@ -830,8 +944,11 @@ def worktree_status_from_raw(raw_worktree: str | None, *, top_level: Path | None
             "worktree_superproject": None,
         }
 
-    resolved_top_level = top_level or git_top_level(path)
-    superproject = git_superproject(resolved_top_level or path)
+    resolved_top_level = top_level or (scan.top_level(path) if scan is not None else git_top_level(path))
+    superproject = (
+        scan.query(git_superproject, resolved_top_level or path)
+        if scan is not None else git_superproject(resolved_top_level or path)
+    )
     if superproject is not None:
         return {
             "worktree_exists": True,
@@ -854,8 +971,10 @@ def submodule_display_metadata(
     child_repo_id: str,
     branch: str,
     tip: dict[str, int | str],
+    scan: WorktreeScan | None = None,
 ) -> dict[str, Any]:
-    superproject = git_superproject(top_level)
+    scan = scan if scan is not None else WorktreeScan()
+    superproject = scan.query(git_superproject, top_level)
     if superproject is None:
         return {}
 
@@ -863,13 +982,8 @@ def submodule_display_metadata(
     if relative is None:
         return {}
 
-    superproject_identity = resolve_repo_identity(
-        project_directory=superproject,
-        repo_root=superproject,
-        repo_id=None,
-        repo_name=None,
-    )
-    superproject_branch = worktree_branch(superproject)
+    superproject_identity = scan.identity(superproject)
+    superproject_branch = scan.query(worktree_branch, superproject)
     relative_text = relative.as_posix()
     display_root = f"submodule:{child_repo_id}:{superproject_identity.repo_id}:{relative_text}"
     return {
@@ -908,26 +1022,28 @@ def parse_git_worktree_porcelain(output: str) -> list[Path]:
 def catalog_worktree_from_path(
     path: Path,
     running_by_worktree: dict[str, list[dict[str, Any]]],
+    *,
+    scan: WorktreeScan | None = None,
 ) -> dict[str, Any] | None:
-    top_level = git_top_level(path)
+    scan = scan if scan is not None else WorktreeScan()
+    top_level = scan.top_level(path)
     if top_level is None:
         return None
 
-    identity = resolve_repo_identity(
-        project_directory=top_level,
-        repo_root=top_level,
-        repo_id=None,
-        repo_name=None,
-    )
-    branch = worktree_branch(top_level)
-    tip = worktree_tip(top_level)
-    worktree_root, worktree_root_title = worktree_root_from_top_level(top_level)
-    status = worktree_status_from_raw(str(top_level), top_level=top_level)
+    if top_level in scan.records:
+        record = scan.records[top_level]
+        return dict(record) if record is not None else None
+    identity = scan.identity(top_level)
+    branch = scan.query(worktree_branch, top_level)
+    tip = scan.query(worktree_tip, top_level)
+    worktree_root, worktree_root_title = worktree_root_from_top_level(top_level, scan=scan)
+    status = worktree_status_from_raw(str(top_level), top_level=top_level, scan=scan)
     display = submodule_display_metadata(
         top_level=top_level,
         child_repo_id=identity.repo_id,
         branch=branch,
         tip=tip,
+        scan=scan,
     )
     running_services = running_by_worktree.get(str(top_level), [])
     compose_project = generated_compose_project(top_level) or first_service_value(running_services, "compose_project")
@@ -951,7 +1067,7 @@ def catalog_worktree_from_path(
     startable = not start_errors
 
     endpoint_total = sum(len(service.get("endpoints") or []) for service in running_services)
-    return {
+    record = {
         "id": stable_hash(str(top_level)),
         "repo_id": identity.repo_id,
         "repo_name": identity.display_name,
@@ -974,6 +1090,8 @@ def catalog_worktree_from_path(
         "service_count": len(running_services),
         "endpoint_count": endpoint_total,
     }
+    scan.records[top_level] = record
+    return dict(record)
 
 
 def worktree_tip(path: Path) -> dict[str, int | str]:
