@@ -280,3 +280,8 @@
   expose refresh/last-known inventory without retaining stale service endpoints
   or enabling Start during incomplete scans. Independent backend, actual-Git,
   read-only Vox candidate and Chromium verification passed; compiled assets included.
+- hotfix/restore-stopped-folding: prepare 0.20.10 to restore the original
+  default-closed dead-branch dropdown rather than v0.20.9's unsolicited inline
+  list. Preserve scan/grouping fixes, stale-inventory safety and running services.
+  Focused Chromium desktop/mobile, refresh and state-boundary checks passed;
+  compiled assets and the documented folding contract are included.
