@@ -765,9 +765,80 @@ a {
   font-size: 14px;
 }
 
-.stopped-branches {
+.dead-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.dead-menu-button {
+  border: 1px solid #9aa7b4;
+  background: #f8fafc;
+  color: #18202a;
+  box-sizing: border-box;
+  inline-size: 144px;
+  min-width: 144px;
+  min-height: 32px;
+  padding: 7px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.dead-menu-button.has-items {
+  border-color: #c2410c;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.dead-menu-button:focus {
+  outline: 2px solid #0ea5e9;
+  outline-offset: 2px;
+}
+
+.dead-menu-button:disabled {
+  cursor: default;
+}
+
+.dead-menu-button.is-empty {
+  border-color: #cbd5e1;
+  background: #eef2f6;
+  color: #7b8794;
+  opacity: 1;
+}
+
+.dead-menu-button span {
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #52606d;
+  min-width: 18px;
+  padding: 1px 5px;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.dead-menu-button.is-empty span {
+  background: #e2e8f0;
+  color: #697586;
+}
+
+.dead-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  white-space: normal;
+  width: min(460px, calc(100vw - 32px));
   border: 1px solid #d9e0e8;
   background: #ffffff;
+  box-shadow: 0 12px 28px rgb(15 23 42 / 14%);
 }
 
 .dead-row {
@@ -1808,10 +1879,20 @@ pre {
     min-width: 640px;
   }
 
-  .running-list,
+  .project-header,
+  .worktree-header {
+    position: relative;
+  }
+
+  .worktree-header-right,
+  .dead-menu {
+    position: static;
+  }
+
   .dead-list {
     left: 0;
-    right: auto;
+    right: 0;
+    width: auto;
   }
 
   .action-log-entry {
@@ -2017,11 +2098,39 @@ pre {
     color: #4ade80;
   }
 
-  .inventory-status,
-  .stopped-branches {
+  .inventory-status {
     background: #171d23;
     color: #cbd5e1;
     border-color: #52606d;
+  }
+
+  .dead-list {
+    background: #151b22;
+    color: #cbd5e1;
+    border-color: #2b3540;
+  }
+
+  .dead-menu-button.has-items {
+    background: #3a2112;
+    color: #fed7aa;
+    border-color: #c2410c;
+  }
+
+  .dead-menu-button.is-empty {
+    background: #202832;
+    color: #7d8997;
+    border-color: #3b4652;
+  }
+
+  .dead-menu-button span {
+    background: #151b22;
+    color: #a7b2bf;
+    border-color: #52606d;
+  }
+
+  .dead-menu-button.is-empty span {
+    color: #7d8997;
+    border-color: #3b4652;
   }
 
   .inventory-status-warning {
