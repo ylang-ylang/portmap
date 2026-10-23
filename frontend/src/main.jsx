@@ -773,33 +773,52 @@ function projectStats(project) {
 }
 
 function StoppedBranches({ instances, onStart, scanAvailable }) {
-  if (!instances.length) return null;
+  const [open, setOpen] = useState(false);
+  const hasItems = instances.length > 0;
+  const Chevron = open && hasItems ? ChevronDown : ChevronRight;
   return (
-    <section className="stopped-branches" aria-label="Branches without running services">
-      {instances.map((instance) => (
-        <div className="dead-row" key={`${instance.worktree}-${instance.branch}-${instance.compose_project || ""}`}>
-          <div className="dead-main">
-            <GitBranch className="button-icon" aria-hidden="true" />
-            <BranchName entry={instance} />
-            <WorktreeStatusBadges entry={instance} />
-            {!worktreeDeleted(instance) ? <span className="dead-note">Stopped</span> : null}
-            <span className="branch-path-note" title={instance.worktree}>{instance.worktree_title}</span>
-            {instance.source === "history" ? <span className="dead-note">history</span> : null}
-            {!instance.startable ? <span className="dead-note">{instance.start_error || "not configured to start"}</span> : null}
-          </div>
-          <button
-            className="action-button start-button"
-            title={!scanAvailable ? "Refresh the branch scan successfully before starting" : instance.startable ? `docker compose up -d in ${instance.worktree}` : instance.start_error || "not configured to start"}
-            type="button"
-            disabled={!scanAvailable || !instance.startable || worktreeDeleted(instance)}
-            onClick={() => onStart(instance)}
-          >
-            <Play className="button-icon" aria-hidden="true" />
-            Start
-          </button>
-        </div>
-      ))}
-    </section>
+    <div className="dead-menu" data-dead-panel>
+      <button
+        className={`dead-menu-button ${hasItems ? "has-items" : "is-empty"}`}
+        type="button"
+        title={`${scanAvailable ? "" : "Last-known "}stopped or deleted branches`}
+        disabled={!hasItems}
+        aria-expanded={open && hasItems}
+        onClick={() => setOpen(!open)}
+      >
+        <Chevron className="button-icon" aria-hidden="true" />
+        <GitBranch className="button-icon" aria-hidden="true" />
+        <span>{instances.length}</span>
+        dead
+      </button>
+      {open && hasItems ? (
+        <section className="dead-list" aria-label="Branches without running services">
+          {instances.map((instance) => (
+            <div className="dead-row" key={`${instance.worktree}-${instance.branch}-${instance.compose_project || ""}`}>
+              <div className="dead-main">
+                <GitBranch className="button-icon" aria-hidden="true" />
+                <BranchName entry={instance} />
+                <WorktreeStatusBadges entry={instance} />
+                {!worktreeDeleted(instance) ? <span className="dead-note">Stopped</span> : null}
+                <span className="branch-path-note" title={instance.worktree}>{instance.worktree_title}</span>
+                {instance.source === "history" ? <span className="dead-note">history</span> : null}
+                {!instance.startable ? <span className="dead-note">{instance.start_error || "not configured to start"}</span> : null}
+              </div>
+              <button
+                className="action-button start-button"
+                title={!scanAvailable ? "Refresh the branch scan successfully before starting" : instance.startable ? `docker compose up -d in ${instance.worktree}` : instance.start_error || "not configured to start"}
+                type="button"
+                disabled={!scanAvailable || !instance.startable || worktreeDeleted(instance)}
+                onClick={() => onStart(instance)}
+              >
+                <Play className="button-icon" aria-hidden="true" />
+                Start
+              </button>
+            </div>
+          ))}
+        </section>
+      ) : null}
+    </div>
   );
 }
 
@@ -825,12 +844,12 @@ function WorktreePanel({ worktree, onAction, onStart, scanAvailable }) {
         </button>
         <div className="worktree-header-right">
           <StatPill label={`${worktree.branches.length} running`} />
-          <StatPill label={`${worktree.dead_instances.filter((entry) => !worktreeDeleted(entry)).length} stopped`} />
+          <StoppedBranches instances={worktree.dead_instances} onStart={onStart} scanAvailable={scanAvailable} />
         </div>
       </div>
-      {open ? (
+      {open && worktree.branches.length > 0 ? (
         <div className="worktree-body">
-          <BranchStack worktree={worktree} onAction={onAction} onStart={onStart} scanAvailable={scanAvailable} />
+          <BranchStack worktree={worktree} onAction={onAction} />
         </div>
       ) : null}
     </section>
@@ -860,15 +879,18 @@ function ProjectPanel({ project, onAction, onStart, scanAvailable }) {
           <div className="summary-pills">
             {stats.worktreeTotal > 1 ? <StatPill label={`${stats.worktreeTotal} wt roots`} /> : null}
             <StatPill label={`${stats.runningBranchTotal} running`} />
-            {stats.stoppedBranchTotal ? <StatPill label={`${stats.stoppedBranchTotal} ${scanAvailable ? "" : "last-known "}stopped`} /> : null}
-            {stats.deletedBranchTotal ? <StatPill label={`${stats.deletedBranchTotal} ${scanAvailable ? "" : "last-known "}deleted`} /> : null}
+            {stats.worktreeTotal > 1 && stats.stoppedBranchTotal ? <StatPill label={`${stats.stoppedBranchTotal} ${scanAvailable ? "" : "last-known "}stopped`} /> : null}
+            {stats.worktreeTotal > 1 && stats.deletedBranchTotal ? <StatPill label={`${stats.deletedBranchTotal} ${scanAvailable ? "" : "last-known "}deleted`} /> : null}
           </div>
+          {project.worktrees.length === 1 ? (
+            <StoppedBranches instances={project.worktrees[0].dead_instances} onStart={onStart} scanAvailable={scanAvailable} />
+          ) : null}
         </div>
       </div>
-      {open ? (
+      {open && (project.worktrees.length > 1 || project.worktrees[0].branches.length > 0) ? (
         <div className="project-body">
           {project.worktrees.length === 1 ? (
-            <BranchStack worktree={project.worktrees[0]} onAction={onAction} onStart={onStart} scanAvailable={scanAvailable} />
+            <BranchStack worktree={project.worktrees[0]} onAction={onAction} />
           ) : project.worktrees.map((worktree) => (
             <WorktreePanel
               worktree={worktree}
@@ -884,13 +906,12 @@ function ProjectPanel({ project, onAction, onStart, scanAvailable }) {
   );
 }
 
-function BranchStack({ worktree, onAction, onStart, scanAvailable }) {
+function BranchStack({ worktree, onAction }) {
   return (
     <>
       {worktree.branches.map((branch) => (
         <BranchPanel branch={branch} key={branch.branch} onAction={onAction} />
       ))}
-      <StoppedBranches instances={worktree.dead_instances} onStart={onStart} scanAvailable={scanAvailable} />
     </>
   );
 }

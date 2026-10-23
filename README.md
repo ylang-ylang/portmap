@@ -1066,10 +1066,14 @@ discovered under its explicit `PORTMAP_CATALOG_WORKTREE_ROOTS` is listed, includ
 worktrees without a Compose/endpoint contract. Other discovered siblings still
 need a running service or project contract. Existing checked-out worktrees remain
 in catalog history; Git refs that are not checked out never create projects.
-Stopped branches are listed directly, separately from host-confirmed deleted
-directories. A project with one worktree root shows its branches without a
-redundant root panel; the root path remains in Details. Multiple roots remain
-separate. Start is enabled only when
+Stopped branches and host-confirmed deleted directories are collapsed by default
+behind the **dead** count button; expand it to inspect their distinct statuses,
+configuration errors and Start actions. Refreshing does not automatically open
+the list. This inactive group label does not mean that a directory was deleted.
+For one worktree root, the button is in the project header and running branches
+appear without a redundant root panel; the root path remains in Details.
+Multiple roots remain separate, each with its own collapsed list.
+Start is enabled only when
 the worktree has a usable Compose selection and `.portmap/endpoints.toml`; otherwise
 the row explains the missing configuration and disables Start. Listing a worktree
 does not create containers or copy another branch's deployment configuration.

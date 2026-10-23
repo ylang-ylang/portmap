@@ -164,3 +164,9 @@
   single-root branches directly. Candidate Vox scan used 171 Git commands in
   0.426 seconds; backend and real-browser verification passed. Deployment is a
   separate authorized Brew/web operation, never a side effect of publication.
+- Hotfix v0.20.10: restore the default-closed dead-branch count button in the
+  single-root project header or each separate root header. Keep accurate
+  Stopped/Deleted status, incomplete-scan Start protection and v0.20.9 discovery
+  improvements. Real-browser folding/refresh and mobile popup checks passed.
+  Deploy only mj's portal for this UI correction; remote backend upgrades are
+  unnecessary and are not part of publication.
