@@ -74,6 +74,12 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_env.add_argument("action", choices=("activate", "verify-api"))
     runtime_env.set_defaults(func=cmd_runtime_env)
 
+    browser_proxy = subparsers.add_parser(
+        "browser-proxy", help="serve an explicitly configured authenticated SOCKS5 browser ingress in the foreground",
+    )
+    browser_proxy.add_argument("--config", type=Path, required=True, help="private JSON file defining this node's domain, credentials and fixed ingress")
+    browser_proxy.set_defaults(func=cmd_browser_proxy)
+
     up = subparsers.add_parser("up", help="publish local projects through the shared HTTP gateway")
     up.add_argument("--no-sudo", action="store_true", help="do not invoke sudo for split DNS and HTTP ingress")
     up.add_argument("compose_args", nargs=argparse.REMAINDER, help="gateway compose args; defaults to 'up -d'")
@@ -290,6 +296,12 @@ def build_parser() -> argparse.ArgumentParser:
         action for action in subparsers._choices_actions if not action.dest.startswith("_")
     ]
     return parser
+
+
+def cmd_browser_proxy(args: argparse.Namespace) -> int:
+    from .browser_proxy import run_browser_proxy
+
+    return run_browser_proxy(args.config)
 
 
 def cmd_init(args: argparse.Namespace) -> int:

@@ -295,6 +295,7 @@ def rest_response(
     ``tamper`` overrides the digest of named assets (for refusal tests).
     """
     manifest = json.loads(anchor_text)
+    records = manifest["assets"] + list(manifest.get("firefox", {}).values())
     entries = []
     for name in release_pipeline.release_file_names(manifest):
         if name in skip:
@@ -304,12 +305,12 @@ def rest_response(
             size = len(anchor_text.encode("utf-8"))
         elif name.endswith(".sha256"):
             filename = name[: -len(".sha256")]
-            entry = next(a for a in manifest["assets"] if a["filename"] == filename)
+            entry = next(a for a in records if a["filename"] == filename)
             content = f"{entry['sha256']}  {filename}\n".encode("utf-8")
             content_digest = release_pipeline.digest_bytes(content)
             size = len(content)
         else:
-            entry = next(a for a in manifest["assets"] if a["filename"] == name)
+            entry = next(a for a in records if a["filename"] == name)
             content_digest = entry["sha256"]
             size = entry["size"]
         if name in tamper:
@@ -482,13 +483,34 @@ def test_validate_tag_push_new_style(tmp_path: Path, tag: str, version: str) -> 
     result = release_pipeline.validate_tag(
         work, event_name="push", event_tag=tag, event_sha=peeled
     )
-    assert result == {
-        "tag": tag,
-        "version": version,
-        "commit": peeled,
-        "historical": False,
-        "event": "push",
-    }
+    assert result["commit"] == peeled
+    assert result["version"] == version
+    assert result["historical"] is False
+
+
+@pytest.mark.parametrize("extension_version", ["0.30.0", "0.29.0"])
+def test_tagged_extension_requires_matching_version_and_signed_release_assets(tmp_path: Path, extension_version: str) -> None:
+    work = make_repo(tmp_path)
+    write_repo_files(work, "0.30.0")
+    extension = work / "extension/firefox/manifest.json"
+    extension.parent.mkdir(parents=True)
+    extension.write_text(json.dumps({"version": extension_version}))
+    git(work, "add", "-A")
+    git(work, "commit", "-m", "include Firefox extension")
+    git(work, "tag", "v0.30.0")
+    git(work, "push", "origin", "main", "refs/tags/v0.30.0")
+    commit = git_text(work, "rev-parse", "HEAD")
+    if extension_version != "0.30.0":
+        with pytest.raises(release_pipeline.ReleaseError, match="Firefox extension version"):
+            release_pipeline.validate_tag(work, event_name="push", event_tag="v0.30.0", event_sha=commit)
+        return
+    result = release_pipeline.validate_tag(work, event_name="push", event_tag="v0.30.0", event_sha=commit)
+    assert result["firefox"] is True
+    assets, _ = make_assets(tmp_path, "0.30.0", "v0.30.0", commit)
+    gh = FakeGh([NOT_FOUND])
+    with pytest.raises(release_pipeline.ReleaseError, match="missing from the immutable release manifest"):
+        release_pipeline.publish_release(work, tag="v0.30.0", assets_dir=assets, run_id="77", runner=gh)
+    assert not any(call[:2] == ["release", "create"] for call in gh.calls)
 
 
 def test_validate_tag_historical_annotated_tag(tmp_path: Path) -> None:
@@ -802,6 +824,48 @@ def test_publish_creates_complete_draft_then_publishes(tmp_path: Path, tag: str,
     assert "Portmap-Build-Attempt: 1" in notes
     edit = call_of(gh, "release", "edit")
     assert "--draft=false" in edit
+
+
+@pytest.mark.parametrize("recover_draft", [False, True])
+def test_publish_firefox_assets_and_recover_missing_signed_bytes(tmp_path: Path, recover_draft: bool) -> None:
+    work = make_repo(tmp_path)
+    tag, version = "v0.20.0", "0.20.0"
+    commit = git_text(work, "rev-parse", f"{tag}^{{commit}}")
+    assets, text = make_assets(tmp_path, version, tag, commit)
+    manifest = json.loads(text)
+    firefox = {}
+    for key, filename, content in (
+        ("xpi", f"portmap-firefox-{version}.xpi", b"original signed bytes fixture"),
+        ("updates", "firefox-updates.json", b'{"addons":{}}\n'),
+    ):
+        (assets / filename).write_bytes(content)
+        sha = release_pipeline.digest(assets / filename)
+        (assets / (filename + ".sha256")).write_text(f"{sha}  {filename}\n")
+        firefox[key] = {
+            "filename": filename, "sha256": sha, "size": len(content),
+            "source_url": release_pipeline.canonical_source_url(tag, filename),
+        }
+    manifest["firefox"] = firefox
+    anchor_text = json.dumps(manifest, indent=2) + "\n"
+    (assets / "release.json").write_text(anchor_text)
+    missing = {record["filename"] for record in firefox.values()}
+    initial = rest_response(
+        anchor_text, draft=True, skip=missing,
+        body="Portmap-Build-Run: 901\nPortmap-Build-Attempt: 1\n",
+    ) if recover_draft else NOT_FOUND
+    gh = FakeGh(
+        [initial, (0, "", ""), rest_response(anchor_text, draft=True), (0, "", "")],
+        download=lambda dest: (dest / "release.json").write_text(anchor_text),
+    )
+    result = release_pipeline.publish_release(
+        work, tag=tag, assets_dir=assets, run_id="999", run_attempt="2", runner=gh,
+    )
+    assert result["created"] is not recover_draft
+    assert missing <= set(result["uploaded"])
+    operation = call_of(gh, "release", "upload" if recover_draft else "create")
+    assert {Path(value).name for value in operation} >= missing
+    assert "--clobber" not in operation
+    assert "--draft=false" in call_of(gh, "release", "edit")
 
 
 def test_publish_refuses_manifest_with_foreign_identity(tmp_path: Path) -> None:

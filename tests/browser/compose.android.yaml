@@ -1,0 +1,27 @@
+services:
+  android:
+    image: ${BROWSER_ANDROID_IMAGE:?Use run.sh --android}
+    profiles: [android]
+    networks: [isolated]
+    dns: ["${BROWSER_DNS_IP:-127.0.0.1}"]
+    # Only KVM device access. No privileged mode, host network, socket or host SDK.
+    user: ${BROWSER_UID:?Use run.sh}:${BROWSER_GID:?Use run.sh}
+    group_add: ["${BROWSER_KVM_GID:-0}"]
+    devices: [/dev/kvm:/dev/kvm]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    sysctls: {net.ipv4.ip_unprivileged_port_start: 0}
+    shm_size: 1gb
+    environment:
+      ACCEPT_ANDROID_SDK_LICENSE: ${ACCEPT_ANDROID_SDK_LICENSE:-0}
+      HOME: /tmp
+      BROWSER_SOURCE_COMMIT: ${BROWSER_SOURCE_COMMIT:-}
+    depends_on:
+      node-a: {condition: service_healthy}
+      node-b: {condition: service_healthy}
+      unrelated: {condition: service_healthy}
+      trap: {condition: service_healthy}
+      dns: {condition: service_healthy}
+    volumes:
+      - certificates:/certs:ro
+      - ${BROWSER_ARTIFACTS:?Use run.sh}:/artifacts

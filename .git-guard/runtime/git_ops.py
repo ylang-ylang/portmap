@@ -94,12 +94,6 @@ def git_path(repo: Path, name: str) -> Path:
     result = git(repo, "rev-parse", "--path-format=absolute", "--git-path", name)
     return Path(result.stdout.strip())
 
-def first_matching(items: list[dict[str, Any]], key: str, ref: str) -> dict[str, Any] | None:
-    for item in items:
-        if re.match(item[key], ref):
-            return item
-    return None
-
 def matches_ref_pattern(pattern: str, ref: str) -> bool:
     regex = "^" + re.escape(pattern).replace("\\*", ".+") + "$"
     return re.match(regex, ref) is not None

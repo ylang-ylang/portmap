@@ -1,0 +1,7 @@
+{
+  "domain": "a.portmap",
+  "listen": {"host": "0.0.0.0", "port": 18080},
+  "credentials": {"username": "user-a", "password": "pass-a"},
+  "ingress": {"host": "fixture-a", "port": 8080, "scope": "public"},
+  "tls_ingress": {"host": "fixture-a", "port": 8443, "scope_domain": "a.portmap"}
+}

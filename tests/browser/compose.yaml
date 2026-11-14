@@ -1,0 +1,104 @@
+# No service can reach external networks; image downloads happen only at build time.
+x-fixture: &fixture
+  build:
+    context: ../..
+    dockerfile: tests/browser/Dockerfile
+    target: fixture
+  networks: [isolated]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  command: [python, /app/tests/browser/fixture.py]
+  healthcheck:
+    test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+    interval: 1s
+    timeout: 3s
+    retries: 30
+
+services:
+  certificates:
+    <<: *fixture
+    command: [python, /app/tests/browser/fixture.py, certificates]
+    healthcheck: {disable: true}
+    volumes: [certificates:/certs]
+
+  fixture-a:
+    <<: *fixture
+    environment: {NODE_ID: node-a, NODE_DOMAIN: a.portmap}
+    depends_on:
+      certificates: {condition: service_completed_successfully}
+    volumes: [certificates:/certs:ro]
+
+  fixture-b:
+    <<: *fixture
+    environment: {NODE_ID: node-b, NODE_DOMAIN: b.portmap}
+    depends_on:
+      certificates: {condition: service_completed_successfully}
+    volumes: [certificates:/certs:ro]
+
+  unrelated:
+    <<: *fixture
+    environment: {NODE_ID: unrelated}
+
+  dns:
+    <<: *fixture
+    command: [python, /app/tests/browser/dns.py]
+    sysctls: {net.ipv4.ip_unprivileged_port_start: 0}
+
+  # Deliberately resolvable trap: DIRECT/public-DNS fallback must NOT look like success.
+  trap:
+    <<: *fixture
+    environment: {NODE_ID: dns-leak-trap}
+    sysctls: {net.ipv4.ip_unprivileged_port_start: 0}
+
+  node-a:
+    <<: *fixture
+    command: [python, -m, portmap.cli, browser-proxy, --config, /app/tests/browser/node-a.json]
+    depends_on:
+      fixture-a: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 18080), timeout=2).close()"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  node-b:
+    <<: *fixture
+    command: [python, -m, portmap.cli, browser-proxy, --config, /app/tests/browser/node-b.json]
+    depends_on:
+      fixture-b: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 18080), timeout=2).close()"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  browser:
+    image: ${BROWSER_IMAGE:?Use run.sh}
+    build:
+      context: ../..
+      dockerfile: tests/browser/Dockerfile
+      target: browser
+    networks: [isolated]
+    dns: ["${BROWSER_DNS_IP:-127.0.0.1}"]
+    user: ${BROWSER_UID:?Use run.sh}:${BROWSER_GID:?Use run.sh}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    shm_size: 1gb
+    depends_on:
+      node-a: {condition: service_healthy}
+      node-b: {condition: service_healthy}
+      unrelated: {condition: service_healthy}
+      trap: {condition: service_healthy}
+      dns: {condition: service_healthy}
+    environment:
+      HOME: /tmp
+      BROWSER_SOURCE_COMMIT: ${BROWSER_SOURCE_COMMIT:-}
+    volumes:
+      - certificates:/certs:ro
+      - ${BROWSER_ARTIFACTS:?Use run.sh to create a scoped artifact directory}:/artifacts
+
+networks:
+  isolated:
+    internal: true
+volumes:
+  certificates:
