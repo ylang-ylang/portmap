@@ -188,6 +188,17 @@ def checksum_companion_name(filename: str) -> str:
     return f"{filename}.sha256"
 
 
+def firefox_assets(manifest: dict) -> list[dict]:
+    firefox = manifest.get("firefox")
+    if not isinstance(firefox, dict):
+        return []
+    return [firefox[key] for key in ("xpi", "updates") if isinstance(firefox.get(key), dict)]
+
+
+def release_assets(manifest: dict) -> list[dict]:
+    return [*manifest.get("assets", []), *firefox_assets(manifest)]
+
+
 def validate_manifest(
     manifest: dict, version: str, assets_dir: Path, *, tag: str, require_files: bool = True
 ) -> list[str]:
@@ -243,6 +254,36 @@ def validate_manifest(
             errors.append(companion_error)
         elif companion.read_text(encoding="utf-8") != f"{sha}  {filename}\n":
             errors.append(f"checksum companion {checksum_companion_name(filename)} is malformed")
+    if "firefox" in manifest:
+        firefox = manifest["firefox"]
+        expected_names = (f"portmap-firefox-{version}.xpi", "firefox-updates.json")
+        records = firefox_assets(manifest)
+        if not isinstance(firefox, dict) or len(records) != 2:
+            errors.append("firefox must describe both signed xpi and updates assets")
+        else:
+            for record, expected_name in zip(records, expected_names):
+                if record.get("filename") != expected_name:
+                    errors.append(f"firefox asset must be named {expected_name}")
+                    continue
+                sha = record.get("sha256")
+                if not isinstance(sha, str) or not SHA256_HEX.fullmatch(sha):
+                    errors.append(f"invalid firefox asset digest: {expected_name}")
+                size = record.get("size")
+                if type(size) is not int or size <= 0:
+                    errors.append(f"invalid firefox asset size: {expected_name}")
+                if record.get("source_url") != canonical_source_url(tag, expected_name):
+                    errors.append(f"invalid firefox asset URL: {expected_name}")
+                if require_files:
+                    member, error = _safe_member(assets_dir, expected_name)
+                    if error:
+                        errors.append(error)
+                    elif digest(member) != sha or member.stat().st_size != size:
+                        errors.append(f"firefox asset content mismatch: {expected_name}")
+                    companion, error = _safe_member(assets_dir, checksum_companion_name(expected_name))
+                    if error:
+                        errors.append(error)
+                    elif companion.read_text(encoding="utf-8") != f"{sha}  {expected_name}\n":
+                        errors.append(f"firefox checksum companion is malformed: {expected_name}")
     if require_files:
         manifest_path, manifest_error = _safe_member(assets_dir, MANIFEST_NAME)
         if manifest_error:
@@ -331,6 +372,15 @@ def source_version_problems(repo: Path, commit: str, version: str) -> list[str]:
             problems.append("uv.lock carries no portmap package version")
         elif match.group(1) != version:
             problems.append(f"uv.lock portmap version {match.group(1)!r}")
+    extension = committed_file(repo, commit, "extension/firefox/manifest.json")
+    if extension is not None:
+        try:
+            extension_version = json.loads(extension)["version"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            problems.append("Firefox extension has no readable version")
+        else:
+            if extension_version != version:
+                problems.append(f"Firefox extension version {extension_version!r}")
     return problems
 
 
@@ -388,6 +438,7 @@ def validate_tag(
         "commit": commit,
         "historical": historical,
         "event": event_name,
+        "firefox": committed_file(repo, commit, "extension/firefox/manifest.json") is not None,
     }
 
 def plan_run(
@@ -629,7 +680,7 @@ def _expected_content(anchor: dict, name: str, anchor_text: str) -> bytes | None
     """
     if name == MANIFEST_NAME:
         return anchor_text.encode("utf-8")
-    for asset in anchor.get("assets", []):
+    for asset in release_assets(anchor):
         filename = asset.get("filename", "")
         if name == filename:
             return None
@@ -665,7 +716,7 @@ def marker_from_message(message: str) -> dict[str, str]:
 
 def release_file_names(manifest: dict) -> list[str]:
     names: list[str] = []
-    for asset in manifest.get("assets", []):
+    for asset in release_assets(manifest):
         filename = asset.get("filename", "")
         if filename:
             names.extend([filename, checksum_companion_name(filename)])
@@ -696,7 +747,7 @@ def _verify_published(
         expected = _expected_content(anchor, name, anchor_text)
         if expected is None:
             expected_digest = next(
-                entry["sha256"] for entry in anchor["assets"] if entry["filename"] == name
+                entry["sha256"] for entry in release_assets(anchor) if entry["filename"] == name
             )
         else:
             expected_digest = digest_bytes(expected)
@@ -841,6 +892,8 @@ def _anchor_state(
         )
     if anchor_kind != "historical":
         validate_source_identity(anchor, tag, commit)
+        if committed_file(repo, commit, "extension/firefox/manifest.json") is not None and "firefox" not in anchor:
+            raise ReleaseError("tagged Firefox extension is missing from the immutable release manifest")
     required = release_file_names(anchor)
     missing = _verify_published(published, anchor, anchor_text, required)
     if document is not None and not is_draft and missing:
@@ -912,7 +965,8 @@ def _release_notes(
         f"Automated release {tag} (portmap {version}).\n\n"
         f"- Source commit: {commit}\n"
         f"- Workflow run: {run_id}{attempt_note}\n"
-        "- Assets: frozen linux-amd64 archive, matching sha256 checksum and the release manifest.\n\n"
+        "- Assets: digest-bound runtime archives and companions listed in release.json; "
+        "Firefox-enabled releases also include the signed extension and update manifest.\n\n"
         f"{TRAILER_VERSION}: {version}\n"
         f"{TRAILER_SOURCE}: {commit}\n"
         f"{TRAILER_BUILD_RUN}: {run_id}\n"
@@ -976,7 +1030,7 @@ def publish_release(
                     "run's retained artifact"
                 )
             recorded = next(
-                entry["sha256"] for entry in anchor_json["assets"] if entry["filename"] == name
+                entry["sha256"] for entry in release_assets(anchor_json) if entry["filename"] == name
             )
             if digest(safe_path) != recorded:
                 raise ReleaseError(

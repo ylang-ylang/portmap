@@ -296,3 +296,11 @@
   list. Preserve scan/grouping fixes, stale-inventory safety and running services.
   Focused Chromium desktop/mobile, refresh and state-boundary checks passed;
   compiled assets and the documented folding contract are included.
+- Merge `feat/firefox-client`: Firefox Android/desktop independent connections,
+  authenticated fixed-ingress SOCKS5, original .portmap URLs and isolated Docker
+  verification. Final desktop/native Android each passed 25 cases on identical
+  development XPI; Python 1632 passed and final JS 18 passed. Incidental Firefox
+  DNS queries are disclosed and explicitly accepted; real direct-traffic
+  fallback, authentication and TLS remain gated. Include required installed
+  GitGuard synchronization and matching contribution prose. No release tag or
+  deployment; Mozilla signing and signed-install verification remain pending.

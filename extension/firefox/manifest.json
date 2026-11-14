@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "name": "Portmap Connections",
+  "version": "0.21.0",
+  "description": "Keep independent local node connections and route original .portmap URLs through authenticated SOCKS5 with remote DNS.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "firefox@portmap.ylang-ylang.github.io",
+      "strict_min_version": "132.0",
+      "update_url": "https://github.com/ylang-ylang/portmap/releases/latest/download/firefox-updates.json",
+      "data_collection_permissions": {
+        "required": ["authenticationInfo", "browsingActivity", "websiteContent"]
+      }
+    },
+    "gecko_android": { "strict_min_version": "132.0" }
+  },
+  "permissions": ["storage", "proxy", "webRequest", "webRequestBlocking", "<all_urls>"],
+  "background": {
+    "scripts": ["core.js", "controller.js", "background.js"],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_title": "Portmap connections",
+    "default_icon": "icon.svg"
+  },
+  "icons": { "48": "icon.svg", "96": "icon.svg" },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "content_security_policy": "script-src 'self'; object-src 'none'; base-uri 'none'"
+}
