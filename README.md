@@ -834,6 +834,24 @@ About Firefox**, tap the Firefox logo five times, then use **Install Extension
 from File**. On desktop use **Add-ons and themes → Install Add-on From File**.
 Subsequent compatible versions are discovered through the extension update URL.
 
+The settings page also has **Check for updates** and, when a newer release is
+available, **Download VERSION (.xpi)**. This user-triggered check reads the same
+official GitHub feed immediately, without waiting for Firefox's automatic
+schedule. It compares numeric release versions and only offers this extension's
+version-pinned official download. No node configuration is sent, and a failed
+check leaves saved connections and an unsaved form unchanged. Firefox's own
+automatic update mechanism is not disabled or rescheduled.
+
+**Downloading is not installing.** On Android, use **Settings → Install
+extension from file**, manually select the downloaded XPI, then confirm **Add**.
+Actual stable Firefox160 testing found that clicking the GitHub XPI only opens
+a download dialog; tapping the completed download reports that no app can open
+the XPI, even with the correct MIME type. The file-install menu is therefore
+required for this manual path. On desktop, follow Firefox's installation prompt
+or use the add-ons manager's file-install action. Firefox validates signature
+and compatibility; the extension neither installs itself nor reports a completed
+upgrade merely because a download was offered or started.
+
 ### Container Runtime: Docker or Podman
 
 Each host runs one container runtime, selected per machine:

@@ -42,6 +42,16 @@
         <div class="actions"><button id="save" type="submit" disabled>Save connection</button><button id="cancel-edit" type="button" hidden>Cancel edit</button></div>
       </form>
     </section>
+    <section aria-labelledby="updates-heading">
+      <h2 id="updates-heading">Extension updates</h2>
+      <p>Installed version: <strong id="installed-version"></strong></p>
+      <div class="actions">
+        <button id="check-update" type="button" aria-describedby="update-help">Check for updates</button>
+        <a id="download-update" target="_blank" rel="noopener noreferrer" hidden>Download update (.xpi)</a>
+      </div>
+      <p id="update-status" role="status" aria-live="polite" data-state="idle">Check now without waiting for Firefox's automatic schedule.</p>
+      <p id="update-help" class="hint">Only checks GitHub when you click. On Android, download the XPI, then open Firefox Settings → Install extension from file and select it manually. On desktop, follow Firefox's installation prompt or install the downloaded file from the add-ons manager. Firefox verifies the signature and compatibility. Downloading is not installation; this page cannot install an update itself.</p>
+    </section>
     <aside aria-labelledby="privacy-heading">
       <h2 id="privacy-heading">Local configuration, explicit routing</h2>
       <p>Connections and passwords stay in this Firefox profile's local extension storage, not Firefox Sync. They are not encrypted by this extension. Requests, content and proxy credentials for enabled .portmap domains are transmitted to the node you choose; the node can observe HTTP traffic. No analytics or central connection manager is used.</p>

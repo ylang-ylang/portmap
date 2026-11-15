@@ -148,4 +148,41 @@ browser.storage.onChanged.addListener((changes, area) => {
   }
 });
 window.addEventListener("focus", () => { if (!busy) run({ action: "get" }); });
+const manifest = browser.runtime.getManifest();
+byId("installed-version").textContent = manifest.version;
+byId("check-update").addEventListener("click", async () => {
+  const button = byId("check-update");
+  if (button.disabled) return;
+  const status = byId("update-status");
+  const download = byId("download-update");
+  button.disabled = true;
+  download.hidden = true;
+  download.removeAttribute("href");
+  status.dataset.state = "checking";
+  status.textContent = "Checking the official GitHub update feed…";
+  try {
+    const response = await fetch(manifest.browser_specific_settings.gecko.update_url, {
+      cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer",
+      signal: AbortSignal.timeout(30000)
+    });
+    if (!response.ok) throw new Error("Update feed request failed.");
+    const update = PortmapCore.findReleaseUpdate(await response.json(), browser.runtime.id, manifest.version);
+    if (update) {
+      download.href = update.url;
+      download.textContent = `Download ${update.version} (.xpi)`;
+      download.hidden = false;
+      status.dataset.state = "available";
+      status.textContent = `Version ${update.version} is available. Downloading does not install the update.`;
+    } else {
+      status.dataset.state = "current";
+      status.textContent = `No newer release found. Installed version: ${manifest.version}.`;
+    }
+  } catch (_) {
+    status.dataset.state = "error";
+    status.textContent = "Could not check for updates. Check your connection and try again.";
+  } finally {
+    button.disabled = false;
+  }
+});
+
 run({ action: "get" });

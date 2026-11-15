@@ -70,3 +70,35 @@ test("storage schema is strict and first installation has no implicit connection
     assert.throws(() => core.readConfig(stored));
   }
 });
+
+const addonId = "firefox@portmap.ylang-ylang.github.io";
+const release = version => ({
+  version,
+  update_link: `https://github.com/ylang-ylang/portmap/releases/download/v${version}/portmap-firefox-${version}.xpi`,
+  update_hash: "sha256:" + "a".repeat(64)
+});
+const updateFeed = updates => ({ addons: { [addonId]: { updates } } });
+
+test("release checks choose the newest numeric version without downgrades or reinstall offers", () => {
+  const feed = updateFeed([release("0.9.9"), release("0.10.0"), release("0.9.10")]);
+  assert.equal(core.findReleaseUpdate(feed, addonId, "0.9.9").version, "0.10.0");
+  assert.equal(core.findReleaseUpdate(feed, addonId, "0.10.0"), null);
+  assert.equal(core.findReleaseUpdate(feed, addonId, "1.0.0"), null);
+  assert.equal(core.findReleaseUpdate(updateFeed([]), addonId, "0.10.0"), null);
+  assert.equal(core.findReleaseUpdate(updateFeed([release("0.99.99"), release("1.0.0")]), addonId, "0.10.0").version, "1.0.0");
+});
+
+test("release checks reject foreign identities, malformed metadata and untrusted download targets", () => {
+  for (const feed of [null, {}, updateFeed(null), { addons: { other: { updates: [release("1.0.0")] } } }]) {
+    assert.throws(() => core.findReleaseUpdate(feed, addonId, "0.1.0"));
+  }
+  for (const invalid of [
+    { ...release("1.0.0"), update_link: "https://evil.example/update.xpi" },
+    { ...release("1.0.0"), update_link: release("2.0.0").update_link },
+    { ...release("1.0.0"), update_link: "javascript:alert(1)" },
+    { ...release("1.0.0"), update_hash: "sha256:truncated" },
+    { ...release("1.0.0"), version: "1.0.0-beta" },
+    { ...release("1.0.0"), version: "999999999999999999999.0.0" },
+    { ...release("1.0.0"), version: 1 }, null
+  ]) assert.throws(() => core.findReleaseUpdate(updateFeed([invalid]), addonId, "0.1.0"));
+});

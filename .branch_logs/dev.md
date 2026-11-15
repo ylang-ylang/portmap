@@ -333,3 +333,9 @@
   Independent Python1636/JS18 and actual desktop/Android each29 cases passed.
   Android fixture reload/DNS assumptions were corrected without changing product
   behavior; no production nodes, host DNS, VPN or workspace settings were changed.
+- Merge feat/browser-update-check: user-approved immediate official-feed check
+  and version-pinned XPI download, with explicit Android manual-file-install
+  instructions and no false installation claim. JS20 and both development
+  browser suites30 passed; final30s runtime also passed real public current/
+  available/download checks on desktop and native Android. Normal TLS and the
+  existing automatic updater remain unchanged; no node/VPN/workspace changes.
