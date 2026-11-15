@@ -358,6 +358,14 @@ jobs:
       contents: read
       actions: read
     steps:
+      - name: Check out trusted signing orchestration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ylang-ylang/portmap
+          ref: ${{ needs.plan.outputs.automation_sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
       - name: Check out the validated source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -375,7 +383,7 @@ jobs:
           path: source/dist
       - name: Stage only the extension runtime
         run: |
-          python3 source/tools/build_firefox_extension.py build --output "$RUNNER_TEMP/firefox-development.xpi"
+          python3 trusted/tools/build_firefox_extension.py --repo-root source build --output "$RUNNER_TEMP/firefox-development.xpi"
           python3 -m zipfile -e "$RUNNER_TEMP/firefox-development.xpi" "$RUNNER_TEMP/firefox-source"
       - name: Find retained signing output for this exact source
         id: signed
@@ -424,7 +432,7 @@ jobs:
           python3 - <<'PY'
           import os, sys
           from pathlib import Path
-          sys.path.insert(0, "source/tools")
+          sys.path.insert(0, "trusted/tools")
           from build_firefox_extension import check_signed_payload
           files = list(Path(os.environ["RUNNER_TEMP"], "firefox-signed").rglob("*.xpi"))
           if len(files) != 1:
@@ -452,12 +460,12 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
           COMMIT: ${{ needs.plan.outputs.commit }}
         run: |
-          python3 source/tools/build_firefox_extension.py attach \
+          python3 trusted/tools/build_firefox_extension.py --repo-root source attach \
             --signed-xpi "$SIGNED_XPI" --assets-dir source/dist \
             --tag "$TAG" --commit "$COMMIT" \
             --desktop-evidence "$RUNNER_TEMP/firefox-desktop/result.json" \
             --android-evidence "$RUNNER_TEMP/firefox-android/result.json"
-          python3 source/tools/release_pipeline.py --repo-root source check-build \
+          python3 "$PIPELINE" --repo-root source check-build \
             --tag "$TAG" --commit "$COMMIT" --assets-dir source/dist
       - name: Retain the complete immutable release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -43,6 +43,30 @@ def test_changed_runtime_bytes_are_rejected_even_with_signature_envelope(tmp_pat
         packaging.check_signed_payload(ROOT, path)
 
 
+@pytest.mark.parametrize("mutation", ["format", "permissions", "persistent_type", "duplicate_key"])
+def test_signer_manifest_formatting_preserves_meaning_not_changed_permissions(tmp_path, mutation):
+    original, files = packaging.runtime_files(ROOT)
+    changed = json.loads(files["manifest.json"])
+    if mutation == "permissions":
+        changed["permissions"].append("privacy")
+    elif mutation == "persistent_type":
+        changed["background"]["persistent"] = 1
+    content = json.dumps(changed, indent=2, sort_keys=True).encode()
+    if mutation == "duplicate_key":
+        content = b'{"version":"0.21.0",' + content[1:]
+    path = tmp_path / "signed-payload-fixture.xpi"
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, value in files.items():
+            archive.writestr(name, content if name == "manifest.json" else value)
+        archive.writestr("META-INF/cose.sig", b"test-envelope-not-a-valid-signature")
+    if mutation == "format":
+        result = packaging.check_signed_payload(ROOT, path)
+        assert result == original
+    else:
+        with pytest.raises(ValueError):
+            packaging.check_signed_payload(ROOT, path)
+
+
 def test_symlinked_runtime_file_is_not_packaged(tmp_path):
     source = tmp_path / "extension/firefox"
     source.mkdir(parents=True)
