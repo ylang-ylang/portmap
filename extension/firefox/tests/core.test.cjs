@@ -6,6 +6,10 @@ const core = require("../core.js");
 
 const connection = overrides => ({ id: "node-a", name: "Node A", domain: "a.portmap", proxyHost: "100.64.0.1",
   proxyPort: 8443, username: "user", password: "secret", enabled: true, ...overrides });
+const codePayload = overrides => ({ name: "Node A", domain: "a.portmap", proxyHost: "100.64.0.1",
+  proxyPort: 8443, username: "user", password: "secret", ...overrides });
+const encodeCode = value => `portmap-connect-v1:${Buffer.from(value).toString("base64url")}`;
+const connectionCode = payload => encodeCode(JSON.stringify(payload));
 
 test("claims normalize ASCII names and match whole labels, not suffix lookalikes", () => {
   const profile = core.normalizeConnection(connection({ domain: " A.Portmap. " }));
@@ -68,5 +72,78 @@ test("storage schema is strict and first installation has no implicit connection
     { schemaVersion: 3, revision: "x", connections: [] },
     { schemaVersion: 2, revision: "x", connections: [connection({ domain: "evil" })] }]) {
     assert.throws(() => core.readConfig(stored));
+  }
+});
+
+test("connection codes decode six normalized fields without granting a stored identity or enabled flag", () => {
+  const payload = codePayload({ name: "  节点 A  ", domain: " A.Portmap. ", proxyHost: "[2001:0db8::1]",
+    username: "用户:name", password: "päss\\\"word:with:colons" });
+  const decoded = core.decodeConnectionCode(` \n${connectionCode(payload)}\t `);
+  assert.deepEqual(decoded, { ...payload, name: "节点 A", domain: "a.portmap", proxyHost: "[2001:db8::1]" });
+  assert.equal(Object.isFrozen(decoded), true);
+  assert.equal(Object.hasOwn(decoded, "id"), false);
+  assert.equal(Object.hasOwn(decoded, "enabled"), false);
+});
+
+test("connection code parser rejects malformed framing, noncanonical base64url and invalid UTF-8", () => {
+  const valid = connectionCode(codePayload());
+  let paddedJson = JSON.stringify(codePayload());
+  while (Buffer.byteLength(paddedJson) % 3 !== 1) paddedJson += " ";
+  const canonical = encodeCode(paddedJson);
+  // With one trailing input byte, only the first two bits of the final symbol
+  // carry data; changing an unused bit must not yield another accepted code.
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const last = alphabet.indexOf(canonical.at(-1));
+  const noncanonical = canonical.slice(0, -1) + alphabet[last + 1];
+  for (const value of [null, {}, "", valid.replace("v1:", "v2:"), valid.slice(1),
+    `${valid}=`, `${valid.slice(0, 30)}\n${valid.slice(30)}`,
+    "portmap-connect-v1:A", "portmap-connect-v1:+/", noncanonical,
+    encodeCode("{"), encodeCode("null"), encodeCode("[]"),
+    encodeCode(Buffer.from([0xff])), encodeCode(Buffer.from([0xc0, 0xaf])),
+    encodeCode(Buffer.from([0xe2, 0x82])), encodeCode(Buffer.from([0xed, 0xa0, 0x80])),
+    encodeCode(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify(codePayload()))]))]) {
+    assert.throws(() => core.decodeConnectionCode(value));
+  }
+  const [beforeName, afterName] = JSON.stringify(codePayload()).split("Node A");
+  for (const invalidBytes of [[0xff], [0xc0, 0xaf], [0xe2, 0x82], [0xed, 0xa0, 0x80]]) {
+    // A lossy decoder would turn these bytes into an otherwise valid name.
+    const bytes = Buffer.concat([Buffer.from(beforeName), Buffer.from(invalidBytes), Buffer.from(afterName)]);
+    assert.throws(() => core.decodeConnectionCode(encodeCode(bytes)));
+  }
+});
+
+test("connection codes require exactly the six fields and reuse existing field validators", () => {
+  const payload = codePayload();
+  for (const key of Object.keys(payload)) {
+    const missing = { ...payload };
+    delete missing[key];
+    assert.throws(() => core.decodeConnectionCode(connectionCode(missing)));
+  }
+  for (const extra of ["id", "enabled", "version", "__proto__", "unexpected"]) {
+    assert.throws(() => core.decodeConnectionCode(connectionCode({ ...payload, [extra]: "injected" })));
+  }
+  for (const overrides of [{ name: " " }, { name: "x".repeat(121) }, { domain: "portmap" },
+    { domain: "https://a.portmap" }, { proxyHost: "a.portmap" }, { proxyHost: "http://proxy:8443" },
+    { proxyPort: "8443" }, { proxyPort: 0 }, { proxyPort: 65536 }, { proxyPort: 1.5 },
+    { username: "" }, { username: "é".repeat(128) }, { password: "\ud800" }, { password: "secret\n" }]) {
+    assert.throws(() => core.decodeConnectionCode(connectionCode(codePayload(overrides))));
+  }
+  const duplicate = `{"name":"discarded",${JSON.stringify(payload).slice(1)}`;
+  assert.throws(() => core.decodeConnectionCode(encodeCode(duplicate)));
+});
+
+test("connection code size is bounded after trimming and rejection errors never expose credentials", () => {
+  const payload = codePayload({ password: "DO-NOT-ECHO-THIS-SECRET" });
+  let json = JSON.stringify(payload);
+  while (encodeCode(json + " ").length <= 8192) json += " ";
+  assert.ok(encodeCode(json).length >= 8190);
+  assert.deepEqual(core.decodeConnectionCode(`\n${encodeCode(json)}\n`), payload);
+  for (const invalid of [encodeCode(json + " "), encodeCode('{"password":"DO-NOT-ECHO-THIS-SECRET",broken'),
+    connectionCode({ ...payload, unexpected: "DO-NOT-ECHO-THIS-SECRET" })]) {
+    assert.throws(() => core.decodeConnectionCode(invalid), error => {
+      assert.equal(error.message.includes(payload.password), false);
+      assert.equal(error.message.includes(invalid), false);
+      return true;
+    });
   }
 });

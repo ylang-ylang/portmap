@@ -313,3 +313,11 @@
   signature enforcement. Trusted-dev signing orchestration can retry immutable
   v0.21.0 using its original retained signed XPI. Independent regression/payload/
   actionlint checks passed; original signed desktop and stable Android each26/26.
+- Merge feat/browser-connection-code: generate private reusable connection codes
+  only after owned public ingress discovery, exact Tailscale binding and readiness;
+  import through masked preview/confirmation on Firefox Android and desktop.
+  Preserve exact-domain connection identity/disabled state and fail-closed routing.
+  Independent Python1692/JS27, actual CLI readiness/authentication/restart smoke,
+  and desktop/native Android each30 cases passed. Automatic discovery smoke
+  explicitly simulates external runtime/agent/Tailscale status; no production
+  host/VPN/workspace changes. Signed release verification remains version-gated.
