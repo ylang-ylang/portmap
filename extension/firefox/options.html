@@ -16,12 +16,36 @@
     </header>
     <p id="status" role="status" aria-live="polite" data-state="loading">Loading local connections…</p>
     <p id="error" role="alert" hidden></p>
+    <section class="pairing" aria-labelledby="import-heading">
+      <h2 id="import-heading">Connect with a code</h2>
+      <p>On your running node, run <code>portmap browser-proxy --pair</code>, then paste its connection code here. Preview the destination before importing.</p>
+      <form id="import-form" autocomplete="off">
+        <label for="connection-code">Connection code</label>
+        <input id="connection-code" type="password" required maxlength="8192" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="code-help" placeholder="portmap-connect-v1:…">
+        <p id="code-help" class="hint">This code contains reusable proxy credentials, not encryption or a one-time token. Keep it private and import only codes from nodes you trust. It stays in this browser and is never uploaded.</p>
+        <div class="actions">
+          <button id="preview-import" type="submit" disabled>Preview connection</button>
+          <button id="cancel-import" type="button">Cancel</button>
+        </div>
+      </form>
+      <div id="import-preview" aria-live="polite" hidden>
+        <h3>Confirm connection</h3>
+        <dl>
+          <dt>Name</dt><dd id="import-name"></dd>
+          <dt>Domain</dt><dd id="import-domain"></dd>
+          <dt>SOCKS5 endpoint</dt><dd id="import-endpoint"></dd>
+        </dl>
+        <p id="import-replacement" class="hint"></p>
+        <button id="confirm-import" type="button" disabled>Import connection</button>
+      </div>
+    </section>
     <section aria-labelledby="connections-heading">
       <h2 id="connections-heading">Connections</h2>
-      <p id="empty" hidden>No connections yet. Add an already running, privately reachable node below.</p>
+      <p id="empty" hidden>No connections yet. Paste a code above, or use advanced manual setup below.</p>
       <div id="connections"></div>
     </section>
-    <section class="editor" aria-labelledby="editor-heading">
+    <details id="advanced-settings" class="editor">
+      <summary>Advanced: manual connection setup</summary>
       <h2 id="editor-heading">Add connection</h2>
       <form id="connection-form" autocomplete="off">
         <input type="hidden" id="connection-id">
@@ -38,7 +62,7 @@
         <label class="checkbox"><input id="enabled" type="checkbox" checked> Enable connection</label>
         <div class="actions"><button id="save" type="submit" disabled>Save connection</button><button id="cancel-edit" type="button" hidden>Cancel edit</button></div>
       </form>
-    </section>
+    </details>
     <aside aria-labelledby="privacy-heading">
       <h2 id="privacy-heading">Local configuration, explicit routing</h2>
       <p>Connections and passwords stay in this Firefox profile's local extension storage, not Firefox Sync. They are not encrypted by this extension. Requests, content and proxy credentials for enabled .portmap domains are transmitted to the node you choose; the node can observe HTTP traffic. No analytics or central connection manager is used.</p>

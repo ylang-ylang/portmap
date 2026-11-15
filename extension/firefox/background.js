@@ -8,7 +8,14 @@ browser.runtime.onMessage.addListener((message, sender) => {
     return undefined;
   }
   if (!message || message.channel !== "portmap-connections") return undefined;
-  return portmap.command(message).then(state => ({ ok: true, state }), failure => ({ ok: false, error: failure.message }));
+  return portmap.command(message).then(state => ({ ok: true, state }), failure => ({
+    ok: false,
+    // Import failures must never serialize code/credential fragments from an
+    // unexpected decoder, storage or platform exception into the options page.
+    error: message.action === "preview-import" || message.action === "import"
+      ? "Connection code was not imported. Check the code and preview again; overlapping domains cannot be imported."
+      : failure.message
+  }));
 });
 
 browser.browserAction.onClicked.addListener(() => browser.runtime.openOptionsPage());

@@ -706,7 +706,45 @@ closed instead of using another node or ordinary browser routing. Removing a
 connection blocks new requests; established WebSockets/streams require closing
 their tabs.
 
-#### Explicit node endpoint
+#### Import a connection code
+
+On the target node, with its local Portmap publisher already running and
+Tailscale already connected, run:
+
+```bash
+portmap browser-proxy --pair
+```
+
+This reads the owned local namespace and live **public/web** ingress, selects
+the node's own Tailscale address, generates dedicated random SOCKS credentials,
+and binds an available unprivileged port. It prints one `portmap-connect-v1:`
+code only after the listener and ingress are ready and settings are saved.
+It does not start a workspace, run setup, expose the private portal, change
+Tailscale/DNS/firewall configuration, or contact a central connection manager.
+Tailnet grants must permit Firefox to reach the selected node and port.
+
+In the extension's **Portmap connections** page, paste the code into
+**Connection code**, choose **Preview connection**, verify the displayed node,
+domain and endpoint, then choose **Import connection**. There is no need to
+enter the six connection fields individually. Preview/cancel makes no saved
+change. Importing an existing exact domain explicitly replaces its connection
+details while preserving its local ID and enabled/disabled state; overlapping
+namespaces are rejected without changing existing connections.
+
+**Keep the node command running while using this connection.** It is a
+foreground proxy, not a newly installed background service. Ctrl-C stops only
+this proxy. Running the same command again reuses its saved port and credentials
+from `<state.dir>/browser-proxy/pairing.json` (directory 0700, file 0600).
+An occupied saved port, changed node/ingress/Tailscale identity, or unsafe file
+fails explicitly rather than silently selecting another endpoint or password.
+
+Treat the code as a password: it contains reusable credentials encoded as
+base64url, not encryption or a one-time invitation. Transfer it privately and
+do not paste it into logs, issue reports or public QR-code services. The input
+is masked and cleared after cancellation or successful import. Browser storage
+and encrypted-private-transport requirements below still apply.
+
+#### Advanced explicit node endpoint
 
 Start the compatibility endpoint only after identifying this node's existing
 public/web ingress. This is a foreground command; it does not run setup,
@@ -739,10 +777,21 @@ connected and use its encrypted private reachability. The extension cannot
 verify Android's VPN state. Never expose this listener to the public Internet.
 Each username and password must contain 1–255 UTF-8 bytes.
 
-Add the same namespace, proxy address, port and credentials in the
-extension's **Portmap connections** page. Secrets are stored only in this
-browser's local extension storage, not synced; anyone controlling the browser
-profile can read them. Grant the extension access only in the browser contexts
+For a preconfigured endpoint, expand **Advanced: manual connection setup** in the
+extension and enter the namespace, proxy address, port and credentials.
+Alternatively, an owned mode-0600 configuration can emit a connection code:
+
+```bash
+portmap browser-proxy --pair --config /private/path/browser-proxy.json \
+  --advertise-host 100.64.0.10
+```
+
+This advanced mode uses the supplied credentials and ingress rather than
+automatic discovery; the operator remains responsible for ingress scope and
+encrypted private reachability. A wildcard bind requires a concrete advertised
+host. Secrets are stored only in this browser's local extension storage, not synced;
+anyone controlling the browser profile can read them. Grant the extension access
+only in the browser contexts
 you intend to use; private windows without extension permission are not covered.
 
 Only authenticated SOCKS5 CONNECT with a domain-name destination is accepted;
@@ -771,11 +820,21 @@ sh tests/browser/run.sh --development
 ```
 
 The Docker fixture uses two independent nodes and actual Firefox, with separate
-namespace-scoped TLS fixtures, ordinary browsing and a leak trap. It never mounts
-the host runtime socket or uses host networking. Each run has its own Compose
-project and cleans only that project's resources. Retained evidence identifies
-the exact extension digest, browser version, install mode and exercised cases.
-Desktop viewport resizing is not Android verification.
+namespace-scoped TLS fixtures, ordinary browsing and a leak trap. Both actual
+node CLI processes emit connection codes from private explicit fixture configs;
+the browser imports them through the real preview/confirm UI, without injecting
+storage. Cases cover cancellation, independent routing, exact-domain reimport
+with disabled-state/ID preservation, malformed and overlapping claims, advanced
+manual editing, and restart behavior. Automatic discovery/persistence tests
+simulate external publisher/runtime/Tailscale boundaries while exercising real
+listeners, readiness, authentication and saved credentials; they are not proof
+of registration with a real tailnet.
+
+The fixture never mounts the host runtime socket or uses host networking.
+Each run has its own Compose project and cleans only that project's resources.
+Retained evidence identifies the exact extension digest, browser version,
+install mode and exercised cases. Desktop viewport resizing is not Android
+verification.
 
 Actual Android development testing uses the isolated Nightly fixture:
 

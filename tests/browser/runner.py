@@ -160,6 +160,9 @@ class Browser:
             self.action(domain, "edit")
         else:
             self.options()
+        advanced = self.driver.find_elements(By.ID, "advanced-settings")
+        if advanced and not advanced[0].get_attribute("open"):
+            advanced[0].find_element(By.TAG_NAME, "summary").click()
         values = {"name": domain, "domain": domain, "proxy-host": host,
                   "proxy-port": str(port), "username": user, "password": password}
         for name, value in values.items():
@@ -172,6 +175,21 @@ class Browser:
         self.driver.find_element(By.ID, "save").click()
         WebDriverWait(self.driver, 5).until(lambda driver: driver.find_element(By.ID, "name").get_attribute("value") == "")
         require(len(self.cards(domain)) == 1, "Connection was not saved through actual options UI")
+
+
+    def preview_import(self, code):
+        self.options()
+        self.driver.find_element(By.ID, "connection-code").send_keys(code)
+        self.driver.find_element(By.ID, "preview-import").click()
+        WebDriverWait(self.driver, 10).until(lambda driver: driver.find_element(By.ID, "import-preview").is_displayed())
+
+    def confirm_import(self, domain):
+        self.driver.find_element(By.ID, "confirm-import").click()
+        WebDriverWait(self.driver, 10).until(lambda driver:
+            not driver.find_element(By.ID, "import-preview").is_displayed()
+            and driver.find_element(By.ID, "status").get_attribute("data-state") == "ready")
+        require(len(self.cards(domain)) == 1, "Code import did not produce exactly one connection")
+        require(self.driver.find_element(By.ID, "connection-code").get_attribute("value") == "", "Imported credentials remained in the input")
 
     def page(self, url, node, navigate=True):
         if navigate:
@@ -304,7 +322,9 @@ def run(args, proof, browser_factory):
             case("actual-xpi-installed", lambda: require(driver.install_addon(str(xpi), temporary=False) == EXTENSION_ID, "Actual extension install failed"), fatal=True)
             case("unconfigured-fails-closed", lambda: browser.denied("a.portmap", "unconfigured"))
             case("unconfigured-websocket-fails-closed", browser.denied_websocket)
-            case("save-two-independent-connections", lambda: (browser.save("a.portmap", "node-a", "user-a", "pass-a"), browser.save("b.portmap", "node-b", "user-b:β", "pass-b-密")))
+            import pairing
+            pairing.exercise(browser, case)
+            browser.options()
             require(browser.driver.save_screenshot(str(ARTIFACTS / "options-configured.png")), "Could not capture actual configured extension UI")
             for domain, node in (("a.portmap", "node-a"), ("b.portmap", "node-b"), ("app.a.portmap", "node-a"), ("app.b.portmap", "node-b")):
                 def routing(domain=domain, node=node):
