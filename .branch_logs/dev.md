@@ -321,3 +321,8 @@
   and desktop/native Android each30 cases passed. Automatic discovery smoke
   explicitly simulates external runtime/agent/Tailscale status; no production
   host/VPN/workspace changes. Signed release verification remains version-gated.
+- Integrate release/v0.22.0 before main: synchronize runtime/extension/lock
+  versions for connection-code pairing. Independent CLI/package identity and
+  pinned self-hosted web-ext lint passed; prior current-source behavior proof
+  is retained. Exact-tag CI must sign and pass actual stable desktop/Android
+  imports before publishing artifacts and completing Brew distribution.
