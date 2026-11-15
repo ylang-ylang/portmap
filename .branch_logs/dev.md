@@ -339,3 +339,8 @@
   browser suites30 passed; final30s runtime also passed real public current/
   available/download checks on desktop and native Android. Normal TLS and the
   existing automatic updater remain unchanged; no node/VPN/workspace changes.
+- Integrate release/v0.23.0 before main: synchronized four version declarations;
+  independent CLI/package identity and pinned self-hosted lint preflight passed.
+  Ship name-based form completion, remove unwanted pairing and expose explicit
+  manual check/download without claiming installation. Exact-tag signed stable
+  platform gates and checked Brew distribution remain mandatory before delivery.
