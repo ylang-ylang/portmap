@@ -808,8 +808,12 @@ HTTPS URL. Every version still needs Mozilla signing and review compliance.
 CI requires repository secrets `AMO_JWT_ISSUER` and `AMO_JWT_SECRET`, plus the
 explicit `ACCEPT_ANDROID_SDK_LICENSE=1` repository variable for the emulator.
 Do not paste these secrets into issue reports, command lines or extension files.
-Signed payloads are compared to the source allowlist and covered by the same
-immutable release manifest as the runtime archives. Published bytes are never
+Signed payloads are compared to the source allowlist: runtime files must be
+byte-identical, while `manifest.json` may differ only in JSON formatting/key
+order introduced by the signing tool. Changed values/types/permissions and
+duplicate keys are rejected. Browser installation verifies the real signature.
+Artifacts are covered by the same immutable release manifest as the runtime
+archives. Published bytes are never
 replaced; retries reuse retained signed output and original release artifacts.
 
 For first installation on Android, download the signed XPI, open **Settings →

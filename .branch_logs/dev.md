@@ -308,3 +308,8 @@
   for built-in data-transmission consent. Actual catalog rebuild is identical;
   pinned web-ext10.8.0 self-hosted lint reports zero errors/warnings/notices.
   Tagged CI must sign and verify both stable platforms before public distribution.
+- Merge feat/firefox-signing-manifest: permit only semantic-equivalent manifest
+  formatting from web-ext signing, retain exact runtime bytes and real browser
+  signature enforcement. Trusted-dev signing orchestration can retry immutable
+  v0.21.0 using its original retained signed XPI. Independent regression/payload/
+  actionlint checks passed; original signed desktop and stable Android each26/26.
