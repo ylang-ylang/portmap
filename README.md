@@ -680,7 +680,8 @@ networks, not the public Internet.
 ### Firefox on Android and Desktop
 
 `extension/firefox` is one Firefox extension for Android and desktop, requiring
-Firefox 132 or later. Each browser stores its own node connections; no central
+Firefox 140 or later on desktop and 142 or later on Android, including built-in
+data-transmission consent. Each browser stores its own node connections; no central
 Portmap manager is required. The extension selects an authenticated SOCKS5 node
 with remote DNS for each configured namespace while retaining the original
 `.portmap` URL, Host, origin credentials and request body. The node maps that

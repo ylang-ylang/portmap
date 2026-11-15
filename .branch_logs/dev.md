@@ -304,3 +304,7 @@
   fallback, authentication and TLS remain gated. Include required installed
   GitGuard synchronization and matching contribution prose. No release tag or
   deployment; Mozilla signing and signed-install verification remain pending.
+- Integrate release/v0.21.0 before main: require Firefox140 desktop/142 Android
+  for built-in data-transmission consent. Actual catalog rebuild is identical;
+  pinned web-ext10.8.0 self-hosted lint reports zero errors/warnings/notices.
+  Tagged CI must sign and verify both stable platforms before public distribution.
