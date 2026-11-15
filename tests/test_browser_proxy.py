@@ -528,7 +528,8 @@ def test_cli_browser_proxy_is_explicit_foreground_without_loading_runtime(monkey
     monkeypatch.setattr("portmap.cli.load_portmap_settings", lambda *a, **kw: pytest.fail("must not load or mutate runtime"))
     assert main(["browser-proxy", "--config", str(config_path)]) == 0
     assert calls == [config_path]
-    assert main(["browser-proxy"]) == 2
+    with pytest.raises(SystemExit):
+        main(["browser-proxy"])
 
 
 @pytest.mark.parametrize("payload", [b"\x02\x01u\x01p", b"\x01\x00", b"\x01\x01u\x00"])

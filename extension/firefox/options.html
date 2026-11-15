@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Portmap connections</title>
   <link rel="stylesheet" href="options.css">
+  <script src="core.js" defer></script>
   <script src="options.js" defer></script>
 </head>
 <body>
@@ -16,53 +17,31 @@
     </header>
     <p id="status" role="status" aria-live="polite" data-state="loading">Loading local connections…</p>
     <p id="error" role="alert" hidden></p>
-    <section class="pairing" aria-labelledby="import-heading">
-      <h2 id="import-heading">Connect with a code</h2>
-      <p>On your running node, run <code>portmap browser-proxy --pair</code>, then paste its connection code here. Preview the destination before importing.</p>
-      <form id="import-form" autocomplete="off">
-        <label for="connection-code">Connection code</label>
-        <input id="connection-code" type="password" required maxlength="8192" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="code-help" placeholder="portmap-connect-v1:…">
-        <p id="code-help" class="hint">This code contains reusable proxy credentials, not encryption or a one-time token. Keep it private and import only codes from nodes you trust. It stays in this browser and is never uploaded.</p>
-        <div class="actions">
-          <button id="preview-import" type="submit" disabled>Preview connection</button>
-          <button id="cancel-import" type="button">Cancel</button>
-        </div>
-      </form>
-      <div id="import-preview" aria-live="polite" hidden>
-        <h3>Confirm connection</h3>
-        <dl>
-          <dt>Name</dt><dd id="import-name"></dd>
-          <dt>Domain</dt><dd id="import-domain"></dd>
-          <dt>SOCKS5 endpoint</dt><dd id="import-endpoint"></dd>
-        </dl>
-        <p id="import-replacement" class="hint"></p>
-        <button id="confirm-import" type="button" disabled>Import connection</button>
-      </div>
-    </section>
     <section aria-labelledby="connections-heading">
       <h2 id="connections-heading">Connections</h2>
-      <p id="empty" hidden>No connections yet. Paste a code above, or use advanced manual setup below.</p>
+      <p id="empty" hidden>No connections yet. Add an already running, privately reachable node below.</p>
       <div id="connections"></div>
     </section>
-    <details id="advanced-settings" class="editor">
-      <summary>Advanced: manual connection setup</summary>
+    <section class="editor" aria-labelledby="editor-heading">
       <h2 id="editor-heading">Add connection</h2>
+      <p id="name-help" class="hint">Enter a node name such as <code>voxmani</code> to fill its domain and proxy host. Addresses you edit manually stay unchanged. A short host requires working name resolution, such as Tailscale MagicDNS; otherwise enter its actual IP or hostname.</p>
       <form id="connection-form" autocomplete="off">
         <input type="hidden" id="connection-id">
         <div class="fields">
-          <label>Name<input id="name" required maxlength="120" placeholder="My development node"></label>
+          <label>Name<input id="name" required maxlength="120" placeholder="voxmani" autocapitalize="none" spellcheck="false" aria-describedby="name-help"></label>
           <label>Portmap domain<input id="domain" required maxlength="254" autocapitalize="none" spellcheck="false" placeholder="node.portmap" aria-describedby="domain-help"></label>
           <label>Proxy host<input id="proxy-host" required maxlength="254" autocapitalize="none" spellcheck="false" placeholder="100.64.0.10" aria-describedby="host-help"></label>
           <label>Proxy port<input id="proxy-port" type="number" required min="1" max="65535" step="1" inputmode="numeric" placeholder="8443"></label>
           <label>SOCKS5 username<input id="username" required maxlength="255" autocapitalize="none" spellcheck="false" autocomplete="off"></label>
           <label>SOCKS5 password<input id="password" type="password" required maxlength="255" autocomplete="new-password"></label>
         </div>
+        <p class="hint">The actual port and credentials are still required; they cannot be inferred from a name. For a display-only name, fill the addresses yourself.</p>
         <p id="domain-help" class="hint">Matches this exact domain and its descendants, such as <code>app.node.portmap</code>. Overlapping connections are not allowed, including disabled ones.</p>
         <p id="host-help" class="hint">Use a reachable authenticated SOCKS5 node address, not a URL or .portmap hostname. Credentials must each contain 1 to 255 UTF-8 bytes. DNS for Portmap addresses is handled at the node. The extension never starts a workspace. SOCKS5 sends credentials and HTTP content without extra encryption: use it only over Tailscale or another trusted encrypted private network.</p>
         <label class="checkbox"><input id="enabled" type="checkbox" checked> Enable connection</label>
         <div class="actions"><button id="save" type="submit" disabled>Save connection</button><button id="cancel-edit" type="button" hidden>Cancel edit</button></div>
       </form>
-    </details>
+    </section>
     <aside aria-labelledby="privacy-heading">
       <h2 id="privacy-heading">Local configuration, explicit routing</h2>
       <p>Connections and passwords stay in this Firefox profile's local extension storage, not Firefox Sync. They are not encrypted by this extension. Requests, content and proxy credentials for enabled .portmap domains are transmitted to the node you choose; the node can observe HTTP traffic. No analytics or central connection manager is used.</p>

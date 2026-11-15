@@ -75,11 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_env.set_defaults(func=cmd_runtime_env)
 
     browser_proxy = subparsers.add_parser(
-        "browser-proxy", help="serve an authenticated SOCKS5 browser ingress in the foreground",
+        "browser-proxy", help="serve an explicitly configured authenticated SOCKS5 browser ingress in the foreground",
     )
-    browser_proxy.add_argument("--pair", action="store_true", help="discover an already running local publisher and Tailscale address; print a private connection code only after readiness")
-    browser_proxy.add_argument("--config", type=Path, help="advanced private JSON file defining domain, credentials and fixed ingress; without --pair, retains manual mode")
-    browser_proxy.add_argument("--advertise-host", help="advanced --pair --config only: independently reachable proxy hostname/IP (required for wildcard binds)")
+    browser_proxy.add_argument("--config", type=Path, required=True, help="private JSON file defining this node's domain, credentials and fixed ingress")
     browser_proxy.set_defaults(func=cmd_browser_proxy)
 
     up = subparsers.add_parser("up", help="publish local projects through the shared HTTP gateway")
@@ -301,14 +299,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_browser_proxy(args: argparse.Namespace) -> int:
-    if args.pair:
-        from .browser_pairing import run_browser_pairing
-
-        return run_browser_pairing(args.config, advertise=args.advertise_host)
-    if args.advertise_host is not None:
-        raise PortmapError("--advertise-host requires --pair --config")
-    if args.config is None:
-        raise PortmapError("browser-proxy requires --pair or --config PATH")
     from .browser_proxy import run_browser_proxy
 
     return run_browser_proxy(args.config)

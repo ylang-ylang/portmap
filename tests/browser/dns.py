@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 QUERIES = []
 LOCK = threading.Lock()
-INTERNAL = {"fixture-a", "fixture-b", "unrelated", "trap", "node-a", "node-b", "dns"}
+INTERNAL = {"fixture-a", "fixture-b", "unrelated", "trap", "node-a", "node-b", "a", "b", "dns"}
 
 
 def response(packet, peer, transport):

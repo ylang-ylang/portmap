@@ -6,7 +6,22 @@ const fields = { id: "connection-id", name: "name", domain: "domain", proxyHost:
   proxyPort: "proxy-port", username: "username", password: "password", enabled: "enabled" };
 let state = { phase: "loading", connections: [] };
 let busy = false;
-let importPreview = null;
+const automaticAddresses = new Set(["domain", "proxy-host"]);
+
+function fillAddressesFromName() {
+  const host = byId("name").value.trim().toLowerCase().replace(/\.$/, "").replace(/\.portmap$/, "");
+  let domain = "";
+  try {
+    if (host) {
+      PortmapCore.normalizeProxyHost(host);
+      domain = PortmapCore.normalizeDomain(`${host}.portmap`);
+    }
+  } catch (_) {
+    // Display labels are allowed, but must not become invented network addresses.
+  }
+  if (automaticAddresses.has("domain")) byId("domain").value = domain;
+  if (automaticAddresses.has("proxy-host")) byId("proxy-host").value = domain ? host : "";
+}
 
 function showError(message = "") {
   byId("error").textContent = message;
@@ -18,19 +33,8 @@ function clearEditor() {
   byId("connection-id").value = "";
   byId("editor-heading").textContent = "Add connection";
   byId("cancel-edit").hidden = true;
-}
-
-function clearImportPreview() {
-  importPreview = null;
-  byId("import-preview").hidden = true;
-  for (const id of ["import-name", "import-domain", "import-endpoint", "import-replacement"]) {
-    byId(id).textContent = "";
-  }
-}
-
-function clearImport() {
-  byId("import-form").reset();
-  clearImportPreview();
+  automaticAddresses.add("domain");
+  automaticAddresses.add("proxy-host");
 }
 
 function button(text, action, entry, handler) {
@@ -50,19 +54,6 @@ function render() {
     : state.phase === "ready" ? "Ready. Unmapped .portmap requests are blocked."
     : state.phase === "error" ? state.error : "Loading local connections. .portmap requests are blocked…";
   byId("save").disabled = busy || state.phase !== "ready";
-  byId("connection-code").disabled = busy || state.phase !== "ready";
-  byId("preview-import").disabled = busy || state.phase !== "ready";
-  byId("confirm-import").disabled = busy || state.phase !== "ready" || !importPreview;
-  byId("cancel-import").disabled = busy;
-  byId("import-preview").hidden = !importPreview;
-  if (importPreview) {
-    byId("import-name").textContent = importPreview.name;
-    byId("import-domain").textContent = importPreview.domain;
-    byId("import-endpoint").textContent = `${importPreview.proxyHost}:${importPreview.proxyPort}`;
-    byId("import-replacement").textContent = importPreview.replaceId
-      ? `Replace the saved connection for this exact domain. Its local identity and ${importPreview.enabled ? "enabled" : "disabled"} state will be preserved.`
-      : "Add a new enabled connection. Requests for this domain and its descendants will use this node.";
-  }
   byId("empty").hidden = state.connections.length !== 0 || state.phase !== "ready";
   byId("connections").replaceChildren();
   for (const entry of state.connections) {
@@ -85,8 +76,8 @@ function render() {
     open.disabled = secureOpen.disabled = !entry.enabled || busy || state.phase !== "ready";
     const edit = button("Edit", "edit", entry, () => {
       showError();
-      clearImport();
-      byId("advanced-settings").open = true;
+      // Renaming a saved card must not change its endpoints.
+      automaticAddresses.clear();
       for (const [key, id] of Object.entries(fields)) {
         if (key === "enabled") byId(id).checked = entry[key];
         else byId(id).value = entry[key];
@@ -113,22 +104,15 @@ function render() {
 async function run(message) {
   if (busy) return false;
   busy = true;
-  if (message.action !== "preview-import" && message.action !== "import") clearImportPreview();
   showError();
   render();
   try {
     const result = await browser.runtime.sendMessage({ channel: "portmap-connections", ...message });
     if (!result?.ok) throw new Error(result?.error || "The extension background is unavailable. Reload this page.");
-    const { importPreview: preview, ...nextState } = result.state;
-    state = nextState;
-    if (preview) importPreview = preview;
-    return result.state;
+    state = result.state;
+    return true;
   } catch (failure) {
-    // Import transport errors can contain sensitive request details.
-    showError(message.action === "preview-import" || message.action === "import"
-      ? "Could not import this connection. Check the code and ensure its domain does not overlap another connection. If the list changed, preview again."
-      : failure.message);
-    if (message.action === "preview-import" || message.action === "import") clearImportPreview();
+    showError(failure.message);
     return false;
   } finally {
     busy = false;
@@ -136,31 +120,11 @@ async function run(message) {
   }
 }
 
+byId("name").addEventListener("input", fillAddressesFromName);
+for (const id of ["domain", "proxy-host"]) {
+  byId(id).addEventListener("input", () => automaticAddresses.delete(id));
+}
 
-byId("import-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  clearImportPreview();
-  await run({ action: "preview-import", code: byId("connection-code").value });
-});
-byId("connection-code").addEventListener("input", () => {
-  clearImportPreview();
-  showError();
-});
-byId("cancel-import").addEventListener("click", () => {
-  clearImport();
-  showError();
-  byId("connection-code").focus();
-});
-byId("confirm-import").addEventListener("click", async () => {
-  if (!importPreview) return;
-  const { revision, replaceId } = importPreview;
-  if (await run({ action: "import", code: byId("connection-code").value, revision, replaceId })) {
-    clearImport();
-    clearEditor();
-    render();
-  }
-});
-window.addEventListener("pagehide", clearImport);
 byId("connection-form").addEventListener("submit", async event => {
   event.preventDefault();
   const connection = {};
@@ -173,10 +137,7 @@ byId("connection-form").addEventListener("submit", async event => {
 byId("cancel-edit").addEventListener("click", clearEditor);
 byId("reset").addEventListener("click", async () => {
   if (confirm("Delete all local connections and saved passwords? All .portmap addresses will be blocked.")) {
-    if (await run({ action: "reset" })) {
-      clearEditor();
-      clearImport();
-    }
+    if (await run({ action: "reset" })) clearEditor();
   }
 });
 browser.storage.onChanged.addListener((changes, area) => {

@@ -326,3 +326,10 @@
   pinned self-hosted web-ext lint passed; prior current-source behavior proof
   is retained. Exact-tag CI must sign and pass actual stable desktop/Android
   imports before publishing artifacts and completing Brew distribution.
+- Merge feat/browser-name-autofill: honor the user's corrected scope by removing
+  the entire unrequested connection-code/--pair feature and restoring ordinary
+  connection setup. Only name-derived domain/host completion is added; manual
+  overrides, saved endpoints, real port/credentials and existing routing remain.
+  Independent Python1636/JS18 and actual desktop/Android each29 cases passed.
+  Android fixture reload/DNS assumptions were corrected without changing product
+  behavior; no production nodes, host DNS, VPN or workspace settings were changed.
