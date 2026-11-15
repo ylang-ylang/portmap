@@ -1,0 +1,54 @@
+name: browser-extension-tests
+
+on:
+  pull_request:
+    paths:
+      - 'extension/firefox/**'
+      - 'src/portmap/browser_proxy.py'
+      - 'src/portmap/cli.py'
+      - 'tests/browser/**'
+      - 'tests/test_browser_proxy.py'
+      - 'tests/test_firefox_release.py'
+      - 'tools/build_firefox_extension.py'
+      - 'tools/release_pipeline.py'
+      - '.github/workflows/browser-tests.yml'
+      - '.github/workflows/release.yml'
+  push:
+    branches: ['feat/firefox-client']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: Two-node Docker and actual Firefox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Exercise routing and lifecycle boundaries
+        run: node --test extension/firefox/tests/*.test.cjs
+      - name: Exercise node and release boundaries
+        run: |
+          python3 -m venv "$RUNNER_TEMP/browser-python"
+          "$RUNNER_TEMP/browser-python/bin/pip" install -e '.[test]'
+          "$RUNNER_TEMP/browser-python/bin/python" -m pytest tests/test_browser_proxy.py tests/test_firefox_release.py tests/test_release_pipeline.py
+      - name: Exercise actual Firefox against two isolated nodes
+        run: |
+          sh tests/browser/run.sh --development \
+            --project "portmap-browser-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --artifacts "$RUNNER_TEMP/browser-proof"
+      - name: Retain browser evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/browser-proof
+          if-no-files-found: warn
+          retention-days: 30

@@ -170,7 +170,9 @@ Manage port resources and their repo/worktree/branch index.
 Do not manage protocol behavior.
 
 Use Traefik, CoreDNS, and Docker Compose as the network data plane.
-Do not implement an HTTP/TCP/UDP proxy inside portmap.
+Keep general HTTP/TCP/UDP routing in those data planes. The explicit browser
+adapter is limited to authenticated requests for one namespace and a fixed
+existing ingress; it must never become an arbitrary-destination forward proxy.
 ```
 
 For example, a TURN-like endpoint is just an entry port plus an allocated port
@@ -674,6 +676,146 @@ project containers use CoreDNS's gateway-network address rather than host
 loopback. SSH/direct clients do not require remote port 53.
 Public project controls remain unauthenticated: publish only to trusted
 networks, not the public Internet.
+
+### Firefox on Android and Desktop
+
+`extension/firefox` is one Firefox extension for Android and desktop, requiring
+Firefox 140 or later on desktop and 142 or later on Android, including built-in
+data-transmission consent. Each browser stores its own node connections; no central
+Portmap manager is required. The extension selects an authenticated SOCKS5 node
+with remote DNS for each configured namespace while retaining the original
+`.portmap` URL, Host, origin credentials and request body. The node maps that
+namespace to a fixed existing ingress, not an external DNS lookup. Other websites
+retain the browser's existing routing. It does not change system DNS, VPNs,
+Tailscale preferences or Coder workspace state.
+
+Firefox can independently issue speculative DNS queries, including HTTPS
+resource records, for these original names even when actual requests use the
+selected SOCKS node. Remote-DNS routing does not guarantee zero browser DNS
+queries: the browser's configured resolver may see internal domain names.
+This known limitation is disclosed and accepted; tests retain DNS diagnostics
+but gate actual routing, authentication, TLS and no-direct-traffic fallback.
+No browser-wide prediction or DNS settings are changed to hide the queries.
+
+The browser must already be able to reach each node, for example over Tailscale.
+Do not exclude Firefox from Tailscale app-based split tunneling. The extension
+does not implement SSH, establish a tailnet, or start sleeping workspaces.
+Configured namespaces must not overlap. Initial requests wait for local storage
+validation; missing, disabled, invalid or revoked `.portmap` connections fail
+closed instead of using another node or ordinary browser routing. Removing a
+connection blocks new requests; established WebSockets/streams require closing
+their tabs.
+
+#### Explicit node endpoint
+
+Start the compatibility endpoint only after identifying this node's existing
+public/web ingress. This is a foreground command; it does not run setup,
+restart containers or change service boot configuration:
+
+```bash
+portmap browser-proxy --config /private/path/browser-proxy.json
+```
+
+Example configuration (replace the example Tailscale address, namespace and
+credentials with this node's actual values, and protect the file with mode 0600):
+
+```json
+{
+  "domain": "a.portmap",
+  "listen": {"host": "100.64.0.10", "port": 18080},
+  "credentials": {"username": "browser", "password": "use-a-unique-private-secret"},
+  "ingress": {"host": "100.64.0.10", "port": 80, "scope": "public"}
+}
+```
+
+The `ingress` address must already serve the specified **local public/web**
+namespace. In particular, do not substitute Portmap's default private
+`127.0.0.1:80` listener: it can expose imported remote catalogs and controls.
+`scope` records the operator's explicit choice, not automatic discovery or
+proof of the ingress role. Choosing `private` emits an exposure warning.
+Limit reachability of the new listener with tailnet grants/firewall rules.
+SOCKS5 does not encrypt credentials or HTTP content itself: keep Tailscale
+connected and use its encrypted private reachability. The extension cannot
+verify Android's VPN state. Never expose this listener to the public Internet.
+Each username and password must contain 1–255 UTF-8 bytes.
+
+Add the same namespace, proxy address, port and credentials in the
+extension's **Portmap connections** page. Secrets are stored only in this
+browser's local extension storage, not synced; anyone controlling the browser
+profile can read them. Grant the extension access only in the browser contexts
+you intend to use; private windows without extension permission are not covered.
+
+Only authenticated SOCKS5 CONNECT with a domain-name destination is accepted;
+client-resolved IP destinations, anonymous authentication and other commands
+are rejected. HTTP and WebSocket targets use port 80: the adapter validates one
+inner HTTP request and binds its Host to the authorized SOCKS destination before
+opening the fixed ingress. It forwards opaque WebSocket frames only after a
+verified upgrade, never arbitrary plaintext TCP.
+
+HTTPS/WSS targets use port 443 and require a separately prepared isolated TLS
+ingress: `"tls_ingress": {"host": "127.0.0.1", "port": 8443, "scope_domain": "a.portmap"}`.
+The fixed TLS ingress must enforce both SNI and encrypted HTTP Host scope itself,
+because the adapter does not decrypt origin TLS. Existing Portmap HTTP ingress
+does not supply this optional TLS capability. No certificate checks are disabled.
+There is no HTTP-proxy mode or SOCKS-over-TLS listener; transport encryption is
+provided by Tailscale, independently of the browser's end-to-end origin HTTPS.
+
+#### Development verification and release
+
+The reproducible unsigned development package is built with:
+
+```bash
+python3 tools/build_firefox_extension.py build --output /tmp/portmap-development.xpi
+node --test extension/firefox/tests/*.test.cjs
+sh tests/browser/run.sh --development
+```
+
+The Docker fixture uses two independent nodes and actual Firefox, with separate
+namespace-scoped TLS fixtures, ordinary browsing and a leak trap. It never mounts
+the host runtime socket or uses host networking. Each run has its own Compose
+project and cleans only that project's resources. Retained evidence identifies
+the exact extension digest, browser version, install mode and exercised cases.
+Desktop viewport resizing is not Android verification.
+
+Actual Android development testing uses the isolated Nightly fixture:
+
+```bash
+ACCEPT_ANDROID_SDK_LICENSE=1 sh tests/browser/run.sh --android --development
+```
+
+This development mode is not signed-release proof; the release gate below uses
+official release Firefox with signature enforcement.
+
+Release mode installs a **Mozilla-signed** XPI permanently with signature
+enforcement enabled. Both actual desktop and Android evidence must pass for
+the same signed bytes and source commit before attaching release assets:
+
+```bash
+sh tests/browser/run.sh --require-signed --xpi /path/to/signed.xpi --artifacts /tmp/desktop-proof
+ACCEPT_ANDROID_SDK_LICENSE=1 sh tests/browser/run.sh --android --require-signed \
+  --xpi /path/to/signed.xpi --artifacts /tmp/android-proof
+```
+
+The Android fixture needs `/dev/kvm` and explicitly accepted
+[Android SDK terms](https://developer.android.com/studio/terms); it passes only
+that device to its isolated emulator container, never `--privileged`.
+Missing SDK/APK, signing credentials, failed tests or absent Android evidence
+block release; unsigned development installation is not a release substitute.
+
+Self-distribution uses Mozilla's **unlisted** channel, GitHub Releases for
+`portmap-firefox-VERSION.xpi`, and `firefox-updates.json` at the fixed latest-release
+HTTPS URL. Every version still needs Mozilla signing and review compliance.
+CI requires repository secrets `AMO_JWT_ISSUER` and `AMO_JWT_SECRET`, plus the
+explicit `ACCEPT_ANDROID_SDK_LICENSE=1` repository variable for the emulator.
+Do not paste these secrets into issue reports, command lines or extension files.
+Signed payloads are compared to the source allowlist and covered by the same
+immutable release manifest as the runtime archives. Published bytes are never
+replaced; retries reuse retained signed output and original release artifacts.
+
+For first installation on Android, download the signed XPI, open **Settings →
+About Firefox**, tap the Firefox logo five times, then use **Install Extension
+from File**. On desktop use **Add-ons and themes → Install Add-on From File**.
+Subsequent compatible versions are discovered through the extension update URL.
 
 ### Container Runtime: Docker or Podman
 

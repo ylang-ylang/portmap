@@ -101,6 +101,7 @@ jobs:
       historical: ${{ steps.plan.outputs.historical }}
       mode: ${{ steps.plan.outputs.mode }}
       automation_sha: ${{ steps.trust.outputs.automation_sha }}
+      firefox: ${{ steps.plan.outputs.firefox }}
     steps:
       - name: Preflight the dedicated Brew tap token
         env:
@@ -182,9 +183,20 @@ jobs:
           import json, os
           plan = json.load(open("plan.json"))
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              for key in ("tag", "version", "commit", "historical", "mode"):
+              for key in ("tag", "version", "commit", "historical", "mode", "firefox"):
                   out.write(f"{key}={plan[key]}\n")
           PY
+
+      - name: Require signing credentials before a Firefox-enabled build
+        if: steps.plan.outputs.firefox == 'True' && steps.plan.outputs.mode == 'build'
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          if [ -z "$AMO_JWT_ISSUER" ] || [ -z "$AMO_JWT_SECRET" ]; then
+            echo "::error::AMO_JWT_ISSUER and AMO_JWT_SECRET are required for unlisted Firefox signing. No unsigned public release is permitted."
+            exit 1
+          fi
 
   build:
     name: Build only when no release exists
@@ -267,6 +279,11 @@ jobs:
           "$RUNNER_TEMP/portmap-tests/bin/pip" install --no-cache-dir -e ".[test]"
           "$RUNNER_TEMP/portmap-tests/bin/python" -m pytest -m "not integration"
 
+
+      - name: Exercise Firefox routing and state transitions
+        if: needs.plan.outputs.mode == 'build' && needs.plan.outputs.firefox == 'True'
+        working-directory: source
+        run: node --test extension/firefox/tests/*.test.cjs
       # Exact-tag-build: tests or the rebuild must not have modified any
       # TRACKED file (untracked node_modules/dist stay usable); the frozen
       # archive is built from the exact tagged tree or not at all.
@@ -322,7 +339,7 @@ jobs:
         if: needs.plan.outputs.mode == 'build'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.plan.outputs.firefox == 'True' && 'runtime-assets' || 'release-assets' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             source/dist/*.tar.gz
             source/dist/*.sha256
@@ -331,9 +348,143 @@ jobs:
           retention-days: 90
           overwrite: true
 
+  firefox:
+    name: Sign and verify Firefox on desktop and Android
+    needs: [plan, build]
+    if: needs.plan.outputs.mode == 'build' && needs.plan.outputs.firefox == 'True'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the validated source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          path: source
+          persist-credentials: false
+      - name: Set up Node for the pinned signing tool
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Download the verified runtime assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: runtime-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: source/dist
+      - name: Stage only the extension runtime
+        run: |
+          python3 source/tools/build_firefox_extension.py build --output "$RUNNER_TEMP/firefox-development.xpi"
+          python3 -m zipfile -e "$RUNNER_TEMP/firefox-development.xpi" "$RUNNER_TEMP/firefox-source"
+      - name: Find retained signing output for this exact source
+        id: signed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ needs.plan.outputs.commit }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=firefox-signed-$SOURCE_COMMIT&per_page=100" > "$RUNNER_TEMP/signing-artifacts.json"
+          python3 - <<'PY'
+          import json, os
+          artifacts = json.load(open(os.environ["RUNNER_TEMP"] + "/signing-artifacts.json"))["artifacts"]
+          matching = [a for a in artifacts if not a["expired"] and a["name"] == "firefox-signed-" + os.environ["SOURCE_COMMIT"]]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("artifact_id=" + (str(matching[0]["id"]) if matching else "") + "\n")
+              output.write("run_id=" + (str(matching[0]["workflow_run"]["id"]) if matching else "") + "\n")
+          PY
+      - name: Reuse the original signed bytes on retry
+        if: steps.signed.outputs.artifact_id != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ steps.signed.outputs.artifact_id }}
+          run-id: ${{ steps.signed.outputs.run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/firefox-signed
+      - name: Obtain Mozilla unlisted signature
+        if: steps.signed.outputs.artifact_id == ''
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          npm exec --yes --package=web-ext@10.8.0 -- web-ext sign \
+            --source-dir "$RUNNER_TEMP/firefox-source" \
+            --artifacts-dir "$RUNNER_TEMP/firefox-signed" \
+            --channel unlisted --timeout 900000 --approval-timeout 900000
+      - name: Preserve signed output before browser tests
+        if: steps.signed.outputs.artifact_id == ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: firefox-signed-${{ needs.plan.outputs.commit }}
+          path: ${{ runner.temp }}/firefox-signed/*.xpi
+          if-no-files-found: error
+          retention-days: 90
+      - name: Verify signed payload matches the exact source
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, "source/tools")
+          from build_firefox_extension import check_signed_payload
+          files = list(Path(os.environ["RUNNER_TEMP"], "firefox-signed").rglob("*.xpi"))
+          if len(files) != 1:
+              raise SystemExit("Expected exactly one signed XPI")
+          check_signed_payload(Path("source"), files[0])
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"SIGNED_XPI={files[0]}\n")
+          PY
+      - name: Test permanent signed installation in actual desktop Firefox
+        working-directory: source
+        run: |
+          sh tests/browser/run.sh --require-signed --xpi "$SIGNED_XPI" \
+            --project "portmap-browser-release-desktop-${GITHUB_RUN_ID}" \
+            --artifacts "$RUNNER_TEMP/firefox-desktop"
+      - name: Test permanent signed installation in actual Firefox Android
+        working-directory: source
+        env:
+          ACCEPT_ANDROID_SDK_LICENSE: ${{ vars.ACCEPT_ANDROID_SDK_LICENSE }}
+        run: |
+          sh tests/browser/run.sh --android --require-signed --xpi "$SIGNED_XPI" \
+            --project "portmap-browser-release-android-${GITHUB_RUN_ID}" \
+            --artifacts "$RUNNER_TEMP/firefox-android"
+      - name: Attach only source-bound dual-platform verified assets
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
+        run: |
+          python3 source/tools/build_firefox_extension.py attach \
+            --signed-xpi "$SIGNED_XPI" --assets-dir source/dist \
+            --tag "$TAG" --commit "$COMMIT" \
+            --desktop-evidence "$RUNNER_TEMP/firefox-desktop/result.json" \
+            --android-evidence "$RUNNER_TEMP/firefox-android/result.json"
+          python3 source/tools/release_pipeline.py --repo-root source check-build \
+            --tag "$TAG" --commit "$COMMIT" --assets-dir source/dist
+      - name: Retain the complete immutable release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            source/dist/*.tar.gz
+            source/dist/*.xpi
+            source/dist/*.sha256
+            source/dist/release.json
+            source/dist/firefox-updates.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain actual browser evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: firefox-release-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/firefox-desktop
+            ${{ runner.temp }}/firefox-android
+          if-no-files-found: warn
+          retention-days: 90
+
   publish:
     name: Publish or complete the immutable GitHub release
-    needs: build
+    needs: [build, firefox]
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:

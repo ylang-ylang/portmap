@@ -24,6 +24,13 @@
     {
       "source": "dev",
       "source_ref": "refs/heads/dev",
+      "target": "case/*/*",
+      "target_ref": "refs/heads/case/*/*",
+      "target_ref_regex": "^refs/heads/case/.+/.+$"
+    },
+    {
+      "source": "dev",
+      "source_ref": "refs/heads/dev",
       "target": "release/*",
       "target_ref": "refs/heads/release/*",
       "target_ref_regex": "^refs/heads/release/.+$"

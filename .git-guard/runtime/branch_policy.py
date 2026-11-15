@@ -11,7 +11,7 @@ try:
     from .branch_logs import enforce_branch_log_update
     from .common import HookReject, RefUpdate, SourceCandidate, ZERO, warn
     from .config import config_bool
-    from .git_ops import first_matching, git, is_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from .git_ops import git, is_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from .policy import is_allowed_branch_ref, required_target_refs, rule_targets_ref
     from .state import enforce_pending_lock, enforce_pending_tag_lock, load_state, save_state
     from .submodule_policy import enforce_submodule_main_guard
@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - installed hook script mode
     from branch_logs import enforce_branch_log_update
     from common import HookReject, RefUpdate, SourceCandidate, ZERO, warn
     from config import config_bool
-    from git_ops import first_matching, git, is_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
+    from git_ops import git, is_ancestor, is_policy_ref, ref_contains, ref_exists, refs_matching, rev_parse, short_sha
     from policy import is_allowed_branch_ref, required_target_refs, rule_targets_ref
     from state import enforce_pending_lock, enforce_pending_tag_lock, load_state, save_state
     from submodule_policy import enforce_submodule_main_guard
@@ -213,15 +213,24 @@ def validate_branch_creation_or_replacement(
     if update.ref in set(policy.get("protected_refs", [])):
         return
 
-    edge = first_matching(policy.get("branch_from", []), "target_ref_regex", update.ref)
-    if not edge:
+    sources = branch_creation_sources(repo, policy, update)
+    if not sources:
         raise HookReject("BRANCH_CREATION_NOT_ALLOWED", ref=update.ref)
+    if any(sha == update.new for _, sha in sources):
+        return
 
-    source_ref = edge["source_ref"]
-    if not ref_exists(repo, source_ref):
-        raise HookReject("BRANCH_SOURCE_MISSING", ref=update.ref, source_ref=source_ref)
-    if rev_parse(repo, source_ref) != update.new:
-        raise HookReject("BRANCH_SOURCE_MISMATCH", ref=update.ref, source_ref=source_ref, new=short_sha(update.new))
+    existing_sources = [ref for ref, sha in sources if sha is not None]
+    if not existing_sources:
+        raise HookReject("BRANCH_SOURCE_MISSING", ref=update.ref, source_ref=sources[0][0])
+    raise HookReject("BRANCH_SOURCE_MISMATCH", ref=update.ref, source_ref=existing_sources[0], new=short_sha(update.new))
+
+def branch_creation_sources(repo: Path, policy: dict[str, Any], update: RefUpdate) -> list[tuple[str, str | None]]:
+    sources = []
+    for edge in policy.get("branch_from", []):
+        if re.match(edge["target_ref_regex"], update.ref):
+            source_ref = edge["source_ref"]
+            sources.append((source_ref, rev_parse(repo, source_ref) if ref_exists(repo, source_ref) else None))
+    return sources
 
 def validate_managed_branch_update(
     repo: Path,
@@ -372,10 +381,13 @@ def update_committed_state(repo: Path, policy: dict[str, Any], state_path: Path,
 
     for update in meaningful_updates:
         if update.ref.startswith("refs/heads/") and update.old == ZERO and update.new != ZERO:
-            edge = first_matching(policy.get("branch_from", []), "target_ref_regex", update.ref)
-            if edge:
+            source_ref = next(
+                (ref for ref, sha in branch_creation_sources(repo, policy, update) if sha == update.new),
+                None,
+            )
+            if source_ref:
                 branch_bases[update.ref] = {
-                    "source_ref": edge["source_ref"],
+                    "source_ref": source_ref,
                     "base_sha": update.new,
                     "base_release_tag": latest_reachable_release_tag(repo, update.new),
                 }

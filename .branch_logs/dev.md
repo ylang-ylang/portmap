@@ -235,6 +235,11 @@
   mean no draft exists. Use complete release-list discovery and isolate draft-aware
   planning from the read-only source build job. Retry the existing v0.20.0 draft
   and uploaded attachments without rebuilding, retagging or upgrading machines.
+- v0.20.0 is now formally published; workflow39289657900 succeeded and tap PR4
+  merged. Recovery did not rebuild or replace anything: Release417475653 and
+  archive SHA25681488dd8369c83acd13ce68342f3bba950f23d79ce28290268166c7fa9d97dcc
+  match the original build. Brew now serves0.20.0. This is completed publication,
+  not the old failed/waiting run39280508837. No user-machine upgrades performed.
 - hotfix/reconnect-after-network-loss: maintain saved owned SSH connections from
   the existing host agent, withdraw dead routes, and restore with bounded backoff
   after network recovery. Preserve explicit disconnects, healthy peers and remote
@@ -242,6 +247,12 @@
 - Diagnose mj's hibernation-triggered NetworkManager/Tailscale direct-DNS conflict.
   Persistent host configuration delegates both to resolved; reloading NM preserved
   the stub, resolved PID and working voxmani portal. Document this admin-only policy.
+- Integrate final v0.20.1 acceptance: 1418 tests passed; frozen version/Skill HTTP
+  passed; a real isolated SSH outage withdrew its route and recovered automatically
+  in about 8s. Explicit disconnect stayed disconnected; smoke resources removed.
+- v0.20.1 is formally published: Actions39367456043 succeeded and tap PR6 merged.
+  Explicit Brew activation upgraded only mj to0.20.1; setup completed successfully.
+  Existing v0.20.0 and other machine installations were not rewritten/upgraded.
 - hotfix/catalog-host-path-status: stop using the catalog filesystem to classify
   host project paths. Unknown/untracked stays distinct from host-confirmed deletion;
   matching agent metadata remains authoritative. Preserve running-service controls.
@@ -285,3 +296,11 @@
   list. Preserve scan/grouping fixes, stale-inventory safety and running services.
   Focused Chromium desktop/mobile, refresh and state-boundary checks passed;
   compiled assets and the documented folding contract are included.
+- Merge `feat/firefox-client`: Firefox Android/desktop independent connections,
+  authenticated fixed-ingress SOCKS5, original .portmap URLs and isolated Docker
+  verification. Final desktop/native Android each passed 25 cases on identical
+  development XPI; Python 1632 passed and final JS 18 passed. Incidental Firefox
+  DNS queries are disclosed and explicitly accepted; real direct-traffic
+  fallback, authentication and TLS remain gated. Include required installed
+  GitGuard synchronization and matching contribution prose. No release tag or
+  deployment; Mozilla signing and signed-install verification remain pending.

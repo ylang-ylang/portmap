@@ -11,3 +11,8 @@
 - The installed git-guard auto-sync regenerated its managed Python >=3.11
   interpreter selector during commit; include that required managed-file update
   without disabling or bypassing any hook.
+- Completed: workflow39289657900 succeeded for the existing v0.20.0 tag.
+  Build steps and artifact downloads were skipped; original Release417475653
+  and all three attachment IDs/digests were preserved while the draft was published.
+  Tap PR4 passed checks and merged. The rotated Actions Secret worked for tap
+  distribution; no token was logged and no user machine was upgraded.

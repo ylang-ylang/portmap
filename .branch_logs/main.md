@@ -170,3 +170,11 @@
   improvements. Real-browser folding/refresh and mobile popup checks passed.
   Deploy only mj's portal for this UI correction; remote backend upgrades are
   unnecessary and are not part of publication.
+- Release v0.21.0: independent Firefox Android/desktop connections, scoped
+  authenticated SOCKS5 ingress, preserved original URLs and fixed startup
+  storage initialization. Development browser suites each passed25 cases;
+  original-domain speculative DNS queries are disclosed and user-accepted.
+  Require built-in consent on Firefox140 desktop/142 Android. Catalog rebuild
+  matches committed assets and self-hosted lint is clean. Tag-only CI signs,
+  tests the signed desktop/Android packages and publishes immutable artifacts
+  with verified Brew distribution. Publication never upgrades user machines.

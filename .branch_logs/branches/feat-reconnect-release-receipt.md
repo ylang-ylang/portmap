@@ -1,0 +1,11 @@
+# feat/reconnect-release-receipt
+
+- v0.20.1 published from protected main merge 1b811cd6ce4103dbcfbf939debef0bd2c4af8b17. GitHub Actions run 39367456043 succeeded through exact-source tests, frozen build/runtime gate, immutable Release publication and Brew distribution.
+- Release: https://github.com/ylang-ylang/portmap/releases/tag/v0.20.1
+- Tap PR6 passed checks and merged: https://github.com/ylang-ylang/homebrew-tap/pull/6
+- Formal linux-amd64 archive SHA256: b131f63115ce5fd83c7bdba07a47f80e4a92a465277923b60183cc7f29a8be8b (8804317 bytes). This is the formal main-merge build, not the earlier disposable candidate build.
+- Git guard initially rejected the patch tag because its hotfix branch-base bookkeeping was absent. Independently verified the original creation reflog, v0.20.0 peeled commit and ancestry. Backed up the state, restored only that missing record (main / 36a42c40f687b275aaeb5d5f34d6bbff217bfe31 / v0.20.0), preserved pending tag records, and reran the unchanged normal tag hook successfully. No hook or policy bypass. Create future branches explicitly with git branch from the primary worktree before git worktree add, so creation is recorded before a new checkout exists.
+- Explicitly upgraded only mj through Homebrew over the independent LAN SSH path. Portmap 0.18.0 -> 0.20.1; setup service exited success and reported ready. Standard Brew update also updated Brew 7.0.9 -> 7.0.10 and the required sqlite dependency 3.54.0 -> 3.54.1. No remote machine was auto-upgraded by CI.
+- Setup restored the mujoco SSH profile and preserved saved connections. The unrelated dexgem-server target reported a restore failure; it was not silently deleted or treated as healthy.
+- Actual mj acceptance: controlled exit of only its verified Portmap-owned voxmani SSH master produced HTTP502, then automatic recovery after4.67s with a new controlpath and genuine remote registry HTTP200. No manual connect was issued. Mujoco and ylang-u22 remained reachable; dexgem-server remained offline as before.
+- Actual mj portal showed Access OK, voxmani.portmap and Portmap v0.20.1. The resolved stub symlink and active service remained intact. Owned browser, SSH forward and temporary verification files were removed. Safe NM reload and controlled SSH loss were tested; no real hibernation/reboot or physical network switch was imposed on the user.

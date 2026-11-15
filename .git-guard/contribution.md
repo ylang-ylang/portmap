@@ -66,7 +66,7 @@ gitGraph TB:
 
 - `feat/*` branches from `dev`, must absorb the current `dev`, and merges to `dev`.
 - `case/*/*` means `case/<context>/<topic>`, where `<context>` is a real project, customer, dataset, robot, deployment, or reproducible scenario.
-- `case/*/*` branches from `main` and may merge only into `feat/*`.
+- `case/*/*` may branch from either long-lived integration branch (`main` or `dev`) and may merge only into `feat/*`; the installed GitGuard compiler expands this family to all declared long-lived branches.
 - `case/*/*` must not merge directly into `dev` or `main`; reusable work must be distilled through `feat/*`.
 - `release/*` branches from `dev`, must merge to `dev`, then merge to `main`; the `main` merge result must be tagged with `v#.#.0`.
 - `hotfix/*` branches from `main`, must merge to `dev`, then merge to `main`; the `main` merge result must be tagged with `v=.=.#`.
