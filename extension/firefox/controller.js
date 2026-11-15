@@ -143,25 +143,6 @@
         if (message.action === "get") return snapshot();
         if (message.action === "reset") return persist([]);
         if (phase !== "ready") throw new Error(error || "Connections are loading. Try again shortly.");
-        if (message.action === "preview-import" || message.action === "import") {
-          const payload = core.decodeConnectionCode(message.code);
-          const existing = config.connections.find(entry => entry.domain === payload.domain);
-          if (message.action === "import" && (message.revision !== config.revision ||
-              message.replaceId !== (existing?.id ?? null))) {
-            throw new Error("Connections changed. Preview the connection code again before importing.");
-          }
-          const connection = core.normalizeConnection({ ...payload,
-            id: existing?.id ?? makeId(), enabled: existing?.enabled ?? true });
-          const connections = core.validateConnections([
-            ...config.connections.filter(entry => entry.id !== existing?.id), connection
-          ]);
-          if (message.action === "import") return persist(connections);
-          return { ...snapshot(), importPreview: {
-            name: connection.name, domain: connection.domain,
-            proxyHost: connection.proxyHost, proxyPort: connection.proxyPort,
-            replaceId: existing?.id ?? null, enabled: connection.enabled, revision: config.revision
-          } };
-        }
         if (message.action === "save") {
           const input = { ...message.connection };
           if (!input.id) input.id = makeId();

@@ -30,10 +30,8 @@ export BROWSER_ANDROID_IMAGE="$project-android:fixture"
 export BROWSER_UID="$(id -u)" BROWSER_GID="$(id -g)"
 export BROWSER_KVM_GID=0
 export BROWSER_SOURCE_COMMIT="${BROWSER_SOURCE_COMMIT:-$(git -C "$root" rev-parse HEAD)}"
-export BROWSER_PAIRING_DIR="$artifacts/pairing"
-mkdir -p "$BROWSER_PAIRING_DIR"
 compose() {
-  docker compose --project-name "$project" --file "$root/tests/browser/compose.yaml" --file "$root/tests/browser/compose.android.yaml" --file "$root/tests/browser/compose.pairing.yaml" "$@"
+  docker compose --project-name "$project" --file "$root/tests/browser/compose.yaml" --file "$root/tests/browser/compose.android.yaml" "$@"
 }
 if [ "$cleanup_only" = 1 ]; then
   compose --profile android down --volumes --remove-orphans
