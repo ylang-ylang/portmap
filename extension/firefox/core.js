@@ -125,9 +125,39 @@
     }));
   }
 
+  function findReleaseUpdate(feed, addonId, installedVersion) {
+    const parseVersion = value => {
+      if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) throw new Error("Invalid release version.");
+      const parts = value.split(".").map(Number);
+      if (!parts.every(Number.isSafeInteger)) throw new Error("Invalid release version.");
+      return parts;
+    };
+    const updates = feed?.addons?.[addonId]?.updates;
+    if (!Array.isArray(updates)) throw new Error("Invalid extension update feed.");
+    let highest = parseVersion(installedVersion);
+    let selected = null;
+    for (const entry of updates) {
+      const parts = parseVersion(entry?.version);
+      const url = `https://github.com/ylang-ylang/portmap/releases/download/v${entry.version}/portmap-firefox-${entry.version}.xpi`;
+      if (entry.update_link !== url || typeof entry.update_hash !== "string" ||
+          !/^sha256:[a-f0-9]{64}$/i.test(entry.update_hash)) {
+        throw new Error("Invalid official release download.");
+      }
+      for (let index = 0; index < 3; index++) {
+        if (parts[index] < highest[index]) break;
+        if (parts[index] > highest[index]) {
+          selected = Object.freeze({ version: entry.version, url });
+          highest = parts;
+          break;
+        }
+      }
+    }
+    return selected;
+  }
+
   const api = Object.freeze({ normalizeConnection, normalizeDomain, normalizeProxyHost,
     matchesDomain, isPortmapHost, inspectUrl, validateConnections,
-    readConfig, compileConnections });
+    readConfig, compileConnections, findReleaseUpdate });
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortmapCore = api;
 })(globalThis);

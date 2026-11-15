@@ -307,6 +307,26 @@ def run(args, proof, browser_factory):
             import autofill
             autofill.exercise(browser, case)
             case("save-two-independent-connections", lambda: (browser.save("a.portmap", "node-a", "user-a", "pass-a"), browser.save("b.portmap", "node-b", "user-b:β", "pass-b-密")))
+            def unavailable_update_feed():
+                # This fixture intentionally has no external egress: exercise a
+                # real failed fetch, not a mocked successful installation.
+                browser.options()
+                before = {domain: browser.cards(domain)[0].get_attribute("data-connection-id")
+                          for domain in ("a.portmap", "b.portmap")}
+                name = browser.driver.find_element(By.ID, "name")
+                name.clear()
+                name.send_keys("draft-node")
+                version = browser.driver.find_element(By.ID, "installed-version").text
+                browser.driver.find_element(By.ID, "check-update").click()
+                WebDriverWait(browser.driver, 40).until(lambda current:
+                    current.find_element(By.ID, "update-status").get_attribute("data-state") == "error")
+                require(browser.driver.find_element(By.ID, "check-update").is_enabled(), "Failed check cannot be retried")
+                require(not browser.driver.find_element(By.ID, "download-update").is_displayed(), "Failed check exposed a download link")
+                require(browser.driver.find_element(By.ID, "installed-version").text == version, "Checking changed the reported installed version")
+                require(browser.driver.find_element(By.ID, "name").get_attribute("value") == "draft-node", "Checking discarded an unsaved form")
+                require(all(browser.cards(domain)[0].get_attribute("data-connection-id") == identity
+                            for domain, identity in before.items()), "Checking modified saved connections")
+            case("update-check-network-failure-preserves-connections", unavailable_update_feed)
             require(browser.driver.get_full_page_screenshot_as_file(str(ARTIFACTS / "options-configured.png")), "Could not capture actual configured extension UI")
             for domain, node in (("a.portmap", "node-a"), ("b.portmap", "node-b"), ("app.a.portmap", "node-a"), ("app.b.portmap", "node-b")):
                 def routing(domain=domain, node=node):
