@@ -187,3 +187,12 @@
   self-hosted lint preflight passed. Tag CI gates exact signed bytes on stable
   desktop/Android and completes immutable assets/Brew distribution. No existing
   node, Coder workspace, VPN or DNS configuration is changed by publication.
+- Release v0.23.0: replace the unrequested pairing workflow with ordinary name-
+  based domain/host completion, preserving manual overrides and existing saved
+  endpoints. Remove pairing CLI/import/runtime/tests; preserve historical records.
+  Add user-approved official-feed Check and Download controls, explicitly
+  requiring Android's manual file-install step and never confusing download with
+  installation. Source regressions, actual dual-platform UI/network smokes and
+  release-version/lint preflight passed. Exact-tag CI signs, verifies stable
+  desktop/Android, publishes source-bound assets and completes checked Brew
+  distribution; no installed node, workspace, VPN or host DNS change occurs.

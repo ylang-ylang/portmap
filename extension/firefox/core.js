@@ -5,9 +5,6 @@
   const CONTROL = /[\u0000-\u001f\u007f]/;
   const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
   const SCHEMES = new Set(["http:", "https:", "ws:", "wss:"]);
-  const CONNECTION_CODE_PREFIX = "portmap-connect-v1:";
-  const CONNECTION_CODE_FIELDS = ["name", "domain", "proxyHost", "proxyPort", "username", "password"];
-
 
   function dnsName(value, field) {
     if (typeof value !== "string") throw new Error(`${field} must be a hostname.`);
@@ -74,44 +71,6 @@
       username, password, enabled: input.enabled });
   }
 
-  function decodeConnectionCode(value) {
-    try {
-      if (typeof value !== "string") throw new Error();
-      const code = value.trim();
-      if (code.length > 8192 || !code.startsWith(CONNECTION_CODE_PREFIX)) throw new Error();
-      const encoded = code.slice(CONNECTION_CODE_PREFIX.length);
-      if (!/^[A-Za-z0-9_-]+$/.test(encoded) || encoded.length % 4 === 1) throw new Error();
-      const binary = atob(encoded.replace(/-/g, "+").replace(/_/g, "/"));
-      // Reject noncanonical unused bits, padding and alternate base64 alphabets.
-      if (btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") !== encoded) throw new Error();
-      const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-      const json = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-      const input = JSON.parse(json);
-      if (!input || typeof input !== "object" || Array.isArray(input) ||
-          Object.keys(input).length !== CONNECTION_CODE_FIELDS.length ||
-          !CONNECTION_CODE_FIELDS.every(field => Object.hasOwn(input, field))) throw new Error();
-      const normalized = normalizeConnection({ ...input, id: "import", enabled: true });
-      // These fields are scalars. Count members outside strings so duplicate
-      // keys cannot be silently discarded by JSON.parse.
-      let quoted = false;
-      let escaped = false;
-      let members = 0;
-      for (const character of json) {
-        if (quoted) {
-          if (escaped) escaped = false;
-          else if (character === "\\") escaped = true;
-          else if (character === "\"") quoted = false;
-        } else if (character === "\"") quoted = true;
-        else if (character === ":") members++;
-      }
-      if (members !== CONNECTION_CODE_FIELDS.length) throw new Error();
-      return Object.freeze(Object.fromEntries(CONNECTION_CODE_FIELDS.map(field => [field, normalized[field]])));
-    } catch (_) {
-      // JSON/encoding exceptions can include fragments of the credential payload.
-      throw new Error("Invalid connection code. Paste a complete portmap-connect-v1 code from your node (at most 8192 characters).");
-    }
-  }
-
   function matchesDomain(host, domain) {
     return host === domain || host.endsWith(`.${domain}`);
   }
@@ -166,9 +125,39 @@
     }));
   }
 
-  const api = Object.freeze({ normalizeConnection, normalizeDomain, normalizeProxyHost, decodeConnectionCode,
+  function findReleaseUpdate(feed, addonId, installedVersion) {
+    const parseVersion = value => {
+      if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) throw new Error("Invalid release version.");
+      const parts = value.split(".").map(Number);
+      if (!parts.every(Number.isSafeInteger)) throw new Error("Invalid release version.");
+      return parts;
+    };
+    const updates = feed?.addons?.[addonId]?.updates;
+    if (!Array.isArray(updates)) throw new Error("Invalid extension update feed.");
+    let highest = parseVersion(installedVersion);
+    let selected = null;
+    for (const entry of updates) {
+      const parts = parseVersion(entry?.version);
+      const url = `https://github.com/ylang-ylang/portmap/releases/download/v${entry.version}/portmap-firefox-${entry.version}.xpi`;
+      if (entry.update_link !== url || typeof entry.update_hash !== "string" ||
+          !/^sha256:[a-f0-9]{64}$/i.test(entry.update_hash)) {
+        throw new Error("Invalid official release download.");
+      }
+      for (let index = 0; index < 3; index++) {
+        if (parts[index] < highest[index]) break;
+        if (parts[index] > highest[index]) {
+          selected = Object.freeze({ version: entry.version, url });
+          highest = parts;
+          break;
+        }
+      }
+    }
+    return selected;
+  }
+
+  const api = Object.freeze({ normalizeConnection, normalizeDomain, normalizeProxyHost,
     matchesDomain, isPortmapHost, inspectUrl, validateConnections,
-    readConfig, compileConnections });
+    readConfig, compileConnections, findReleaseUpdate });
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortmapCore = api;
 })(globalThis);

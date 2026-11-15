@@ -706,45 +706,7 @@ closed instead of using another node or ordinary browser routing. Removing a
 connection blocks new requests; established WebSockets/streams require closing
 their tabs.
 
-#### Import a connection code
-
-On the target node, with its local Portmap publisher already running and
-Tailscale already connected, run:
-
-```bash
-portmap browser-proxy --pair
-```
-
-This reads the owned local namespace and live **public/web** ingress, selects
-the node's own Tailscale address, generates dedicated random SOCKS credentials,
-and binds an available unprivileged port. It prints one `portmap-connect-v1:`
-code only after the listener and ingress are ready and settings are saved.
-It does not start a workspace, run setup, expose the private portal, change
-Tailscale/DNS/firewall configuration, or contact a central connection manager.
-Tailnet grants must permit Firefox to reach the selected node and port.
-
-In the extension's **Portmap connections** page, paste the code into
-**Connection code**, choose **Preview connection**, verify the displayed node,
-domain and endpoint, then choose **Import connection**. There is no need to
-enter the six connection fields individually. Preview/cancel makes no saved
-change. Importing an existing exact domain explicitly replaces its connection
-details while preserving its local ID and enabled/disabled state; overlapping
-namespaces are rejected without changing existing connections.
-
-**Keep the node command running while using this connection.** It is a
-foreground proxy, not a newly installed background service. Ctrl-C stops only
-this proxy. Running the same command again reuses its saved port and credentials
-from `<state.dir>/browser-proxy/pairing.json` (directory 0700, file 0600).
-An occupied saved port, changed node/ingress/Tailscale identity, or unsafe file
-fails explicitly rather than silently selecting another endpoint or password.
-
-Treat the code as a password: it contains reusable credentials encoded as
-base64url, not encryption or a one-time invitation. Transfer it privately and
-do not paste it into logs, issue reports or public QR-code services. The input
-is masked and cleared after cancellation or successful import. Browser storage
-and encrypted-private-transport requirements below still apply.
-
-#### Advanced explicit node endpoint
+#### Explicit node endpoint
 
 Start the compatibility endpoint only after identifying this node's existing
 public/web ingress. This is a foreground command; it does not run setup,
@@ -777,22 +739,24 @@ connected and use its encrypted private reachability. The extension cannot
 verify Android's VPN state. Never expose this listener to the public Internet.
 Each username and password must contain 1–255 UTF-8 bytes.
 
-For a preconfigured endpoint, expand **Advanced: manual connection setup** in the
-extension and enter the namespace, proxy address, port and credentials.
-Alternatively, an owned mode-0600 configuration can emit a connection code:
+In the extension's **Portmap connections** page, enter the node name once:
+`voxmani` fills **Portmap domain** with `voxmani.portmap` and **Proxy host**
+with `voxmani`. Names are trimmed/lowercased and an existing `.portmap` suffix
+is not duplicated. The short host must actually resolve, for example through
+Tailscale MagicDNS; otherwise override it with the node's real address.
+This is local form completion, not node discovery or a pairing command.
 
-```bash
-portmap browser-proxy --pair --config /private/path/browser-proxy.json \
-  --advertise-host 100.64.0.10
-```
+Each address follows name changes until you edit that address manually.
+Renaming a saved connection preserves its existing endpoints and enabled state;
+saving or cancelling an edit resets automatic completion for the next new
+connection. A display-only name that is not a valid hostname leaves automatic
+addresses empty for explicit entry. The real proxy port, username and password
+are still required: the extension never invents credentials or a listening port.
 
-This advanced mode uses the supplied credentials and ingress rather than
-automatic discovery; the operator remains responsible for ingress scope and
-encrypted private reachability. A wildcard bind requires a concrete advertised
-host. Secrets are stored only in this browser's local extension storage, not synced;
+Secrets are stored only in this browser's local extension storage, not synced;
 anyone controlling the browser profile can read them. Grant the extension access
-only in the browser contexts
-you intend to use; private windows without extension permission are not covered.
+only in the browser contexts you intend to use; private windows without extension
+permission are not covered.
 
 Only authenticated SOCKS5 CONNECT with a domain-name destination is accepted;
 client-resolved IP destinations, anonymous authentication and other commands
@@ -820,21 +784,11 @@ sh tests/browser/run.sh --development
 ```
 
 The Docker fixture uses two independent nodes and actual Firefox, with separate
-namespace-scoped TLS fixtures, ordinary browsing and a leak trap. Both actual
-node CLI processes emit connection codes from private explicit fixture configs;
-the browser imports them through the real preview/confirm UI, without injecting
-storage. Cases cover cancellation, independent routing, exact-domain reimport
-with disabled-state/ID preservation, malformed and overlapping claims, advanced
-manual editing, and restart behavior. Automatic discovery/persistence tests
-simulate external publisher/runtime/Tailscale boundaries while exercising real
-listeners, readiness, authentication and saved credentials; they are not proof
-of registration with a real tailnet.
-
-The fixture never mounts the host runtime socket or uses host networking.
-Each run has its own Compose project and cleans only that project's resources.
-Retained evidence identifies the exact extension digest, browser version,
-install mode and exercised cases. Desktop viewport resizing is not Android
-verification.
+namespace-scoped TLS fixtures, ordinary browsing and a leak trap. It never mounts
+the host runtime socket or uses host networking. Each run has its own Compose
+project and cleans only that project's resources. Retained evidence identifies
+the exact extension digest, browser version, install mode and exercised cases.
+Desktop viewport resizing is not Android verification.
 
 Actual Android development testing uses the isolated Nightly fixture:
 
@@ -879,6 +833,24 @@ For first installation on Android, download the signed XPI, open **Settings →
 About Firefox**, tap the Firefox logo five times, then use **Install Extension
 from File**. On desktop use **Add-ons and themes → Install Add-on From File**.
 Subsequent compatible versions are discovered through the extension update URL.
+
+The settings page also has **Check for updates** and, when a newer release is
+available, **Download VERSION (.xpi)**. This user-triggered check reads the same
+official GitHub feed immediately, without waiting for Firefox's automatic
+schedule. It compares numeric release versions and only offers this extension's
+version-pinned official download. No node configuration is sent, and a failed
+check leaves saved connections and an unsaved form unchanged. Firefox's own
+automatic update mechanism is not disabled or rescheduled.
+
+**Downloading is not installing.** On Android, use **Settings → Install
+extension from file**, manually select the downloaded XPI, then confirm **Add**.
+Actual stable Firefox160 testing found that clicking the GitHub XPI only opens
+a download dialog; tapping the completed download reports that no app can open
+the XPI, even with the correct MIME type. The file-install menu is therefore
+required for this manual path. On desktop, follow Firefox's installation prompt
+or use the add-ons manager's file-install action. Firefox validates signature
+and compatibility; the extension neither installs itself nor reports a completed
+upgrade merely because a download was offered or started.
 
 ### Container Runtime: Docker or Podman
 

@@ -53,6 +53,9 @@ services:
   node-a:
     <<: *fixture
     command: [python, -m, portmap.cli, browser-proxy, --config, /app/tests/browser/node-a.json]
+    networks:
+      isolated:
+        aliases: [a]
     depends_on:
       fixture-a: {condition: service_healthy}
     healthcheck:
@@ -64,6 +67,9 @@ services:
   node-b:
     <<: *fixture
     command: [python, -m, portmap.cli, browser-proxy, --config, /app/tests/browser/node-b.json]
+    networks:
+      isolated:
+        aliases: [b]
     depends_on:
       fixture-b: {condition: service_healthy}
     healthcheck:

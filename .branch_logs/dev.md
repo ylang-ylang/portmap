@@ -321,3 +321,21 @@
   and desktop/native Android each30 cases passed. Automatic discovery smoke
   explicitly simulates external runtime/agent/Tailscale status; no production
   host/VPN/workspace changes. Signed release verification remains version-gated.
+- Integrate release/v0.22.0 before main: synchronize runtime/extension/lock
+  versions for connection-code pairing. Independent CLI/package identity and
+  pinned self-hosted web-ext lint passed; prior current-source behavior proof
+  is retained. Exact-tag CI must sign and pass actual stable desktop/Android
+  imports before publishing artifacts and completing Brew distribution.
+- Merge feat/browser-name-autofill: honor the user's corrected scope by removing
+  the entire unrequested connection-code/--pair feature and restoring ordinary
+  connection setup. Only name-derived domain/host completion is added; manual
+  overrides, saved endpoints, real port/credentials and existing routing remain.
+  Independent Python1636/JS18 and actual desktop/Android each29 cases passed.
+  Android fixture reload/DNS assumptions were corrected without changing product
+  behavior; no production nodes, host DNS, VPN or workspace settings were changed.
+- Merge feat/browser-update-check: user-approved immediate official-feed check
+  and version-pinned XPI download, with explicit Android manual-file-install
+  instructions and no false installation claim. JS20 and both development
+  browser suites30 passed; final30s runtime also passed real public current/
+  available/download checks on desktop and native Android. Normal TLS and the
+  existing automatic updater remain unchanged; no node/VPN/workspace changes.
