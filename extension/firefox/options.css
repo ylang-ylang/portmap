@@ -8,9 +8,16 @@ h2 { font-size: 1.3rem; margin: 0 0 16px; }
 h3 { font-size: 1.1rem; margin: 0; overflow-wrap: anywhere; }
 p { margin: 8px 0 16px; }
 .eyebrow { letter-spacing: .12em; font-size: .75rem; font-weight: 700; color: light-dark(#285e92, #90c8ff); }
-section, aside { margin-top: 28px; }
-.editor, aside, .connection { border: 1px solid var(--border); border-radius: 12px; padding: 20px; background: light-dark(#fff, #1c2734); }
+section, aside, details { margin-top: 28px; }
+.editor, .pairing, aside, .connection { border: 1px solid var(--border); border-radius: 12px; padding: 20px; background: light-dark(#fff, #1c2734); }
 .connection { margin: 12px 0; }
+.pairing { border: 2px solid var(--accent); }
+summary { cursor: pointer; font-weight: 600; min-height: 44px; }
+details[open] summary { margin-bottom: 12px; }
+#connection-code { margin-top: 6px; }
+#import-preview { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 20px; }
+dt { font-weight: 600; }
+dd { margin: 0 0 12px; overflow-wrap: anywhere; }
 .connection-detail { margin: 5px 0; overflow-wrap: anywhere; }
 .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
@@ -19,8 +26,8 @@ input { width: 100%; padding: 8px 10px; background: light-dark(#fff, #101922); c
 button { padding: 8px 14px; background: light-dark(#edf3fa, #283c50); color: inherit; cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .55; cursor: default; }
-button:focus-visible, input:focus-visible { outline: 3px solid #58a7ee; outline-offset: 2px; }
-#save { background: var(--accent); color: white; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px solid #58a7ee; outline-offset: 2px; }
+#save, #preview-import, #confirm-import { background: var(--accent); color: white; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
 .hint, aside { font-size: .9rem; }
 .hint { color: light-dark(#46576a, #b5c5d7); overflow-wrap: anywhere; }
@@ -31,4 +38,4 @@ button:focus-visible, input:focus-visible { outline: 3px solid #58a7ee; outline-
 #error, #status[data-state="error"] { background: light-dark(#fff0e8, #49281f); }
 code { overflow-wrap: anywhere; }
 [hidden] { display: none !important; }
-@media (max-width: 560px) { main { padding: 20px 12px 32px; } .fields { grid-template-columns: 1fr; } .editor, aside, .connection { padding: 16px; } .actions > button { flex: 1 1 auto; } }
+@media (max-width: 560px) { main { padding: 20px 12px 32px; } .fields { grid-template-columns: 1fr; } .editor, .pairing, aside, .connection { padding: 16px; } .actions > button { flex: 1 1 auto; } }

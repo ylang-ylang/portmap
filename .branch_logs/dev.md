@@ -304,3 +304,20 @@
   fallback, authentication and TLS remain gated. Include required installed
   GitGuard synchronization and matching contribution prose. No release tag or
   deployment; Mozilla signing and signed-install verification remain pending.
+- Integrate release/v0.21.0 before main: require Firefox140 desktop/142 Android
+  for built-in data-transmission consent. Actual catalog rebuild is identical;
+  pinned web-ext10.8.0 self-hosted lint reports zero errors/warnings/notices.
+  Tagged CI must sign and verify both stable platforms before public distribution.
+- Merge feat/firefox-signing-manifest: permit only semantic-equivalent manifest
+  formatting from web-ext signing, retain exact runtime bytes and real browser
+  signature enforcement. Trusted-dev signing orchestration can retry immutable
+  v0.21.0 using its original retained signed XPI. Independent regression/payload/
+  actionlint checks passed; original signed desktop and stable Android each26/26.
+- Merge feat/browser-connection-code: generate private reusable connection codes
+  only after owned public ingress discovery, exact Tailscale binding and readiness;
+  import through masked preview/confirmation on Firefox Android and desktop.
+  Preserve exact-domain connection identity/disabled state and fail-closed routing.
+  Independent Python1692/JS27, actual CLI readiness/authentication/restart smoke,
+  and desktop/native Android each30 cases passed. Automatic discovery smoke
+  explicitly simulates external runtime/agent/Tailscale status; no production
+  host/VPN/workspace changes. Signed release verification remains version-gated.

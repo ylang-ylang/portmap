@@ -61,8 +61,22 @@ def build(root: Path, output: Path) -> dict:
     return {"artifact": str(output), "version": manifest["version"], "sha256": sha256(output), "signed": False}
 
 
+def canonical_manifest(content: bytes) -> str:
+    """Allow signer JSON formatting, never duplicate keys or changed values."""
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate manifest key: {key}")
+            result[key] = value
+        return result
+
+    value = json.loads(content, object_pairs_hook=unique_object)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
 def check_signed_payload(root: Path, signed_xpi: Path) -> dict:
-    """Compare source bytes, not a signature oracle; Firefox verifies signatures."""
+    """Bind source payload; only manifest JSON formatting may differ after signing."""
     manifest, expected = runtime_files(root)
     if signed_xpi.is_symlink() or not signed_xpi.is_file():
         raise ValueError("signed XPI must be a regular file")
@@ -74,7 +88,9 @@ def check_signed_payload(root: Path, signed_xpi: Path) -> dict:
         if payload != set(expected):
             raise ValueError("signed XPI runtime members differ from the source allowlist")
         for name, content in expected.items():
-            if archive.read(name) != content:
+            actual = archive.read(name)
+            matches = canonical_manifest(actual) == canonical_manifest(content) if name == "manifest.json" else actual == content
+            if not matches:
                 raise ValueError(f"signed XPI differs from source: {name}")
         if not any(name in names for name in ("META-INF/mozilla.rsa", "META-INF/cose.sig")):
             raise ValueError("XPI has no Mozilla signature envelope; development packages are not publishable")

@@ -17,6 +17,16 @@ function deferred() {
 const profile = overrides => ({ id: "a", name: "Node A", domain: "a.portmap", proxyHost: "100.64.0.1",
   proxyPort: 8443, username: "user-a", password: "pass-a", enabled: true, ...overrides });
 const config = connections => ({ schemaVersion: 2, revision: "seed", connections });
+function connectionCode(overrides = {}) {
+  const { id, enabled, ...payload } = profile(overrides);
+  return `portmap-connect-v1:${Buffer.from(JSON.stringify(payload)).toString("base64url")}`;
+}
+async function preview(f, code = connectionCode()) {
+  return (await f.controller.command({ action: "preview-import", code })).importPreview;
+}
+function importCode(f, code, confirmed) {
+  return f.controller.command({ action: "import", code, revision: confirmed.revision, replaceId: confirmed.replaceId });
+}
 
 function fixture(initial = config([profile()]), gates = {}) {
   let stored = initial;
@@ -25,9 +35,11 @@ function fixture(initial = config([profile()]), gates = {}) {
     proxy: { onRequest: event() },
     webRequest: { onBeforeRequest: event(), onBeforeSendHeaders: event(), onAuthRequired: event(), onCompleted: event(), onErrorOccurred: event() },
     storage: { onChanged: event(), local: {
+      writes: [],
       async get() { if (gates.read) await gates.read.promise; return { config: stored }; },
       async set(value) {
         if (gates.write) await gates.write.promise;
+        api.storage.local.writes.push(value);
         const previous = stored;
         stored = value.config;
         api.storage.onChanged.emit({ config: { oldValue: previous, newValue: stored } }, "local");
@@ -269,4 +281,105 @@ test("SOCKS5 credentials are node scoped and never installed as HTTP auth handle
   assert.deepEqual(f.api.webRequest.onAuthRequired.emit({ ...a, isProxy: false, statusCode: 401 }), []);
   assert.equal(f.select(details("https://ordinary.example/")), undefined);
   assert.deepEqual(f.block(details("https://ordinary.example/")), {});
+});
+
+test("code preview is non-secret and read-only; confirmed new domain gets a local identity and enabled route", async () => {
+  const f = fixture(config([]));
+  await f.state();
+  const code = connectionCode({ domain: " B.Portmap. ", proxyHost: "100.64.0.2",
+    username: "pair-user", password: "pair-secret" });
+  const confirmed = await preview(f, code);
+  assert.deepEqual(Object.keys(confirmed).sort(),
+    ["name", "domain", "proxyHost", "proxyPort", "replaceId", "enabled", "revision"].sort());
+  assert.equal(confirmed.domain, "b.portmap");
+  assert.equal(confirmed.replaceId, null);
+  assert.equal(confirmed.enabled, true);
+  assert.equal(JSON.stringify(confirmed).includes("pair-secret"), false);
+  assert.equal(JSON.stringify(confirmed).includes("pair-user"), false);
+  assert.equal(f.api.storage.local.writes.length, 0);
+  assert.deepEqual((await f.state()).connections, []);
+  const imported = await importCode(f, code, confirmed);
+  const [saved] = imported.connections;
+  assert.ok(saved.id);
+  assert.equal(saved.enabled, true);
+  assert.equal(saved.domain, "b.portmap");
+  assert.equal(saved.username, "pair-user");
+  assert.equal(saved.password, "pair-secret");
+  assert.equal(f.api.storage.local.writes.length, 1);
+  assert.equal(f.api.storage.local.writes[0].config.schemaVersion, 2);
+  assert.equal(routed(f, details("https://b.portmap/")).proxyInfo.host, "100.64.0.2");
+});
+
+test("exact-domain import replaces rather than duplicates and preserves original identity and disabled state", async () => {
+  for (const enabled of [true, false]) {
+    const f = fixture(config([profile({ id: "original-local-id", enabled })]));
+    await f.state();
+    const code = connectionCode({ name: "Replacement", domain: " A.Portmap. ",
+      proxyHost: "100.64.0.9", username: "replacement-user", password: "replacement-password" });
+    const confirmed = await preview(f, code);
+    assert.equal(confirmed.replaceId, "original-local-id");
+    assert.equal(confirmed.enabled, enabled);
+    const imported = await importCode(f, code, confirmed);
+    assert.deepEqual(imported.connections, [profile({ id: "original-local-id", enabled,
+      name: "Replacement", proxyHost: "100.64.0.9",
+      username: "replacement-user", password: "replacement-password" })]);
+    if (enabled) assert.equal(routed(f).proxyInfo.host, "100.64.0.9");
+    else blocked(f);
+    const repeated = await importCode(f, code, await preview(f, code));
+    assert.equal(repeated.connections.length, 1);
+    assert.equal(repeated.connections[0].id, "original-local-id");
+    assert.equal(repeated.connections[0].enabled, enabled);
+  }
+});
+
+test("invalid and overlapping imports do not write, revoke valid routes or change existing claims", async () => {
+  const f = fixture(config([profile({ domain: "child.a.portmap" }),
+    profile({ id: "disabled", domain: "b.portmap", enabled: false })]));
+  const before = await f.state();
+  const request = routed(f, details("http://child.a.portmap/"));
+  const revision = "seed";
+  for (const code of [connectionCode({ domain: "a.portmap" }),
+    connectionCode({ domain: "deep.child.a.portmap" }), connectionCode({ domain: "app.b.portmap" }),
+    "portmap-connect-v1:invalid", connectionCode({ password: "" })]) {
+    await assert.rejects(preview(f, code));
+    await assert.rejects(f.controller.command({ action: "import", code, revision, replaceId: null }));
+    assert.deepEqual(await f.state(), before);
+    assert.equal(f.api.storage.local.writes.length, 0);
+    assert.deepEqual(f.block(request), {});
+  }
+});
+
+test("import revalidates current serialized configuration and requires fresh explicit replacement confirmation", async () => {
+  const f = fixture();
+  await f.state();
+  const code = connectionCode({ domain: "b.portmap" });
+  const confirmed = await preview(f, code);
+  await f.controller.command({ action: "save", connection: profile({ id: "b", domain: "b.portmap", enabled: false }) });
+  const writes = f.api.storage.local.writes.length;
+  await assert.rejects(importCode(f, code, confirmed));
+  await assert.rejects(f.controller.command({ action: "import", code }));
+  assert.equal(f.api.storage.local.writes.length, writes);
+  const updated = await preview(f, code);
+  assert.equal(updated.replaceId, "b");
+  assert.equal(updated.enabled, false);
+  await assert.rejects(importCode(f, code, { ...updated, replaceId: null }));
+  assert.equal(f.api.storage.local.writes.length, writes);
+  const imported = await importCode(f, code, updated);
+  assert.equal(imported.connections.find(entry => entry.id === "b").enabled, false);
+});
+
+test("import runs through fail-closed persistence and invalidates old selections before storage settles", async () => {
+  const gate = deferred();
+  const f = fixture(config([profile()]), { write: gate });
+  await f.state();
+  const selected = routed(f);
+  const code = connectionCode({ proxyHost: "100.64.0.9" });
+  const imported = importCode(f, code, await preview(f, code));
+  await Promise.resolve();
+  blocked(f);
+  assert.deepEqual(f.block(selected), { cancel: true });
+  gate.resolve();
+  await imported;
+  assert.equal(routed(f).proxyInfo.host, "100.64.0.9");
+  assert.equal((await f.state()).connections[0].id, "a");
 });

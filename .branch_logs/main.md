@@ -178,3 +178,12 @@
   matches committed assets and self-hosted lint is clean. Tag-only CI signs,
   tests the signed desktop/Android packages and publishes immutable artifacts
   with verified Brew distribution. Publication never upgrades user machines.
+- Release v0.22.0: automatically discover the owned local public node and
+  Tailscale endpoint, generate/persist credentials and import a connection code
+  through explicit Firefox preview/confirmation. Preserve local connection
+  identity/disabled state, advanced manual setup and existing mesh routing.
+  Independent Python1692/JS27, real CLI readiness/auth/restart and actual desktop/
+  Android development suites each30 cases passed; release identity/build and
+  self-hosted lint preflight passed. Tag CI gates exact signed bytes on stable
+  desktop/Android and completes immutable assets/Brew distribution. No existing
+  node, Coder workspace, VPN or DNS configuration is changed by publication.

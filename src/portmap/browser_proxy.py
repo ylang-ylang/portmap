@@ -108,6 +108,11 @@ def load_config(path: Path) -> ProxyConfig:
         raw = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
     except (OSError, ValueError) as exc:
         raise PortmapError(f"cannot read browser-proxy JSON config {path}: {exc}") from exc
+    return parse_config(raw)
+
+
+def parse_config(raw: object) -> ProxyConfig:
+    """Validate the fixed-ingress configuration shared by manual and pair mode."""
     raw = _object(raw, "config", {"domain", "listen", "credentials", "ingress", "tls_ingress"}, {"domain", "listen", "credentials", "ingress"})
     domain = raw["domain"]
     if not isinstance(domain, str) or len(domain) > 253 or not _DOMAIN.fullmatch(domain):
