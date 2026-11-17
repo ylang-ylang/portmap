@@ -22,6 +22,7 @@ import runner
 
 
 DIRECT_DOMAIN = 'qr-direct.portmap'
+HTTP_ONLY_DOMAIN = 'qr-http-only.portmap'
 SSH_DOMAIN = 'qr-ssh.portmap'
 CAMERA_DOMAIN = 'qr-camera.portmap'
 
@@ -34,13 +35,15 @@ def prepare(proof):
     metadata = json.loads(Path('/meta/b/client.json').read_text())
     addresses = {letter: socket.gethostbyname('node-' + letter) for letter in ('a', 'b')}
     fixtures = {}
-    for label, domain, mode in [('direct', DIRECT_DOMAIN, 'direct'), ('ssh', SSH_DOMAIN, 'ssh'), ('camera', CAMERA_DOMAIN, 'direct')]:
+    for label, domain, mode in [('direct', DIRECT_DOMAIN, 'direct'), ('http-only', HTTP_ONLY_DOMAIN, 'direct'),
+                                ('ssh', SSH_DOMAIN, 'ssh'), ('camera', CAMERA_DOMAIN, 'direct')]:
         target = 'b' if mode == 'ssh' else 'a'
         png = directory / (label + '.png')
         command = [sys.executable, '-c', 'from portmap.cli import main; raise SystemExit(main())',
                    'connection-qr', '--name', 'Owned QR ' + label, '--domain', domain,
                    '--mode', mode, '--host', addresses[target], '--http-port', '8080',
-                   '--https-port', '8443', '--png', str(png), '--wire', '--no-terminal']
+                   '--png', str(png), '--wire', '--no-terminal']
+        command += ['--no-https'] if label == 'http-only' else ['--https-port', '8443']
         if mode == 'ssh':
             command += ['--ssh-port', str(metadata['sshPort']), '--ssh-username', metadata['username'],
                         '--ssh-target-host', '127.0.0.1', '--ssh-host-key-sha256', metadata['hostKeySha256Hex']]
@@ -166,11 +169,56 @@ def exercise(browser, case, proof):
         WebDriverWait(driver, 15).until(lambda _: len(browser.cards(DIRECT_DOMAIN)) == 1)
         runner.require(driver.find_element(By.ID, 'name').get_attribute('value') == 'owned-unsaved-qr-draft', 'Direct import destroyed unrelated draft')
         runner.require(browser.cards(DIRECT_DOMAIN)[0].get_attribute('data-mode') == 'direct', 'QR direct import selected wrong mode')
+        imported = browser.saved_connection(DIRECT_DOMAIN)
+        runner.require(imported and imported['httpPort'] == 8080 and imported['httpsPort'] == 8443,
+                       'Direct QR import replaced custom ports with new-form defaults')
         return browser.page('http://' + DIRECT_DOMAIN + '/qr-direct-' + uuid.uuid4().hex, 'node-a', loopback=False)
     case('qr-image-direct-confirm-route', direct_confirm, fatal=True)
 
+    def ports_reedit(domain, https, screenshot):
+        browser.action(domain, 'edit')
+        runner.require(driver.find_element(By.ID, 'advanced-settings').get_property('open') is False,
+                       'Editing a QR connection unexpectedly opened Advanced')
+        browser.advanced()
+        runner.require(driver.find_element(By.ID, 'http-port').get_attribute('value') == '8080' and
+                       driver.find_element(By.ID, 'https-port').get_attribute('value') == ('' if https is None else str(https)),
+                       'QR ports were not retained in the real editor')
+        browser.screenshot(screenshot)
+        browser.advanced(False)
+        browser.enter('name', 'Renamed QR direct endpoint')
+        driver.find_element(By.ID, 'save').click()
+        WebDriverWait(driver, 15).until(lambda _: driver.find_element(By.ID, 'name').get_attribute('value') == '')
+        imported = browser.saved_connection(domain)
+        runner.require(imported and imported['httpPort'] == 8080 and imported['httpsPort'] == https,
+                       'Saving an unchanged QR endpoint replaced its imported ports')
+        return imported
+    case('qr-imported-custom-ports-retained-through-edit',
+         lambda: ports_reedit(DIRECT_DOMAIN, 8443, 'qr-imported-custom-ports-reedit'), fatal=True)
+
+    def http_only_confirm():
+        browser.options()
+        open_panel()
+        image('http-only')
+        runner.require(state() == 'preview', 'HTTP-only CLI QR did not decode')
+        driver.find_element(By.ID, 'qr-confirm').click()
+        WebDriverWait(driver, 15).until(lambda _: len(browser.cards(HTTP_ONLY_DOMAIN)) == 1)
+        imported = browser.saved_connection(HTTP_ONLY_DOMAIN)
+        runner.require(imported and imported['httpPort'] == 8080 and imported['httpsPort'] is None,
+                       'HTTP-only QR import invented a default HTTPS port')
+        edited = ports_reedit(HTTP_ONLY_DOMAIN, None, 'qr-imported-null-https-reedit')
+        runner.require(edited['id'] == imported['id'], 'HTTP-only QR re-edit replaced the saved identity')
+        route = browser.page('http://' + HTTP_ONLY_DOMAIN + '/qr-http-only-' + uuid.uuid4().hex, 'node-a', loopback=False)
+        browser.denied(HTTP_ONLY_DOMAIN, 'qr-null-https', scheme='https')
+        return {'saved': edited, 'http_route': route, 'https_blocked': True}
+    case('qr-imported-null-https-retained-through-edit-and-route', http_only_confirm, fatal=True)
+
     def ssh_confirm():
         browser.action('b.portmap', 'edit')
+        browser.ssh_advanced()
+        runner.require(driver.execute_script('''
+          return ["ssh-password","ssh-private-key","ssh-public-key","ssh-passphrase"]
+            .every(id=>document.getElementById(id).value==="");
+        '''), 'Editing stored SSH credentials exposed private material in the DOM')
         browser.sensitive_input = True
         Select(driver.find_element(By.ID, 'ssh-auth-type')).select_by_value('key')
         replacement = driver.find_element(By.ID, 'replace-credentials')
@@ -178,8 +226,9 @@ def exercise(browser, case, proof):
             replacement.click()
         for kind in ('private', 'public'):
             choose_file('ssh-' + kind + '-key-file', directory / ('stale-' + kind + '.txt'))
-            WebDriverWait(driver, 10).until(lambda d, kind=kind:
-                d.find_element(By.ID, 'ssh-' + kind + '-key').get_attribute('value') == 'owned-stale-' + kind + '-file')
+            WebDriverWait(driver, 10).until(lambda d, kind=kind: d.execute_script('''
+              return document.getElementById(arguments[0]).value===arguments[1];
+            ''', 'ssh-' + kind + '-key', 'owned-stale-' + kind + '-file'))
         browser.enter('ssh-passphrase', 'owned-stale-passphrase')
         Select(driver.find_element(By.ID, 'ssh-auth-type')).select_by_value('password')
         browser.enter('ssh-password', 'owned-stale-password')
@@ -193,11 +242,20 @@ def exercise(browser, case, proof):
         driver.find_element(By.ID, 'qr-confirm').click()
         WebDriverWait(driver, 10).until(lambda d: d.find_element(By.ID, 'domain').get_attribute('value') == SSH_DOMAIN)
         runner.require(driver.find_element(By.ID, 'connection-id').get_attribute('value') == '', 'SSH QR retained old edit identity')
-        for field in ('ssh-password', 'ssh-private-key', 'ssh-public-key', 'ssh-passphrase'):
-            runner.require(driver.find_element(By.ID, field).get_attribute('value') == '', 'SSH QR retained old authentication material')
+        runner.require(driver.execute_script('''
+          return ["ssh-password","ssh-private-key","ssh-public-key","ssh-passphrase"]
+            .every(id=>document.getElementById(id).value==="");
+        '''), 'SSH QR retained old authentication material')
         runner.require(driver.execute_script('return Array.from(document.querySelectorAll("input[type=file]")).every(x=>x.files.length===0)'), 'SSH QR retained file inputs')
         runner.require(driver.find_element(By.ID, 'ssh-username').get_attribute('value') == metadata['username'], 'SSH username differs from public QR')
         runner.require(driver.find_element(By.ID, 'ssh-target-host').get_attribute('value') == '127.0.0.1', 'SSH target differs from QR')
+        runner.require(driver.find_element(By.ID, 'advanced-settings').get_property('open') is False and
+                       driver.find_element(By.ID, 'http-port').get_attribute('value') == '8080' and
+                       driver.find_element(By.ID, 'https-port').get_attribute('value') == '8443',
+                       'SSH QR public draft replaced imported custom ports')
+        runner.require(driver.find_element(By.ID, 'ssh-auth-type').get_attribute('value') == 'managed' and
+                       not driver.find_element(By.ID, 'save').is_enabled(),
+                       'Public SSH QR bypassed the default browser-key trust confirmation')
         unchanged(digest, counts)
         browser.sensitive_input = False
         driver.execute_script('document.getElementById("connection-form").scrollIntoView({behavior:"instant",block:"start"})')
@@ -208,6 +266,7 @@ def exercise(browser, case, proof):
         host = driver.find_element(By.ID, 'host').get_attribute('value')
         browser.enter('name', 'renamed-public-ssh-import')
         runner.require(driver.find_element(By.ID, 'host').get_attribute('value') == host and driver.find_element(By.ID, 'domain').get_attribute('value') == SSH_DOMAIN, 'Imported endpoints retained autofill ownership')
+        browser.ssh_advanced()
         Select(driver.find_element(By.ID, 'ssh-auth-type')).select_by_value('password')
         browser.sensitive_input = True
         browser.enter('ssh-password', metadata['password'])
@@ -218,6 +277,15 @@ def exercise(browser, case, proof):
         WebDriverWait(driver, 15).until(lambda _: len(browser.cards(SSH_DOMAIN)) == 1)
         browser.sensitive_input = False
         runner.require(len(browser.cards('b.portmap')) == 1, 'SSH import overwrote existing record')
+        imported = browser.saved_connection(SSH_DOMAIN)
+        runner.require(imported and imported['httpPort'] == 8080 and imported['httpsPort'] == 8443,
+                       'SSH QR save replaced imported custom ports')
+        browser.action(SSH_DOMAIN, 'edit')
+        runner.require(driver.find_element(By.ID, 'advanced-settings').get_property('open') is False and
+                       driver.find_element(By.ID, 'http-port').get_attribute('value') == '8080' and
+                       driver.find_element(By.ID, 'https-port').get_attribute('value') == '8443',
+                       'SSH QR re-edit replaced imported custom ports')
+        driver.find_element(By.ID, 'cancel-edit').click()
         return browser.page('http://' + SSH_DOMAIN + '/qr-ssh-' + uuid.uuid4().hex, 'node-b', loopback=True)
     case('qr-ssh-public-fill-clears-auth-and-routes', ssh_confirm, fatal=True)
 
@@ -308,5 +376,5 @@ def exercise(browser, case, proof):
     case('qr-camera-native-synthetic-scene-route' if android else 'qr-camera-native-fake-lifecycle', native_camera, fatal=True)
 
     # Do not leave extra routes to change the existing persistence/deletion cases.
-    for domain in (DIRECT_DOMAIN, SSH_DOMAIN, CAMERA_DOMAIN) if android else (DIRECT_DOMAIN, SSH_DOMAIN):
+    for domain in (DIRECT_DOMAIN, HTTP_ONLY_DOMAIN, SSH_DOMAIN, CAMERA_DOMAIN) if android else (DIRECT_DOMAIN, HTTP_ONLY_DOMAIN, SSH_DOMAIN):
         browser.action(domain, 'delete')

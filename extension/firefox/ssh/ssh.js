@@ -6,6 +6,132 @@
   const LIMIT = 262144;
   const CHUNK = 65536;
   const TIMEOUT = 30000;
+  const INSTALL_OUTPUT_LIMIT = 16384;
+  const INSTALL_OK = 'PORTMAP_KEY_INSTALLED\n';
+  // Python's fd-relative, no-follow opens avoid shell redirection's symlink
+  // race. No server configuration, alternate path, or command is caller-owned.
+  const INSTALLER = String.raw`import base64, fcntl, os, pwd, shlex, stat, sys, time
+def fail(code):
+    raise SystemExit(code)
+def main():
+    os.umask(0o077)
+    uid = os.getuid()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    home = pwd.getpwuid(uid).pw_dir
+    if not home.startswith("/") or home == "/" or any(p in (".", "..") for p in home.split("/")):
+        fail(62)
+    directory = os.open("/", flags)
+    try:
+        parts = [p for p in home.split("/") if p]
+        for index, part in enumerate(parts):
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+            info = os.fstat(directory)
+            owners = (uid,) if index == len(parts) - 1 else (0, uid)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners or info.st_mode & 0o022:
+                fail(62)
+        try:
+            os.mkdir(".ssh", 0o700, dir_fd=directory)
+        except FileExistsError:
+            pass
+        try:
+            ssh = os.open(".ssh", flags, dir_fd=directory)
+        except OSError:
+            fail(63)
+        try:
+            info = os.fstat(ssh)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_mode & 0o022:
+                fail(63)
+            file_flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+            try:
+                keyfile = os.open("authorized_keys", file_flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=ssh)
+            except FileExistsError:
+                try:
+                    keyfile = os.open("authorized_keys", file_flags, dir_fd=ssh)
+                except OSError:
+                    fail(64)
+            try:
+                info = os.fstat(keyfile)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1 or info.st_mode & 0o022:
+                    fail(64)
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        fcntl.flock(keyfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            fail(65)
+                        time.sleep(0.05)
+                # Recheck the directory entry after acquiring the lock. Never
+                # chmod or append through a replaced name or a hard link.
+                named = os.stat("authorized_keys", dir_fd=ssh, follow_symlinks=False)
+                current = os.fstat(keyfile)
+                if (named.st_dev, named.st_ino) != (current.st_dev, current.st_ino) or current.st_nlink != 1:
+                    fail(64)
+                data = bytearray()
+                while len(data) <= 8388608:
+                    block = os.read(keyfile, min(65536, 8388609 - len(data)))
+                    if not block:
+                        break
+                    data.extend(block)
+                if len(data) > 8388608:
+                    fail(67)
+                public = sys.argv[1]
+                kind, encoded = public.split(" ", 2)[:2]
+                blob = base64.b64decode(encoded, validate=True)
+                found = False
+                for line in data.decode("utf-8", "surrogateescape").splitlines():
+                    if not line.strip() or line.lstrip().startswith("#"):
+                        continue
+                    try:
+                        fields = shlex.shlex(line, posix=True)
+                        fields.whitespace_split = True
+                        fields.commenters = ""
+                        first = next(fields, None)
+                        if first != kind and next(fields, None) != kind:
+                            continue
+                        # Comments are arbitrary bytes, not shell syntax. Stop
+                        # lexing at the key blob, even if a comment has quotes.
+                        existing = next(fields, None)
+                    except ValueError:
+                        continue
+                    if not existing:
+                        continue
+                    try:
+                        found = base64.b64decode(existing + "=" * (-len(existing) % 4), validate=True) == blob
+                    except ValueError:
+                        continue
+                    if found:
+                        break
+                os.fchmod(ssh, 0o700)
+                os.fchmod(keyfile, 0o600)
+                if not found:
+                    # Append only: preserve every existing byte, even a last
+                    # comment/key without LF. O_APPEND + flock serialize us.
+                    suffix = (b"\n" if data and data[-1] != 10 else b"") + public.encode("ascii") + b"\n"
+                    while suffix:
+                        count = os.write(keyfile, suffix)
+                        if count <= 0:
+                            fail(66)
+                        suffix = suffix[count:]
+                os.fsync(keyfile)
+                os.fsync(ssh)
+            finally:
+                os.close(keyfile)
+        finally:
+            os.close(ssh)
+    finally:
+        os.close(directory)
+    sys.stdout.write("PORTMAP_KEY_INSTALLED\n")
+try:
+    main()
+except (AttributeError, ImportError, NotImplementedError):
+    fail(61)
+except (OSError, KeyError, ValueError):
+    fail(66)
+`;
   const sockets = new Map();
   let nextId = 1;
   let library;
@@ -52,6 +178,39 @@
   function port(value) {
     if (!Number.isInteger(value) || value < 1 || value > 65535) throw new TypeError('Invalid port');
     return value;
+  }
+
+  function installerCommand(publicKey) {
+    const invalid = () => { throw new TypeError('A canonical single-line OpenSSH RSA public key is required'); };
+    if (typeof publicKey !== 'string' || publicKey.length > 4096) invalid();
+    const match = /^ssh-rsa ([A-Za-z0-9+/]+={0,2})(?: ([\x21-\x7e][\x20-\x7e]{0,127}))?$/.exec(publicKey);
+    if (!match) invalid();
+    let decoded;
+    try { decoded = atob(match[1]); } catch (_) { invalid(); }
+    if (btoa(decoded) !== match[1]) invalid();
+    const blob = bytes(decoded);
+    const view = new DataView(blob.buffer);
+    let offset = 0;
+    const field = () => {
+      if (offset + 4 > blob.length) invalid();
+      const length = view.getUint32(offset); offset += 4;
+      if (!length || length > blob.length - offset) invalid();
+      const item = blob.subarray(offset, offset + length); offset += length;
+      return item;
+    };
+    if (raw(field()) !== 'ssh-rsa') invalid();
+    const exponent = field(), modulus = field();
+    const positive = value => !(value[0] & 128) && value[0] !== 0 ||
+      value.length > 1 && value[0] === 0 && (value[1] & 128);
+    if (offset !== blob.length || !positive(exponent) || !positive(modulus) ||
+        exponent.length > 5 || modulus.length < 257 || modulus.length > 1025) invalid();
+    let e = 0;
+    for (const octet of exponent) e = e * 256 + octet;
+    const significant = modulus[0] === 0 ? modulus.subarray(1) : modulus;
+    const bits = significant.length * 8 - Math.clz32(significant[0]) + 24;
+    if (e < 3 || e > 0xffffffff || !(e % 2) || bits < 2048 || bits > 8192) invalid();
+    const quote = value => "'" + value.replace(/'/g, "'\\''") + "'";
+    return 'python3 -I -c ' + quote(INSTALLER) + ' ' + quote(publicKey);
   }
 
   class Connection {
@@ -173,6 +332,11 @@
     }
     async retry(step, deadline = Date.now() + TIMEOUT) {
       while (!this.closed) {
+        if (Date.now() >= deadline) {
+          const error = new Error('SSH operation timed out');
+          void this.close(error).catch(() => {});
+          throw error;
+        }
         const epoch = this.epoch;
         const result = step();
         if (result !== AGAIN) return result;
@@ -180,7 +344,7 @@
         catch (error) {
           // An abandoned nonblocking operation can retain libssh2 retry state.
           // Make the whole session terminal before releasing its input buffer.
-          if (!this.closed) void this.close(error);
+          if (!this.closed) void this.close(error).catch(() => {});
           throw error;
         }
       }
@@ -195,14 +359,18 @@
       this.serial = result.catch(() => {});
       return result;
     }
-    async authenticate(config) {
+    async handshake() {
       const m = this.m;
       const result = await this.retry(() => m._probe_handshake(this.session));
       if (this.closed) throw this.failure || new Error('SSH session closed');
       if (result) throw new Error('SSH handshake failed (' + result + ')');
       const digest = m._probe_fingerprint(this.session);
       if (!digest) throw new Error('SSH host SHA256 unavailable');
-      const actual = [...m.HEAPU8.subarray(digest, digest + 32)].map(n => n.toString(16).padStart(2, '0')).join('');
+      return [...m.HEAPU8.subarray(digest, digest + 32)].map(n => n.toString(16).padStart(2, '0')).join('');
+    }
+    async authenticate(config) {
+      const m = this.m;
+      const actual = await this.handshake();
       // Authentication is deliberately unreachable until the exact pin matches.
       if (actual !== config.hostKeySha256Hex.toLowerCase()) throw new Error('SSH host key mismatch');
       this.metadata = Object.freeze({hostKeySha256Hex: actual, authMethod: config.auth.type});
@@ -243,10 +411,85 @@
         } finally { this.release(address); }
       });
     }
+    installPublicKey(publicKey) {
+      const command = installerCommand(publicKey);
+      if (this.installPending) return Promise.reject(new Error('SSH key installation is already running'));
+      this.installPending = true;
+      return this.exclusive(async () => {
+        const m = this.m, deadline = Date.now() + TIMEOUT;
+        const allocated = [];
+        const hold = data => { const item = this.alloc(data); allocated.push(item); return item.pointer; };
+        try {
+          if (this.channels.size >= 32) throw new Error('SSH channel limit reached');
+          let channel = 0;
+          const opened = await this.retry(() => {
+            channel = m._probe_open_session(this.session);
+            return channel ? 0 : m._probe_errno(this.session);
+          }, deadline);
+          if (opened || !channel)
+            throw new Error('Remote SSH command sessions are unavailable (' + opened + '); install the public key manually');
+          const argument = hold(text.encode(command));
+          const started = await this.retry(() => m._probe_exec(channel, argument), deadline);
+          if (started)
+            throw new Error('Remote SSH command execution was rejected (' + started + '); install the public key manually');
+          const sent = await this.retry(() => m._probe_send_eof(channel), deadline);
+          if (sent) throw new Error('SSH installer input close failed (' + sent + ')');
+          const buffer = hold(new Uint8Array(4096));
+          let stdout = '', total = 0;
+          while (true) {
+            if (Date.now() >= deadline) throw new Error('SSH key installation timed out; the remote key may already have been appended');
+            const epoch = this.epoch;
+            let progress = false, empty = true;
+            for (const read of [m._probe_read, m._probe_read_stderr]) {
+              const step = () => read(channel, buffer, 4096);
+              let count = step();
+              // Only switch streams after a receive-only EAGAIN. A pending
+              // WINDOW_ADJUST must resume the same call and input buffer.
+              if (count === AGAIN && !m._probe_read_cancel_safe(channel))
+                count = await this.retry(step, deadline);
+              if (count === AGAIN) { empty = false; continue; }
+              if (count < 0) throw new Error('SSH installer output read failed (' + count + ')');
+              if (count) {
+                progress = true; empty = false; total += count;
+                if (total > INSTALL_OUTPUT_LIMIT) throw new Error('SSH installer output exceeded its safety bound');
+                if (read === m._probe_read) stdout += raw(m.HEAPU8.subarray(buffer, buffer + count));
+              }
+            }
+            if (empty && m._probe_eof(channel)) break;
+            if (!progress) await this.wait(epoch, deadline);
+          }
+          const closed = await this.retry(() => m._probe_close_channel(channel), deadline);
+          if (closed) throw new Error('SSH installer channel close failed (' + closed + ')');
+          const status = m._probe_exit_status(channel), signal = m._probe_exit_signal(channel);
+          const freed = await this.retry(() => m._probe_free_channel(channel), deadline);
+          if (freed) throw new Error('SSH installer channel free failed (' + freed + ')');
+          if (signal) throw new Error('The remote key installer was terminated; the key may already have been appended');
+          const failures = {
+            61: 'The server needs Python 3 with Unix no-follow file and locking support; install the public key manually',
+            62: 'The remote home directory has unsafe ownership, permissions, or a symlink; fix it or install the public key manually',
+            63: 'The remote .ssh directory is unsafe or not a real user-owned directory; fix it or install the public key manually',
+            64: 'Remote authorized_keys is a symlink, hard link, nonregular file, foreign-owned, or group/other-writable; fix it manually',
+            65: 'Remote authorized_keys is busy; try again after the other installation finishes',
+            66: 'The remote key installer could not safely read, append, or sync authorized_keys; check permissions and available disk space',
+            67: 'Remote authorized_keys exceeds the safe installation size; install the public key manually',
+            126: 'Python 3 could not be executed on the server; install the public key manually',
+            127: 'Python 3 is required on the server for safe installation; install the public key manually',
+          };
+          if (status !== 0) throw new Error((failures[status] || 'Remote key installer failed') + ' (exit ' + status + ')');
+          if (stdout !== INSTALL_OK) throw new Error('Remote key installation was not confirmed; the key may already have been appended');
+          return Object.freeze({installed: true});
+        } catch (error) {
+          // Abandoning exec/read state is terminal, never a reusable session.
+          if (!this.closed) void this.close(error).catch(() => {});
+          throw error;
+        } finally { for (const item of allocated) this.release(item); }
+      }).finally(() => { this.installPending = false; });
+    }
     close(error) {
       if (this.closeTask) return this.closeTask;
       this.closed = true;
       this.failure = error;
+      this.detachAbort?.();
       this.pulse();
       this.closeTask = (async () => {
         // Native close wakes I/O; it does NOT itself make libssh2_free safe:
@@ -377,7 +620,56 @@
     }
   }
 
+  async function openConnection(endpoint, nativeApi, signal) {
+    validString(endpoint.host, 'host'); port(endpoint.port);
+    if (!endpoint.host || endpoint.host.length > 253) throw new TypeError('Invalid host');
+    const m = await load();
+    if (signal?.aborted) throw new Error('SSH connection cancelled');
+    let rejectOpening, abandoned = false, socket, connection;
+    const interrupted = new Promise((_, reject) => { rejectOpening = reject; });
+    const cancelOpening = () => rejectOpening(new Error('SSH connection cancelled'));
+    signal?.addEventListener('abort', cancelOpening, {once: true});
+    const timer = setTimeout(() => rejectOpening(new Error('SSH socket connection timed out')), TIMEOUT);
+    const pending = Promise.resolve().then(() => {
+      if (signal?.aborted) throw new Error('SSH connection cancelled');
+      return nativeApi.connect(endpoint.host, endpoint.port);
+    });
+    // A late native connect still owns a handle, even after cancellation.
+    pending.then(handle => {
+      if (abandoned) return nativeApi.close(handle);
+    }).catch(() => {});
+    try {
+      socket = await Promise.race([pending, interrupted]);
+      if (signal?.aborted) throw new Error('SSH connection cancelled');
+      connection = new Connection(m, nativeApi, socket);
+      const abort = () => { void connection.close(new Error('SSH connection cancelled')).catch(() => {}); };
+      connection.detachAbort = () => signal?.removeEventListener('abort', abort);
+      signal?.addEventListener('abort', abort, {once: true});
+      if (signal?.aborted) {
+        await connection.close(new Error('SSH connection cancelled'));
+        throw new Error('SSH connection cancelled');
+      }
+      return connection;
+    } catch (error) {
+      abandoned = socket === undefined;
+      if (connection) await connection.close(error);
+      else if (socket !== undefined) { try { await nativeApi.close(socket); } catch (_) {} }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancelOpening);
+    }
+  }
+
   globalThis.PortmapSSH = Object.freeze({
+    async inspectHost(endpoint, nativeApi, {signal} = {}) {
+      const connection = await openConnection(endpoint, nativeApi, signal);
+      try {
+        const hostKeySha256Hex = await connection.exclusive(() => connection.handshake());
+        if (signal?.aborted || connection.closed) throw new Error('SSH connection cancelled');
+        return Object.freeze({hostKeySha256Hex});
+      } finally { await connection.close(); }
+    },
     async connect(config, nativeApi, { signal } = {}) {
       validString(config.host, 'host'); port(config.port);
       validString(config.username, 'username');
@@ -387,28 +679,21 @@
         validString(config.auth.publicKey, 'public key'); validString(config.auth.privateKey, 'private key');
         validString(config.auth.passphrase || '', 'passphrase');
       } else throw new TypeError('Unsupported SSH authentication method');
-      const m = await load();
-      if (signal?.aborted) throw new Error('SSH connection cancelled');
-      const socket = await nativeApi.connect(config.host, config.port);
-      let connection;
-      const abort = () => { if (connection) void connection.close(new Error('SSH connection cancelled')).catch(() => {}); };
-      signal?.addEventListener('abort', abort, { once: true });
+      const connection = await openConnection(config, nativeApi, signal);
       try {
-        if (signal?.aborted) throw new Error('SSH connection cancelled');
-        connection = new Connection(m, nativeApi, socket);
-        await connection.authenticate(config);
+        await connection.exclusive(() => connection.authenticate(config));
         if (signal?.aborted || connection.closed) throw new Error('SSH connection cancelled');
         return Object.freeze({
           get closed() { return connection.closed; },
           metadata: connection.metadata,
           open: (host, targetPort) => connection.open(host, targetPort),
+          installPublicKey: publicKey => connection.installPublicKey(publicKey),
           close: () => connection.close(),
         });
       } catch (error) {
-        if (connection) await connection.close(error);
-        else { try { await nativeApi.close(socket); } catch (_) {} }
+        await connection.close(error);
         throw error;
-      } finally { signal?.removeEventListener('abort', abort); }
+      }
     },
   });
 })();

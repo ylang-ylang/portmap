@@ -158,11 +158,11 @@
       const warning = document.createElement("p");
       warning.className = "notice";
       warning.textContent = draft.mode === "ssh"
-        ? "Confirming replaces your entire current editor draft, including any unsaved edits. All previous credentials and saved connection identity are cleared. Only public SSH settings are imported; enter your own username and authentication, then use Save connection. Imported addresses will not follow name changes."
-        : "Confirming adds a new enabled connection with a fresh identity. Your existing unsaved editor draft is preserved. Saving does not open a connection or verify reachability. Direct HTTP is not encrypted; use a trusted encrypted network.";
+        ? "This replaces your unsaved form and clears its credentials. Verify the SSH fingerprint, then add your own authentication."
+        : "Add this node? Your unsaved form is kept. Direct HTTP is unencrypted.";
       preview.append(details, warning);
       preview.hidden = false;
-      confirm.textContent = draft.mode === "ssh" ? "Replace editor with public SSH settings" : "Add direct connection";
+      confirm.textContent = draft.mode === "ssh" ? "Replace form with SSH settings" : "Add direct connection";
       confirm.hidden = false;
       refresh();
       confirm.focus();

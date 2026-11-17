@@ -12,12 +12,13 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 NODE = os.environ.get("NODE_ID", "trap")
 DOMAIN = os.environ.get("NODE_DOMAIN", "")
 REQUESTS = []
 LOCK = threading.Lock()
+MANAGED_CONTROL = None
 
 
 def in_domain(host):
@@ -63,6 +64,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
+        if path.startswith("/managed/"):
+            if MANAGED_CONTROL is None:
+                self.reply("{}", status=404)
+                return
+            try:
+                action = path.removeprefix("/managed/")
+                if self.command == "GET" and action == "status":
+                    query = parse_qs(urlsplit(self.path).query, strict_parsing=True)
+                    if set(query) != {"account"} or len(query["account"]) != 1:
+                        raise ValueError("Invalid account selector")
+                    value = {"account": query["account"][0]}
+                elif self.command == "POST":
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 12288 or self.headers.get("Transfer-Encoding"):
+                        raise ValueError("Invalid control body")
+                    value = json.loads(self.rfile.read(length))
+                    if not isinstance(value, dict):
+                        raise ValueError("Invalid control object")
+                else:
+                    raise ValueError("Invalid control method")
+                self.reply(json.dumps(MANAGED_CONTROL(action, value)))
+            except (ValueError, KeyError, OSError):
+                self.reply('{"error":"Invalid disposable managed fixture control"}', status=400)
+            return
         if path == "/requests":
             with LOCK:
                 self.reply(json.dumps(REQUESTS))

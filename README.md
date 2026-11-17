@@ -743,13 +743,45 @@ hostname. This is local completion, not node discovery. Each address follows
 name changes only until manually edited. Renaming a saved label never rewrites
 its saved endpoints.
 
-For Direct, supply the reachable host and actual HTTP ingress port. For SSH,
-supply the SSH host, port, username, verified server SHA256 host-key fingerprint,
-and password or key authentication. The SSH target host defaults to
-`127.0.0.1`: that address is relative to the **remote SSH server**, not the phone.
-Use the real remote HTTP ingress port. The extension does not start services,
-discover arbitrary ports, generate credentials, or trust an unknown host key
-automatically.
+For Direct, supply the reachable host. New connections default to HTTP **80**
+and HTTPS **443**; open the collapsed **Advanced** section to change ports or
+clear HTTPS to disable it. Editing and QR import preserve the saved/imported
+ports, including disabled HTTPS. For SSH, enter its reachable host and username;
+the default **Browser key** flow manages a dedicated key for this browser profile.
+The SSH target host defaults to `127.0.0.1`: that address is relative to the
+**remote SSH server**, not the phone. Use the real remote ingress ports.
+Defaults do not start an HTTPS server or bypass certificate validation.
+The settings page keeps guidance brief; this section contains the full setup
+and security details. The extension does not discover arbitrary ports, start
+node services, or automatically trust an unknown host key.
+
+For a new SSH connection:
+
+1. Choose **Check server fingerprint**, compare it through a trusted channel,
+   then explicitly confirm the server. Inspection performs no authentication;
+   changing the destination invalidates the confirmation. A scanned fingerprint
+   is not automatically trusted.
+2. Open **Set up passwordless login**, enter the account password, and click
+   **Install key and save**. This is the explicit authorization to append this
+   browser's public key to that account's `~/.ssh/authorized_keys`.
+3. The plugin closes the password session and verifies a **new**, fingerprint-
+   pinned key-authenticated session before saving the node. The one-time password
+   is cleared rather than stored; future connections use the browser key.
+
+Automatic installation requires remote command execution and Python 3 on a
+POSIX SSH server. It uses only the authenticated account, without sudo or
+changes to sshd configuration. Existing keys, comments and restrictions are
+preserved; repeated installation does not add an unrestricted duplicate.
+Symlinks, hard links, unsafe ownership/permissions and unsupported environments
+are rejected rather than overwritten. Servers with nonstandard authorized-key
+paths, disabled password login or restricted commands need manual setup.
+
+Under **SSH advanced**, choose **Copy browser public key** for manual installation,
+then **Test and save**. Saved-password and imported-key authentication are also
+available there; existing nodes retain their original authentication choice.
+If installation is interrupted or verification fails, the public key may already
+have been appended remotely. The plugin reports that possibility, does not
+claim success or silently fall back, and does not delete existing server entries.
 
 The fingerprint accepts 64 hexadecimal SHA256 characters or OpenSSH's
 `SHA256:...` representation. Obtain it through a trusted management channel
@@ -762,8 +794,8 @@ an existing connection preserves its credentials without displaying them;
 replacing credentials requires a complete new password or key pair.
 
 Namespace claims cannot overlap. HTTP/WS logical port 80 maps to the configured
-HTTP ingress; HTTPS/WSS logical port 443 requires an explicitly configured HTTPS
-ingress. That TLS ingress must already have a trusted certificate for the
+HTTP ingress; HTTPS/WSS logical port 443 maps to the configured HTTPS
+ingress (443 by default for new connections). That ingress must already have a trusted certificate for the
 original namespace and enforce its own SNI/Host isolation. The extension does
 not terminate origin TLS, install a CA, ignore certificate errors, or turn a
 plain HTTP Portmap ingress into HTTPS.
@@ -777,10 +809,20 @@ the extension. SSH encrypts the SSH leg; origin HTTPS remains independently
 validated. The extension changes no system DNS, VPN, routing, workspace or
 node service settings.
 
-SSH here is the forwarding capability needed for browser traffic, not an
-interactive terminal, SFTP client, remote `ssh -R` listener or SSH agent.
-Secrets are held in this browser's local extension storage, not synchronized
-by the extension. Anyone controlling the browser profile can read them.
+SSH provides the forwarding needed for browser traffic plus the narrow,
+explicitly requested public-key installer—not an interactive terminal, SFTP
+client, arbitrary remote-command interface, remote `ssh -R` listener or SSH agent.
+Each browser profile creates its own WebCrypto RSA-3072 identity. The private
+key stays in local IndexedDB, is not returned to the settings page, and is not
+included in QR codes. Saved managed connections contain only a managed-key
+reference. A missing, corrupt or unexpectedly changed identity fails closed
+rather than silently replacing keys.
+
+Saved passwords/imported keys use local extension storage; no credentials are
+synchronized by this extension or encrypted by it at rest. Anyone controlling
+the browser profile or privileged extension code can read them. Reset removes
+the local managed identity and connections, but does not revoke public keys
+already installed on servers; remove those remotely when retiring a browser.
 Only browser contexts granted extension access are covered.
 
 Old schema-2 SOCKS connections cannot be safely converted: their listener port
@@ -800,12 +842,12 @@ queries.
 
 #### Add a connection by QR code
 
-In **Portmap connections**, open **Scan or import connection QR**, then use the camera or import
+In **Portmap connections**, open **Scan or import QR**, then use the camera or import
 a PNG/JPEG image. Decoding is local; no image or connection code is sent to an
 external service. Review the destination and namespace before confirming.
 Direct connections are saved after confirmation. SSH connections populate the
-editor, clear any previous authentication fields, and require you to supply
-authentication and save. Existing or overlapping namespaces are rejected,
+editor, clear previous authentication and trust confirmation, and default to
+the browser-key setup flow. Existing or overlapping namespaces are rejected,
 not replaced. Camera access requires browser/device permission; image import
 is available when camera access is unavailable.
 

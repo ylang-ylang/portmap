@@ -118,22 +118,34 @@ function localNative() {
 }
 function fixture(t, initial = config([profile()]), gates = {}, native = localNative(), dependencies = {}) {
   let stored = initial, ids = 0;
+  const otherStored = {};
   const api = {
     portmapTransport: native,
     proxy: { onRequest: event() },
     webRequest: { onBeforeRequest: event(), onBeforeSendHeaders: event(), onAuthRequired: event(), onCompleted: event(), onErrorOccurred: event() },
     storage: { onChanged: event(), local: {
-      async get() { if (gates.read) await gates.read.promise; return { config: stored }; },
+      async get(key = "config") {
+        if (key === "config" && gates.read) await gates.read.promise;
+        return { [key]: key === "config" ? stored : otherStored[key] };
+      },
       async set(value) {
         if (gates.write) await gates.write.promise;
-        const oldValue = stored; stored = value.config;
-        api.storage.onChanged.emit({ config: { oldValue, newValue: stored } }, "local");
+        if (Object.hasOwn(value, "config")) {
+          const oldValue = stored; stored = value.config;
+          api.storage.onChanged.emit({ config: { oldValue, newValue: stored } }, "local");
+        }
+        for (const [key, entry] of Object.entries(value)) if (key !== "config") otherStored[key] = entry;
+      },
+      async remove(key) {
+        if (key === "config") stored = undefined;
+        else delete otherStored[key];
       }
     } },
     tabs: { opened: [], async create(value) { this.opened.push(value); } }
   };
   const runtime = createRuntime(api, dependencies);
-  const controller = createController(api, () => `generated-${++ids}`, runtime);
+  const controller = createController(api, () => `generated-${++ids}`, runtime,
+    require("../managed-identity.js").createStore(api.storage.local));
   t.after(async () => { runtime.invalidate(); if (native?.shutdown) await native.shutdown(); });
   return { api, runtime, controller, native,
     state: () => controller.command({ action: "get" }), stored: () => stored,

@@ -11,7 +11,7 @@ import time
 import xml.etree.ElementTree as ET
 
 from selenium import webdriver
-from selenium.common.exceptions import NoAlertPresentException, WebDriverException
+from selenium.common.exceptions import NoAlertPresentException, NoSuchWindowException, WebDriverException
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -195,10 +195,17 @@ class AndroidBrowser(runner.Browser):
                 return False
             runner.require(len(created) == 1, "Native action created ambiguous browser contexts")
             selected = next(iter(created))
-            driver.switch_to.window(selected)
-            observed.update(selected=selected, url=driver.current_url,
-                            visibility=driver.execute_script("return document.visibilityState"))
-            return observed["url"] == url and observed["visibility"] == "visible"
+            try:
+                driver.switch_to.window(selected)
+                observed.update(selected=selected, url=driver.current_url,
+                                visibility=driver.execute_script("return document.visibilityState"))
+                return observed["url"] == url and observed["visibility"] == "visible"
+            except NoSuchWindowException:
+                # Fenix can advertise the causally new tab before its Gecko
+                # document exists. Retry only this new-set selection within
+                # the existing bound; never inspect an old hidden context.
+                observed["discarded"] = selected
+                return False
         try:
             WebDriverWait(self.driver, 20).until(created_context)
         finally:

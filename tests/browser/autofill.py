@@ -19,9 +19,7 @@ def exercise(browser, case):
         return browser.driver.find_element(By.ID, field).get_attribute("value")
 
     def enter(field, text):
-        element = browser.driver.find_element(By.ID, field)
-        element.clear()
-        element.send_keys(text)
+        browser.enter(field, text)
 
     def addresses(domain, host):
         require(value("domain") == domain and value("host") == host,

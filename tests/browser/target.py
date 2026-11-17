@@ -9,7 +9,9 @@ import signal
 import subprocess
 import threading
 
+import fixture
 from fixture import DOMAIN, serve
+from managed_fixture import ManagedAccounts
 
 os.umask(0o077)
 state, meta = Path('/state'), Path('/meta')
@@ -53,11 +55,15 @@ for path, mode in ((sshdir, 0o700), (authorized, 0o600)):
     os.chown(path, 10000, 10000)
 public_host = host.with_suffix('.pub').read_text().strip()
 fingerprint = hashlib.sha256(base64.b64decode(public_host.split()[1])).hexdigest()
+managed = ManagedAccounts(key.with_suffix('.pub').read_text())
+fixture.MANAGED_CONTROL = managed.control
+managed_config, managed_users = managed.configuration()
 export(meta / 'client.json', {
     'domain': DOMAIN, 'sshPort': 2222, 'httpPort': 8080, 'httpsPort': 8443,
     'username': 'probe', 'password': password, 'hostKeySha256Hex': fingerprint,
     'publicKey': key.with_suffix('.pub').read_text(), 'privateKey': key.read_text(),
     'passphrase': '',
+    'managedAccounts': managed.credentials,
 })
 config = state / 'sshd_config'
 config.write_text('''Port 2222
@@ -71,7 +77,7 @@ KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 PermitRootLogin no
 UsePAM no
-AllowUsers probe
+AllowUsers probe ''' + managed_users + '''
 AllowTcpForwarding local
 PermitOpen 127.0.0.1:8080 127.0.0.1:8443
 PermitListen none
@@ -79,15 +85,17 @@ GatewayPorts no
 PermitTunnel no
 AllowAgentForwarding no
 X11Forwarding no
-MaxSessions 0
+MaxSessions 4
 MaxAuthTries 3
 LoginGraceTime 20
 UseDNS no
 PrintMotd no
 LogLevel DEBUG1
-''')
+''' + managed_config)
 threading.Thread(target=serve, daemon=True).start()
-server = subprocess.Popen(['/usr/sbin/sshd', '-D', '-e', '-f', str(config)], start_new_session=True)
+server = subprocess.Popen(['/usr/sbin/sshd', '-D', '-e', '-f', str(config)],
+                          start_new_session=True, stderr=subprocess.PIPE)
+threading.Thread(target=managed.observe_logs, args=(server.stderr,), daemon=True).start()
 
 
 def shutdown(_signum, _frame):

@@ -162,7 +162,37 @@ class Browser:
         elif action == 'toggle':
             WebDriverWait(self.driver, 10).until(lambda d: d.find_element(By.ID, 'status').get_attribute('data-state') == 'ready')
 
+    def advanced(self, opened=True):
+        details = self.driver.find_element(By.ID, 'advanced-settings')
+        if details.get_property('open') is not opened:
+            details.find_element(By.CSS_SELECTOR, 'summary').click()
+        WebDriverWait(self.driver, 10).until(lambda _: details.get_property('open') is opened)
+
+    def ssh_advanced(self, opened=True):
+        details = self.driver.find_element(By.ID, 'ssh-advanced-settings')
+        if details.get_property('open') is not opened:
+            details.find_element(By.CSS_SELECTOR, 'summary').click()
+        WebDriverWait(self.driver, 10).until(lambda _: details.get_property('open') is opened)
+
+    def saved_connection(self, domain):
+        # Observe only public endpoint metadata, never stored authentication.
+        result = self.driver.execute_async_script('''
+          const [domain,done]=arguments;
+          browser.storage.local.get('config').then(({config})=>{
+            const entry=config?.connections.find(entry=>entry.domain===domain);
+            done({connection:entry?{id:entry.id,domain:entry.domain,mode:entry.mode,
+              httpPort:entry.httpPort,httpsPort:entry.httpsPort}:null});
+          }).catch(error=>done({error:String(error)}));
+        ''', domain)
+        require('connection' in result, 'Cannot observe persisted endpoint metadata')
+        return result['connection']
+
     def enter(self, field, value):
+        if field in ('http-port', 'https-port'):
+            self.advanced()
+        if field in ('ssh-port', 'ssh-target-host', 'ssh-host-key', 'ssh-password',
+                     'ssh-private-key', 'ssh-public-key', 'ssh-passphrase'):
+            self.ssh_advanced()
         element = self.driver.find_element(By.ID, field)
         element.clear()
         if value:
@@ -181,6 +211,7 @@ class Browser:
         self.enter('http-port', 18081 if fault == 'direct-port' else 8080)
         self.enter('https-port', 8443)
         if mode == 'ssh':
+            self.ssh_advanced()
             for field, value in (('ssh-username', metadata['username']),
                                  ('ssh-port', 18081 if fault == 'ssh-port' else metadata['sshPort']),
                                  ('ssh-target-host', '127.0.0.1'),
@@ -253,6 +284,183 @@ class Browser:
         require(result.get('message') == 'portmap-real-websocket-✓', 'WebSocket payload corrupted')
         require(not result['proxyAuthorization'], 'Proxy credential leaked in WebSocket upgrade')
         return result
+
+
+def advanced_ports(browser, case, host):
+    """Exercise native details disclosure, form validation and saved endpoints."""
+    driver = browser.driver
+
+    def value(field):
+        return driver.find_element(By.ID, field).get_attribute('value')
+
+    def closed(http='80', https='443'):
+        require(driver.find_element(By.ID, 'advanced-settings').get_property('open') is False,
+                'Advanced settings unexpectedly opened')
+        require(not driver.find_element(By.ID, 'http-port').is_displayed() and
+                not driver.find_element(By.ID, 'https-port').is_displayed(), 'Collapsed ports remain visible')
+        require(value('http-port') == http and value('https-port') == https,
+                'Collapsed editor lost its endpoint values')
+
+    def screenshot(name):
+        # Keep the disclosure and native validation target inside the viewport.
+        driver.execute_script('document.getElementById("advanced-settings").scrollIntoView({behavior:"instant",block:"center"})')
+        browser.screenshot(name)
+
+    def begin(label):
+        browser.options()
+        driver.refresh()
+        browser.wait_options()
+        closed()
+        # Reuse the fixture's real *.a.portmap certificate for HTTPS routing.
+        domain = 'ports-' + label + '.a.portmap'
+        browser.enter('name', 'ports-' + label)
+        browser.enter('domain', domain)
+        browser.enter('host', host)
+        return domain
+
+    def save(domain):
+        driver.find_element(By.ID, 'save').click()
+        WebDriverWait(driver, 15).until(lambda _: value('name') == '' and len(browser.cards(domain)) == 1)
+        closed()
+        return browser.saved_connection(domain)
+
+    def persisted(entry, http, https):
+        require(entry and entry['httpPort'] == http and entry['httpsPort'] == https,
+                'Persisted ports differ from the actual form submission')
+        return entry
+
+    def defaults():
+        domain = begin('defaults')
+        screenshot('advanced-defaults-collapsed')
+        original = persisted(save(domain), 80, 443)
+        browser.action(domain, 'edit')
+        closed()
+        browser.enter('name', 'Renamed default endpoint')
+        closed()
+        renamed = persisted(save(domain), 80, 443)
+        require(renamed['id'] == original['id'], 'Editing default ports replaced the saved identity')
+        browser.action(domain, 'delete')
+        return {'saved': renamed, 'advanced_closed_at_save': True, 'ports_touched': False}
+    case('advanced-default-ports-save-closed-and-reedit', defaults, fatal=True)
+
+    def custom():
+        domain = begin('custom')
+        browser.enter('http-port', '8080')
+        browser.enter('https-port', '8443')
+        require(driver.find_element(By.ID, 'http-port').is_displayed(), 'User interaction did not reveal ports')
+        screenshot('advanced-custom-ports-expanded')
+        browser.advanced(False)
+        original = persisted(save(domain), 8080, 8443)
+        browser.action(domain, 'edit')
+        closed('8080', '8443')
+        browser.advanced()
+        require(value('http-port') == '8080' and value('https-port') == '8443', 'Edit replaced custom ports with defaults')
+        screenshot('advanced-custom-ports-reedit')
+        browser.advanced(False)
+        browser.enter('name', 'Renamed custom endpoint')
+        renamed = persisted(save(domain), 8080, 8443)
+        require(renamed['id'] == original['id'], 'Editing custom ports replaced the saved identity')
+        route = browser.page('http://' + domain + '/advanced-custom-' + uuid.uuid4().hex, 'node-a', loopback=False)
+        tls_route = browser.page('https://' + domain + '/advanced-custom-tls-' + uuid.uuid4().hex, 'node-a', loopback=False)
+        browser.action(domain, 'delete')
+        return {'saved': renamed, 'http_route': route, 'https_route': tls_route}
+    case('advanced-custom-ports-save-reedit-and-route', custom, fatal=True)
+
+    def no_https():
+        domain = begin('no-https')
+        browser.enter('http-port', '8080')
+        browser.enter('https-port', '')
+        screenshot('advanced-https-disabled')
+        browser.advanced(False)
+        original = persisted(save(domain), 8080, None)
+        browser.action(domain, 'edit')
+        closed('8080', '')
+        browser.enter('name', 'Renamed HTTP-only endpoint')
+        renamed = persisted(save(domain), 8080, None)
+        require(renamed['id'] == original['id'], 'Editing HTTP-only ports replaced the saved identity')
+        route = browser.page('http://' + domain + '/advanced-no-https-' + uuid.uuid4().hex, 'node-a', loopback=False)
+        browser.denied(domain, 'advanced-disabled-https', scheme='https')
+        browser.action(domain, 'delete')
+        return {'saved': renamed, 'http_route': route, 'https_blocked': True}
+    case('advanced-null-https-preserved-through-edit-and-route', no_https, fatal=True)
+
+    def reset():
+        domain = begin('reset')
+        browser.enter('http-port', '8123')
+        browser.enter('https-port', '')
+        original = persisted(save(domain), 8123, None)
+        browser.action(domain, 'edit')
+        closed('8123', '')
+        browser.enter('http-port', '9191')
+        driver.find_element(By.ID, 'cancel-edit').click()
+        closed()
+        require(value('name') == '' and browser.saved_connection(domain) == original,
+                'Cancel changed saved ports or failed to clear the new editor')
+        browser.action(domain, 'edit')
+        browser.advanced()
+        driver.find_element(By.ID, 'reset').click()
+        browser.confirm_dialog()
+        WebDriverWait(driver, 15).until(lambda _: not browser.cards(domain) and value('name') == '')
+        closed()
+        require(browser.saved_connection(domain) is None, 'Reset retained the saved connection')
+        screenshot('advanced-reset-restores-defaults')
+        return {'cancel_restored_defaults': True, 'reset_restored_defaults': True, 'saved_connection_removed': True}
+    case('advanced-cancel-and-reset-restore-new-defaults', reset, fatal=True)
+
+    def invalid_hidden():
+        observations = []
+        for label, field, invalid in (('http-low', 'http-port', '0'),
+                                      ('http-required', 'http-port', ''),
+                                      ('https-high', 'https-port', '65536')):
+            domain = begin('invalid-' + label)
+            browser.enter(field, invalid)
+            browser.advanced(False)
+            require(not driver.find_element(By.ID, field).is_displayed(), 'Invalid field was not hidden before Save')
+            driver.execute_script('''
+              window.portValidationEvents={invalid:[],submits:0};
+              document.getElementById('connection-form').addEventListener('invalid',event=>{
+                window.portValidationEvents.invalid.push(event.target.id);
+              },true);
+              document.getElementById('connection-form').addEventListener('submit',()=>{
+                window.portValidationEvents.submits++;
+              },true);
+            ''')
+            driver.find_element(By.ID, 'save').click()
+            WebDriverWait(driver, 10).until(lambda _:
+                driver.find_element(By.ID, 'advanced-settings').get_property('open') is True and
+                driver.find_element(By.ID, field).is_displayed())
+            observed = driver.execute_script('''
+              const field=document.getElementById(arguments[0]);
+              return {...window.portValidationEvents,active:document.activeElement.id,
+                valid:field.validity.valid,visible:field.getClientRects().length>0,
+                validationMessage:field.validationMessage};
+            ''', field)
+            require(field in observed['invalid'] and observed['submits'] == 0 and not observed['valid'] and
+                    observed['visible'] and observed['validationMessage'], 'Native invalid-port validation was bypassed')
+            require(not browser.cards(domain) and browser.saved_connection(domain) is None and value('name'),
+                    'Invalid hidden port saved a connection or erased the draft')
+            screenshot('advanced-invalid-' + label + '-revealed')
+            # Android can reveal a native-invalid field without auto-focusing
+            # it. Record that difference; require the user can tap and repair it.
+            corrected = '8080' if field == 'http-port' else '8443'
+            driver.find_element(By.ID, field).click()
+            browser.enter(field, corrected)
+            require(value(field) == corrected and driver.execute_script(
+                'return document.getElementById(arguments[0]).validity.valid', field),
+                'Real user input did not correct the revealed invalid port')
+            screenshot('advanced-invalid-' + label + '-corrected')
+            saved = persisted(save(domain), 8080 if field == 'http-port' else 80,
+                              8443 if field == 'https-port' else 443)
+            submits = driver.execute_script('return window.portValidationEvents.submits')
+            require(submits == 1, 'Corrected port did not produce exactly one native form submission')
+            observations.append({'field': field, 'input': invalid, **observed, 'saved': False,
+                                 'correction': {'input': corrected, 'submits': submits, 'saved': saved}})
+            browser.action(domain, 'delete')
+        browser.options()
+        driver.refresh()
+        browser.wait_options()
+        return observations
+    case('advanced-invalid-hidden-ports-expand-block-and-allow-correction', invalid_hidden, fatal=True)
 
 
 def observe(browser):
@@ -368,6 +576,7 @@ def run(args, proof, browser_factory):
                 browser.screenshot('capability-ready')
             case('actual-native-self-check-enables-both-modes', capability_ready, fatal=True)
             case('unconfigured-fails-closed', lambda: browser.denied('a.portmap','unconfigured'))
+            advanced_ports(browser, case, addresses['a'])
             import autofill
             autofill.exercise(browser, case)
             case('save-independent-direct-and-ssh-nodes', lambda: (
@@ -483,6 +692,8 @@ def run(args, proof, browser_factory):
             import qr
             qr.exercise(browser, case, proof)
             case('delete-node-revokes-route',lambda:(browser.action('a.portmap','delete'),browser.denied('a.portmap','deleted')))
+            import managed
+            managed.exercise(browser, case, proof, metadata['b'], addresses['b'])
             proof['origin_requests']={origin:records(origin) for origin in ORIGINS}
             require(not proof['origin_requests']['trap'],'Claimed traffic reached DNS fallback trap')
             proof['dns_diagnostics']=records('dns','/queries')

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Portmap Connections",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "description": "Route independent .portmap connections through direct TCP or pinned browser-side SSH using experimental networking capabilities.",
   "browser_specific_settings": {
     "gecko": {
@@ -13,7 +13,7 @@
     },
     "gecko_android": {}
   },
-  "permissions": ["storage", "proxy", "webRequest", "webRequestBlocking", "<all_urls>"],
+  "permissions": ["storage", "clipboardWrite", "proxy", "webRequest", "webRequestBlocking", "<all_urls>"],
   "experiment_apis": {
     "portmapTransport": {
       "schema": "transport/schema.json",
@@ -25,7 +25,7 @@
     }
   },
   "background": {
-    "scripts": ["core.js", "ssh/libssh2.js", "ssh/ssh.js", "proxy.js", "transports.js", "controller.js", "background.js"],
+    "scripts": ["core.js", "managed-identity.js", "ssh/libssh2.js", "ssh/ssh.js", "proxy.js", "transports.js", "controller.js", "background.js"],
     "persistent": true
   },
   "browser_action": {

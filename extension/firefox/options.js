@@ -8,6 +8,81 @@ let editingConnection = null;
 let pendingKeyReads = 0;
 const automaticAddresses = new Set(["domain", "host"]);
 let qrScanner = null;
+let draftEpoch = 0;
+let inspectedHost = null;
+let confirmedHost = null;
+let setupResult = null;
+let managedBusy = false;
+let managedPort = null;
+let managedSequence = 0;
+const managedRequests = new Map();
+const managedActions = new Set(["managed-public-key", "inspect-host", "confirm-host", "managed-save", "managed-install"]);
+
+function managedRequest(message) {
+  if (!managedPort) {
+    const port = browser.runtime.connect({ name: "portmap-managed-ssh" });
+    managedPort = port;
+    port.onMessage.addListener(response => {
+      const pending = managedRequests.get(response.requestId);
+      if (!pending) return;
+      managedRequests.delete(response.requestId);
+      pending.resolve(response);
+    });
+    port.onDisconnect.addListener(() => {
+      if (managedPort === port) managedPort = null;
+      for (const pending of managedRequests.values()) pending.reject(new Error("The SSH setup editor disconnected. No abandoned draft will be saved. Reopen this page."));
+      managedRequests.clear();
+      inspectedHost = confirmedHost = null;
+      byId("ssh-onetime-password").value = "";
+      updateManagedFields();
+    });
+  }
+  const requestId = ++managedSequence;
+  return new Promise((resolve, reject) => {
+    managedRequests.set(requestId, { resolve, reject });
+    try { managedPort.postMessage({ channel: "portmap-connections", ...message, requestId }); }
+    catch (failure) { managedRequests.delete(requestId); reject(failure); }
+  });
+}
+
+function invalidateSetup() {
+  draftEpoch++;
+  inspectedHost = confirmedHost = null;
+  byId("ssh-onetime-password").value = "";
+  byId("host-ack").checked = false;
+  if (managedPort) void managedRequest({ action: "cancel-setup" }).catch(() => {});
+  updateManagedFields();
+}
+
+function currentEndpoint() {
+  return PortmapCore.normalizeSshEndpoint({ host: byId("host").value, port: Number(byId("ssh-port").value) });
+}
+
+function hasManagedTrust() {
+  try {
+    const endpoint = currentEndpoint();
+    const pin = PortmapCore.normalizeFingerprint(byId("ssh-host-key").value);
+    const trusted = confirmedHost || (editingConnection?.mode === "ssh"
+      ? { host: editingConnection.host, port: editingConnection.ssh.port, pin: editingConnection.ssh.hostKeySha256Hex } : null);
+    return trusted?.host === endpoint.host && trusted.port === endpoint.port && trusted.pin === pin;
+  } catch (_) { return false; }
+}
+
+function updateManagedFields() {
+  const managed = byId("mode").value === "ssh" && byId("ssh-auth-type").value === "managed";
+  const trusted = hasManagedTrust();
+  byId("managed-fields").hidden = !managed;
+  byId("manual-managed-key").hidden = !managed;
+  byId("host-confirmation").hidden = !managed || !inspectedHost;
+  byId("confirm-host").disabled = busy || !byId("host-ack").checked;
+  byId("install-managed-key").disabled = busy || !trusted;
+  byId("save").textContent = managed ? "Test and save" : "Save connection";
+  byId("save").disabled = busy || pendingKeyReads !== 0 || state.phase !== "ready" ||
+    !state.capability?.available || (managed && !trusted);
+  byId("setup-status").textContent = managedBusy ? "Connecting securely…"
+    : trusted ? "Server fingerprint pinned. Ready to test the browser key."
+    : "Check and confirm the server fingerprint before signing in.";
+}
 
 function fillAddressesFromName() {
   const host = byId("name").value.trim().toLowerCase().replace(/\.$/, "").replace(/\.portmap$/, "");
@@ -31,6 +106,7 @@ function showError(message = "") {
 
 function keepsStoredCredentials() {
   return byId("mode").value === "ssh" && editingConnection?.mode === "ssh" &&
+    editingConnection.ssh.auth.type !== "managed" &&
     editingConnection.ssh.auth.type === byId("ssh-auth-type").value &&
     !byId("replace-credentials").checked;
 }
@@ -38,31 +114,39 @@ function keepsStoredCredentials() {
 function updateModeFields() {
   const ssh = byId("mode").value === "ssh";
   const key = byId("ssh-auth-type").value === "key";
-  const canKeep = ssh && editingConnection?.mode === "ssh" &&
+  const managed = byId("ssh-auth-type").value === "managed";
+  const canKeep = ssh && !managed && editingConnection?.mode === "ssh" &&
     editingConnection.ssh.auth.type === byId("ssh-auth-type").value;
   const keep = keepsStoredCredentials();
   byId("host-label").textContent = ssh ? "SSH server host" : "Destination host";
   byId("ssh-fields").hidden = !ssh;
   byId("ssh-fields").disabled = !ssh;
   byId("replace-credentials-row").hidden = !canKeep;
-  byId("credential-fields").hidden = keep;
-  byId("credential-fields").disabled = keep;
-  byId("password-fields").hidden = key;
+  byId("credential-fields").hidden = keep || managed;
+  byId("credential-fields").disabled = keep || managed;
+  byId("password-fields").hidden = key || managed;
   byId("key-fields").hidden = !key;
-  byId("ssh-password").disabled = key;
+  byId("ssh-password").disabled = key || managed;
   for (const id of ["ssh-private-key", "ssh-public-key", "ssh-passphrase",
     "ssh-private-key-file", "ssh-public-key-file"]) byId(id).disabled = !key;
-  byId("ssh-password").required = ssh && !key && !keep;
+  byId("ssh-password").required = ssh && !key && !managed && !keep;
   byId("ssh-private-key").required = byId("ssh-public-key").required = ssh && key && !keep;
   byId("credential-help").textContent = keep
-    ? "Stored credentials are kept without displaying them. Select “Replace stored SSH credentials” to supply a new password or complete key pair and optional passphrase."
+    ? "Stored credentials will be kept."
     : canKeep
-      ? "Enter replacement credentials. Blank fields do not clear or partially replace saved credentials. A blank optional passphrase saves the new key without a passphrase."
-      : "Supply your own SSH credentials. Changing authentication type requires a complete new password or key pair. Nothing is inferred from the node name.";
+      ? "Enter the complete replacement password or key pair."
+      : "";
+  byId("ssh-host-key").required = ssh && !managed;
+  updateManagedFields();
 }
 
 function clearEditor() {
+  invalidateSetup();
   byId("connection-form").reset();
+  byId("advanced-settings").open = false;
+  byId("ssh-advanced-settings").open = false;
+  byId("setup-password-section").open = false;
+  byId("managed-public-key-output").hidden = true;
   byId("connection-id").value = "";
   editingConnection = null;
   byId("editor-heading").textContent = "Add connection";
@@ -73,8 +157,10 @@ function clearEditor() {
 }
 
 function editConnection(entry) {
+  invalidateSetup();
   showError();
   byId("connection-form").reset();
+  byId("advanced-settings").open = false;
   editingConnection = entry;
   // Saved labels never drive saved endpoints, even if their values match.
   automaticAddresses.clear();
@@ -90,6 +176,7 @@ function editConnection(entry) {
     byId("ssh-target-host").value = entry.ssh.targetHost;
     byId("ssh-host-key").value = entry.ssh.hostKeySha256Hex;
     byId("ssh-auth-type").value = entry.ssh.auth.type;
+    byId("ssh-advanced-settings").open = entry.ssh.auth.type !== "managed";
   }
   // Do not copy stored passwords, private keys or passphrases into the DOM.
   updateModeFields();
@@ -118,8 +205,8 @@ function render() {
   const unsupported = state.phase === "unsupported";
   const status = byId("status");
   status.dataset.state = busy ? "loading" : state.phase;
-  status.textContent = busy ? "Updating local connections; your unsaved draft is kept…"
-    : ready ? "Ready. Connections open on demand; unmapped .portmap requests are blocked."
+  status.textContent = busy ? "Updating…"
+    : ready ? "Ready"
     : unsupported ? "Networking capability unavailable. Direct and SSH connections are disabled."
     : state.phase === "error" ? "Local configuration could not be loaded or applied. .portmap traffic is blocked."
     : state.phase === "unavailable" ? "Cannot contact the extension background. Reload the extension and this page; your unsaved draft is kept."
@@ -131,7 +218,9 @@ function render() {
   byId("config-reason").textContent = state.phase === "error" ? state.error || "Local connections are unavailable." : "";
   byId("connection-fields").disabled = busy || !ready;
   byId("save").disabled = busy || pendingKeyReads !== 0 || !ready;
-  byId("cancel-edit").disabled = busy;
+  byId("cancel-edit").disabled = busy && !managedBusy;
+  byId("cancel-edit").hidden = !editingConnection && !byId("connection-id").value && !managedBusy &&
+    byId("editor-heading").textContent === "Add connection";
   byId("reset").disabled = busy || state.phase === "loading";
   byId("empty").hidden = state.connections.length !== 0 || !ready;
   byId("connections").replaceChildren();
@@ -182,18 +271,26 @@ function render() {
     card.append(heading, detail, endpoint, nodeStatus, actions);
     byId("connections").append(card);
   }
+  updateManagedFields();
   qrScanner?.refresh();
 }
 
 async function run(message) {
   if (busy) return false;
   busy = true;
+  managedBusy = managedActions.has(message.action);
+  const epoch = draftEpoch;
   showError();
   render();
   try {
-    const result = await browser.runtime.sendMessage({ channel: "portmap-connections", ...message });
+    const result = managedBusy
+      ? await managedRequest(message)
+      : await browser.runtime.sendMessage({ channel: "portmap-connections", ...message });
     if (!result?.ok) throw new Error(result?.error || "The extension background is unavailable. Reload this page.");
-    state = result.state;
+    const { setup, ...snapshot } = result.state;
+    state = snapshot;
+    if (managedBusy && epoch !== draftEpoch) return false;
+    setupResult = setup || null;
     return true;
   } catch (failure) {
     showError(failure.message);
@@ -201,6 +298,8 @@ async function run(message) {
     return false;
   } finally {
     busy = false;
+    if (managedBusy) byId("ssh-onetime-password").value = "";
+    managedBusy = false;
     render();
   }
 }
@@ -217,11 +316,12 @@ function editorConnection() {
     httpsPort: byId("https-port").value === "" ? null : Number(byId("https-port").value)
   };
   if (connection.mode === "ssh") {
-    const auth = keepsStoredCredentials() ? { ...editingConnection.ssh.auth }
-      : byId("ssh-auth-type").value === "password"
-        ? { type: "password", password: byId("ssh-password").value }
-        : { type: "key", publicKey: byId("ssh-public-key").value, privateKey: byId("ssh-private-key").value,
-          passphrase: byId("ssh-passphrase").value };
+    const auth = byId("ssh-auth-type").value === "managed" ? { type: "managed" }
+      : keepsStoredCredentials() ? { ...editingConnection.ssh.auth }
+        : byId("ssh-auth-type").value === "password"
+          ? { type: "password", password: byId("ssh-password").value }
+          : { type: "key", publicKey: byId("ssh-public-key").value, privateKey: byId("ssh-private-key").value,
+            passphrase: byId("ssh-passphrase").value };
     connection.ssh = {
       port: Number(byId("ssh-port").value),
       username: byId("ssh-username").value,
@@ -260,12 +360,12 @@ async function confirmQrConnection(draft, isCurrent) {
   clearEditor();
   // Reset identity, all secrets and file inputs before changing destinations.
   // Any old async key-file read no longer matches the reset file selection.
-  for (const id of ["ssh-password", "ssh-private-key", "ssh-public-key", "ssh-passphrase",
+  for (const id of ["ssh-password", "ssh-onetime-password", "ssh-private-key", "ssh-public-key", "ssh-passphrase",
     "ssh-private-key-file", "ssh-public-key-file"]) byId(id).value = "";
   editingConnection = null;
   byId("connection-id").value = "";
   byId("replace-credentials").checked = false;
-  byId("ssh-auth-type").value = "password";
+  byId("ssh-auth-type").value = "managed";
   automaticAddresses.clear();
   for (const key of ["name", "domain", "mode", "host"]) byId(key).value = draft[key];
   byId("http-port").value = draft.httpPort;
@@ -278,11 +378,69 @@ async function confirmQrConnection(draft, isCurrent) {
   byId("editor-heading").textContent = "Complete scanned SSH connection";
   byId("cancel-edit").hidden = false;
   updateModeFields();
-  byId(draft.ssh.username ? "ssh-password" : "ssh-username").focus();
+  byId(draft.ssh.username ? "inspect-host" : "ssh-username").focus();
   byId("connection-form").scrollIntoView({ behavior: "smooth", block: "start" });
   return true;
 }
 
+byId("connection-form").addEventListener("input", event => {
+  if (!["ssh-onetime-password", "host-ack", "managed-public-key"].includes(event.target.id)) invalidateSetup();
+});
+for (const id of ["mode", "ssh-auth-type", "replace-credentials", "enabled"]) {
+  byId(id).addEventListener("change", invalidateSetup);
+}
+byId("host-ack").addEventListener("change", updateManagedFields);
+byId("inspect-host").addEventListener("click", async () => {
+  if (busy) return;
+  invalidateSetup();
+  try {
+    const endpoint = currentEndpoint();
+    if (!await run({ action: "inspect-host", endpoint, expectedPin: byId("ssh-host-key").value })) return;
+    inspectedHost = setupResult;
+    byId("detected-endpoint").textContent = `Server: ${displayHost(endpoint.host)}:${endpoint.port}`;
+    byId("detected-fingerprint").textContent = inspectedHost.hostKeySha256Hex;
+    updateManagedFields();
+  } catch (failure) { showError(failure.message); }
+});
+byId("confirm-host").addEventListener("click", async () => {
+  if (busy || !inspectedHost || !byId("host-ack").checked) return;
+  const checked = inspectedHost;
+  if (!await run({ action: "confirm-host", challenge: checked.challenge,
+    endpoint: checked.endpoint, hostKeySha256Hex: checked.hostKeySha256Hex })) return;
+  confirmedHost = { ...checked.endpoint, pin: checked.hostKeySha256Hex };
+  byId("ssh-host-key").value = checked.hostKeySha256Hex;
+  inspectedHost = null;
+  updateManagedFields();
+});
+byId("copy-managed-public-key").addEventListener("click", async () => {
+  if (!await run({ action: "managed-public-key" })) return;
+  const publicKey = setupResult.publicKey;
+  byId("managed-public-key").value = publicKey;
+  byId("managed-public-key-output").hidden = false;
+  try {
+    await navigator.clipboard.writeText(publicKey);
+    byId("setup-status").textContent = "Browser public key copied.";
+  } catch (_) {
+    byId("managed-public-key").select();
+    byId("setup-status").textContent = "Select and copy the public key shown below.";
+  }
+});
+byId("install-managed-key").addEventListener("click", async () => {
+  if (busy || !hasManagedTrust() || !byId("connection-form").reportValidity()) return;
+  try {
+    const connection = editorConnection();
+    const password = byId("ssh-onetime-password").value;
+    if (!password) throw new Error("Enter the one-time SSH password, or install the public key manually.");
+    if (await run({ action: "managed-install", connection, password })) clearEditor();
+  } catch (failure) {
+    byId("ssh-onetime-password").value = "";
+    showError(failure.message);
+  }
+});
+window.addEventListener("pagehide", () => {
+  byId("ssh-onetime-password").value = "";
+  managedPort?.disconnect();
+});
 byId("name").addEventListener("input", fillAddressesFromName);
 for (const id of ["domain", "host"]) {
   byId(id).addEventListener("input", () => automaticAddresses.delete(id));
@@ -306,10 +464,13 @@ for (const kind of ["private", "public"]) {
       showError("Could not load the key file. Select a readable text key file of at most 64 KiB, or paste its contents.");
     } finally {
       pendingKeyReads--;
-      byId("save").disabled = busy || pendingKeyReads !== 0 ||
-        state.phase !== "ready" || !state.capability?.available;
+      updateManagedFields();
     }
   });
+}
+// Reveal invalid advanced controls before the browser tries to focus them.
+for (const id of ["advanced-settings", "ssh-advanced-settings"]) {
+  byId(id).addEventListener("invalid", () => { byId(id).open = true; }, true);
 }
 byId("connection-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -317,14 +478,15 @@ byId("connection-form").addEventListener("submit", async event => {
   showError();
   try {
     const connection = editorConnection();
-    if (await run({ action: "save", connection })) clearEditor();
+    const action = connection.mode === "ssh" && connection.ssh.auth.type === "managed" ? "managed-save" : "save";
+    if (await run({ action, connection })) clearEditor();
   } catch (failure) {
     showError(failure.message);
   }
 });
 byId("cancel-edit").addEventListener("click", () => { clearEditor(); showError(); });
 byId("reset").addEventListener("click", async () => {
-  if (confirm("Delete all local connections, SSH passwords, keys and passphrases? This also removes unsupported legacy configuration. All .portmap addresses will be blocked. This cannot be undone.")) {
+  if (confirm("Delete all local connections and SSH credentials, including this profile's browser key? Remove its public key from servers separately. All .portmap addresses will be blocked. This cannot be undone.")) {
     if (await run({ action: "reset" })) clearEditor();
   }
 });

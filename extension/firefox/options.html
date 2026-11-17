@@ -15,39 +15,39 @@
   <main>
     <header>
       <p class="eyebrow">PORTMAP · FIREFOX</p>
-      <h1>Your nodes, in this browser</h1>
-      <p>Open a node's original <code>.portmap</code> address without changing your device's DNS, VPN or routes.</p>
+      <h1>Portmap connections</h1>
+      <p>Access your nodes without changing DNS or VPN settings.</p>
     </header>
     <p id="status" role="status" aria-live="polite" data-state="loading">Checking networking capability and loading local connections…</p>
     <p id="error" role="alert" hidden></p>
     <section id="capability-guidance" class="notice" aria-labelledby="capability-heading" hidden>
       <h2 id="capability-heading">Compatible Firefox networking required</h2>
       <p id="capability-reason"></p>
-      <p>Both direct and SSH connections require working experimental networking APIs. Use a Firefox build that permits extension experiments. Where available, enable <code>extensions.experiments.enabled</code> in <code>about:config</code> before installing this extension. If you installed it with experiments disabled, enable the setting, restart Firefox, and reinstall the experimental XPI; restarting alone may not register its APIs. If your Firefox rejects the package or cannot provide these APIs, switch to a compatible build. Changing connection settings cannot add networking capabilities.</p>
-      <p><a href="https://www.firefox.com/channel/desktop/" target="_blank" rel="noopener noreferrer">Firefox experimental-build downloads</a> · <a href="https://play.google.com/store/apps/details?id=org.mozilla.fenix" target="_blank" rel="noopener noreferrer">Firefox Nightly for Android</a>. Availability is decided by the working networking APIs, not the browser name or version.</p>
-      <p>No connection will fall back to ordinary direct browsing or an external proxy. Your saved connections are kept. All <code>.portmap</code> traffic remains blocked until capability is available.</p>
+      <p>Enable <code>extensions.experiments.enabled</code> in <code>about:config</code>, restart Firefox, then reinstall this extension.</p>
+      <p>Not supported by your browser? <a href="https://www.firefox.com/channel/desktop/" target="_blank" rel="noopener noreferrer">Get Firefox Nightly</a> · <a href="https://play.google.com/store/apps/details?id=org.mozilla.fenix" target="_blank" rel="noopener noreferrer">Android</a></p>
+      <p>Saved connections are kept; unavailable connections stay blocked.</p>
     </section>
     <section id="config-guidance" class="notice" aria-labelledby="config-heading" hidden>
       <h2 id="config-heading">Local configuration needs attention</h2>
       <p id="config-reason"></p>
-      <p>Legacy SOCKS5 connections cannot be converted into direct or SSH connections. Stored data is not silently changed. If this is an old configuration, record the endpoints you need, use “Reset all local connections” below, then rebuild with explicit HTTP/HTTPS ports and, for SSH, verified credentials and a trusted host fingerprint. Reset permanently deletes the saved local configuration.</p>
+      <p>Old SOCKS5 settings cannot be converted. Back up what you need before resetting; reset deletes all saved connections.</p>
     </section>
     <section aria-labelledby="connections-heading">
       <h2 id="connections-heading">Connections</h2>
-      <p id="empty" hidden>No connections yet. Add an already running, privately reachable node below.</p>
+      <p id="empty" hidden>No nodes yet.</p>
       <div id="connections"></div>
     </section>
     <section aria-labelledby="qr-heading">
       <h2 id="qr-heading">Add a node by QR</h2>
-      <p>Scan only a trusted node's Portmap connection QR. Verify its destination and, for SSH, its host fingerprint through a trusted channel. A QR is not a signature or authorization grant. It contains private infrastructure details but no SSH passwords or private keys.</p>
-      <button id="qr-open" type="button" disabled>Scan or import connection QR</button>
+      <p>Use a QR from a trusted node. Review its address before adding.</p>
+      <button id="qr-open" type="button" disabled>Scan or import QR</button>
       <div id="qr-panel" class="qr-panel" aria-labelledby="qr-heading" hidden>
-        <p class="hint">The camera and image decoder run locally; nothing is uploaded. Camera access requires Firefox/device permission and an available camera. If capture is blocked, open these settings in a tab or import a QR image.</p>
+        <p class="hint">Scanned locally. If the camera is unavailable, choose an image.</p>
         <div class="actions">
           <button id="qr-camera" type="button">Start rear camera</button>
           <label class="file-label">Choose QR image (PNG or JPEG)<input id="qr-image" type="file" accept="image/png,image/jpeg" aria-describedby="qr-image-help"></label>
         </div>
-        <p id="qr-image-help" class="hint">Up to 8 MiB, 16 megapixels and 16384 pixels per side. SVG and external-resource image formats are not accepted. Include the complete QR and its border.</p>
+        <p id="qr-image-help" class="hint">Include the whole QR. PNG/JPEG, up to 8 MiB and 16 megapixels.</p>
         <video id="qr-video" muted playsinline aria-label="Live QR camera preview" hidden></video>
         <canvas id="qr-canvas" width="1" height="1" hidden></canvas>
         <p id="qr-status" role="status" aria-live="polite" data-state="closed">Scanner closed.</p>
@@ -60,7 +60,7 @@
     </section>
     <section class="editor" aria-labelledby="editor-heading">
       <h2 id="editor-heading">Add connection</h2>
-      <p id="name-help" class="hint">Enter a node name such as <code>voxmani</code> to fill its domain and host. Addresses follow the name only until you edit them manually. Renaming a saved connection never changes its endpoints. A short host requires working name resolution; otherwise use its actual IP or hostname.</p>
+      <p id="name-help" class="hint">Name fills the domain and host; you can change either.</p>
       <form id="connection-form" autocomplete="off">
         <input type="hidden" id="connection-id">
         <fieldset id="connection-fields" disabled>
@@ -70,39 +70,68 @@
             <label>Portmap domain<input id="domain" required maxlength="254" autocapitalize="none" spellcheck="false" placeholder="node.portmap" aria-describedby="domain-help"></label>
             <label>Connection mode<select id="mode"><option value="direct">Direct TCP</option><option value="ssh">SSH tunnel</option></select></label>
             <label><span id="host-label">Destination host</span><input id="host" required maxlength="254" autocapitalize="none" spellcheck="false" placeholder="100.64.0.10" aria-describedby="host-help"></label>
-            <label>HTTP port<input id="http-port" type="number" required min="1" max="65535" step="1" inputmode="numeric" aria-describedby="ports-help"></label>
-            <label>HTTPS port (optional)<input id="https-port" type="number" min="1" max="65535" step="1" inputmode="numeric" aria-describedby="ports-help"></label>
           </div>
-          <p id="domain-help" class="hint">Matches this exact domain and its descendants, such as <code>app.node.portmap</code>. Overlapping connections are not allowed, including disabled ones.</p>
-          <p id="host-help" class="hint">Use a reachable IP address or hostname, not a URL or .portmap name. Direct mode connects to this destination; SSH mode connects to this SSH server. The extension never starts a workspace or changes system DNS, VPN or routes.</p>
-          <p id="ports-help" class="hint">Enter the node's real HTTP port. HTTPS is enabled only when you explicitly supply its port; leave it blank otherwise. In SSH mode these ports are reached at the target host through the tunnel. Direct TCP adds no encryption: use a trusted encrypted network for HTTP.</p>
-          <fieldset id="ssh-fields" hidden disabled>
-            <legend>SSH server and trust</legend>
+          <p id="domain-help" class="sr-only">Includes subdomains. Cannot overlap another node.</p>
+          <p id="host-help" class="sr-only">Use a reachable IP or hostname, not a URL or .portmap name.</p>
+          <details id="advanced-settings">
+            <summary>Advanced</summary>
             <div class="fields">
-              <label>SSH username<input id="ssh-username" required autocapitalize="none" spellcheck="false" autocomplete="off"></label>
-              <label>SSH port<input id="ssh-port" type="number" required min="1" max="65535" step="1" inputmode="numeric" value="22"></label>
-              <label>Target host inside SSH<input id="ssh-target-host" required maxlength="254" value="127.0.0.1" autocapitalize="none" spellcheck="false" aria-describedby="target-help"></label>
-              <label>Trusted host SHA256 fingerprint<input id="ssh-host-key" required autocapitalize="none" spellcheck="false" placeholder="SHA256:… or 64 hexadecimal characters" aria-describedby="pin-help"></label>
+              <label>HTTP port<input id="http-port" type="number" required min="1" max="65535" step="1" inputmode="numeric" value="80" aria-describedby="ports-help"></label>
+              <label>HTTPS port (optional)<input id="https-port" type="number" min="1" max="65535" step="1" inputmode="numeric" value="443" aria-describedby="ports-help"></label>
             </div>
-            <p id="target-help" class="hint">The ordinary hostname or IP that the SSH server should connect to, usually <code>127.0.0.1</code>. This is an address, never a shell command.</p>
-            <p id="pin-help" class="hint">Obtain and verify the SSH host key fingerprint through a trusted channel before saving. Accepts OpenSSH <code>SHA256:base64</code> or 64 hex characters. No first-use trust or accept-any option is provided.</p>
-            <label>Authentication<select id="ssh-auth-type"><option value="password">Password</option><option value="key">RSA PEM private key + OpenSSH public key</option></select></label>
-            <label id="replace-credentials-row" class="checkbox" hidden><input id="replace-credentials" type="checkbox"> Replace stored SSH credentials</label>
-            <p id="credential-help" class="hint"></p>
-            <fieldset id="credential-fields">
-              <legend class="sr-only">Replacement SSH credentials</legend>
-              <div id="password-fields">
-                <label>SSH password<input id="ssh-password" type="password" autocomplete="new-password"></label>
+            <p id="ports-help" class="hint">Default: 80 / 443. Clear HTTPS to disable it. HTTPS requires a trusted server certificate; direct HTTP is unencrypted.</p>
+          </details>
+          <fieldset id="ssh-fields" hidden disabled>
+            <legend>SSH login</legend>
+            <label>SSH username<input id="ssh-username" required autocapitalize="none" spellcheck="false" autocomplete="off"></label>
+            <div id="managed-fields">
+              <p class="hint">Use this browser's own SSH key. Its private key stays in this profile.</p>
+              <button id="inspect-host" type="button">Check server fingerprint</button>
+              <div id="host-confirmation" class="notice" hidden>
+                <p id="detected-endpoint"></p>
+                <p><code id="detected-fingerprint"></code></p>
+                <label class="checkbox"><input id="host-ack" type="checkbox"> I compared this fingerprint with the server owner.</label>
+                <button id="confirm-host" type="button" disabled>Trust this server</button>
               </div>
-              <div id="key-fields" hidden>
-                <label>RSA PEM private key<textarea id="ssh-private-key" rows="6" autocapitalize="none" spellcheck="false" autocomplete="off" aria-describedby="key-help"></textarea></label>
-                <label class="file-label">Load private key from file<input id="ssh-private-key-file" type="file" aria-describedby="key-help"></label>
-                <label>OpenSSH RSA public key<textarea id="ssh-public-key" rows="3" autocapitalize="none" spellcheck="false" autocomplete="off" aria-describedby="key-help"></textarea></label>
-                <label class="file-label">Load public key from file<input id="ssh-public-key-file" type="file" aria-describedby="key-help"></label>
-                <label>Private key passphrase (optional)<input id="ssh-passphrase" type="password" autocomplete="new-password"></label>
-                <p id="key-help" class="hint">Use an RSA private key in PEM format (<code>BEGIN RSA PRIVATE KEY</code>) and its matching OpenSSH <code>ssh-rsa</code> public key. OpenSSH private-key format and Ed25519 keys are not supported. Files are read locally and saved only when you save the connection.</p>
+              <p id="setup-status" class="hint" role="status" aria-live="polite"></p>
+              <details id="setup-password-section">
+                <summary>Set up passwordless login</summary>
+                <label>One-time SSH password<input id="ssh-onetime-password" type="password" autocomplete="off"></label>
+                <p class="hint">Adds the browser key to your account, then tests a new key login. The password is not saved.</p>
+                <button id="install-managed-key" type="button" disabled>Install key and save</button>
+              </details>
+            </div>
+            <details id="ssh-advanced-settings">
+              <summary>SSH advanced</summary>
+              <div class="fields">
+                <label>SSH port<input id="ssh-port" type="number" required min="1" max="65535" step="1" inputmode="numeric" value="22"></label>
+                <label>Target host inside SSH<input id="ssh-target-host" required maxlength="254" value="127.0.0.1" autocapitalize="none" spellcheck="false"></label>
               </div>
-            </fieldset>
+              <label>Host SHA256 fingerprint<input id="ssh-host-key" autocapitalize="none" spellcheck="false" placeholder="SHA256:… or 64 hexadecimal characters" aria-describedby="pin-help"></label>
+              <p id="pin-help" class="hint">Compare with the server owner. A scanned fingerprint still needs your confirmation.</p>
+              <label>Authentication<select id="ssh-auth-type"><option value="managed">Browser key (recommended)</option><option value="password">Saved password</option><option value="key">Imported RSA key</option></select></label>
+              <div id="manual-managed-key">
+                <button id="copy-managed-public-key" type="button">Copy browser public key</button>
+                <p class="hint">For manual setup, add it to your account's ~/.ssh/authorized_keys, then Test and save.</p>
+                <label id="managed-public-key-output" hidden>Browser public key<textarea id="managed-public-key" rows="3" readonly spellcheck="false"></textarea></label>
+              </div>
+              <label id="replace-credentials-row" class="checkbox" hidden><input id="replace-credentials" type="checkbox"> Replace stored SSH credentials</label>
+              <p id="credential-help" class="hint"></p>
+              <fieldset id="credential-fields">
+                <legend class="sr-only">Replacement SSH credentials</legend>
+                <div id="password-fields" hidden>
+                  <label>SSH password<input id="ssh-password" type="password" autocomplete="new-password"></label>
+                </div>
+                <div id="key-fields" hidden>
+                  <label>RSA PEM private key<textarea id="ssh-private-key" rows="6" autocapitalize="none" spellcheck="false" autocomplete="off" aria-describedby="key-help"></textarea></label>
+                  <label class="file-label">Load private key from file<input id="ssh-private-key-file" type="file" aria-describedby="key-help"></label>
+                  <label>OpenSSH RSA public key<textarea id="ssh-public-key" rows="3" autocapitalize="none" spellcheck="false" autocomplete="off" aria-describedby="key-help"></textarea></label>
+                  <label class="file-label">Load public key from file<input id="ssh-public-key-file" type="file" aria-describedby="key-help"></label>
+                  <label>Private key passphrase (optional)<input id="ssh-passphrase" type="password" autocomplete="new-password"></label>
+                  <p id="key-help" class="hint">RSA PEM private key + matching OpenSSH public key. Ed25519 and OpenSSH private-key files are not supported.</p>
+                </div>
+              </fieldset>
+            </details>
           </fieldset>
           <label class="checkbox"><input id="enabled" type="checkbox" checked> Enable connection</label>
           <div class="actions"><button id="save" type="submit" disabled>Save connection</button></div>
@@ -117,15 +146,14 @@
         <button id="check-update" type="button" aria-describedby="update-help">Check for updates</button>
         <a id="download-update" target="_blank" rel="noopener noreferrer" hidden>Download update (.xpi)</a>
       </div>
-      <p id="update-status" role="status" aria-live="polite" data-state="idle">Check for a compatible experimental extension update.</p>
-      <p id="update-help" class="hint">Only checks a configured official compatible update feed when you click. Experimental networking builds cannot use the legacy signed extension feed. Downloading is not installation; this page cannot install an update itself. Follow the compatible build's installation instructions; a Firefox build that rejects experiments cannot install it.</p>
+      <p id="update-status" role="status" aria-live="polite" data-state="idle"></p>
+      <p id="update-help" class="hint">Download an update, then install it in Firefox.</p>
     </section>
     <aside aria-labelledby="privacy-heading">
-      <h2 id="privacy-heading">Local configuration, explicit routing</h2>
-      <p>Connections, SSH passwords, private keys and passphrases stay in this Firefox profile's local extension storage, not Firefox Sync. They are not encrypted by this extension. Protect your profile and use only trusted SSH servers. Stored secrets are never displayed in connection cards; editing keeps them unless you explicitly choose a replacement. No analytics or central connection manager is used.</p>
-      <p>Unconfigured or disabled .portmap addresses are blocked, including while connections load or change. Other websites retain Firefox's normal network behavior. Allow this extension in private windows if you need routing and blocking there; it cannot protect windows where Firefox disables it. Disabling or uninstalling the extension removes its protection.</p>
-      <p>Open node uses HTTP by default. HTTPS is available only with a configured HTTPS port and a trusted certificate for the original .portmap name at the node. No TLS verification is bypassed. Direct HTTP traffic is visible on the network path; SSH encrypts traffic to the SSH server, which can observe forwarded HTTP traffic.</p>
-      <button id="reset" type="button">Reset all local connections</button>
+      <h2 id="privacy-heading">Local data</h2>
+      <p>Credentials stay in this browser, unencrypted by the extension. Protect your browser profile.</p>
+      <p><a href="https://github.com/ylang-ylang/portmap#firefox-on-android-and-desktop" target="_blank" rel="noopener noreferrer">Setup and security details</a></p>
+      <button id="reset" type="button">Reset local data</button>
     </aside>
   </main>
 </body>

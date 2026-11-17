@@ -62,6 +62,11 @@
     return value;
   }
 
+  function normalizeSshEndpoint(input) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("SSH endpoint is required.");
+    return Object.freeze({ host: normalizeHost(input.host), port: normalizePort(input.port ?? 22, "SSH port") });
+  }
+
   function normalizeFingerprint(value) {
     if (typeof value !== "string") throw new Error("An exact SSH SHA256 host-key fingerprint is required.");
     const pin = value.trim();
@@ -90,7 +95,10 @@
       const ssh = input.ssh;
       if (!ssh || typeof ssh !== "object") throw new Error("SSH settings are required.");
       let auth;
-      if (ssh.auth?.type === "password") {
+      if (ssh.auth?.type === "managed") {
+        if (Object.keys(ssh.auth).some(key => key !== "type")) throw new Error("Browser-key authentication must not contain credentials.");
+        auth = { type: "managed" };
+      } else if (ssh.auth?.type === "password") {
         auth = { type: "password", password: credential(ssh.auth.password, "SSH password", 4096) };
       } else if (ssh.auth?.type === "key") {
         const publicKey = credential(typeof ssh.auth.publicKey === "string" ? ssh.auth.publicKey.trim() : ssh.auth.publicKey,
@@ -102,7 +110,7 @@
         }
         auth = { type: "key", publicKey, privateKey,
           passphrase: credential(ssh.auth.passphrase ?? "", "Key passphrase", 4096, false, true) };
-      } else throw new Error("Choose password or RSA PEM key authentication.");
+      } else throw new Error("Choose the browser key, a password, or an imported RSA key.");
       result.ssh = Object.freeze({ port: normalizePort(ssh.port ?? 22, "SSH port"),
         username: credential(ssh.username, "SSH username", 255), targetHost: normalizeHost(ssh.targetHost || "127.0.0.1"),
         hostKeySha256Hex: normalizeFingerprint(ssh.hostKeySha256Hex), auth: Object.freeze(auth) });
@@ -187,7 +195,7 @@
     return selected;
   }
 
-  const api = Object.freeze({ normalizeConnection, normalizeDomain, normalizeHost, normalizeFingerprint,
+  const api = Object.freeze({ normalizeConnection, normalizeDomain, normalizeHost, normalizeFingerprint, normalizeSshEndpoint,
     matchesDomain, isPortmapHost, inspectUrl, validateConnections, readConfig, findReleaseUpdate });
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortmapCore = api;

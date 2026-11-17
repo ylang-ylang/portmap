@@ -19,8 +19,17 @@ input, select, textarea { min-width: 0; width: 100%; padding: 8px 10px; backgrou
 textarea { resize: vertical; font: .9rem/1.5 ui-monospace, monospace; }
 fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 legend { padding: 0; font-weight: 700; margin-bottom: 12px; }
+details { margin-top: 16px; border-top: 1px solid var(--border); }
+details > summary { cursor: pointer; min-height: 44px; padding: 10px 0; font-weight: 600; }
+details > summary:focus-visible { outline: 3px solid #58a7ee; outline-offset: 2px; }
+details .hint { margin-top: 12px; }
 #ssh-fields { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 20px; }
 #ssh-fields > label, #key-fields > label { margin-top: 16px; }
+#ssh-advanced-settings > label, #manual-managed-key, #host-confirmation { margin-top: 16px; }
+#host-confirmation { padding: 16px; }
+#host-confirmation .checkbox { align-items: flex-start; font-size: .9rem; }
+#detected-fingerprint { font-size: .85rem; }
+#setup-password-section > button, #confirm-host { margin-top: 12px; }
 .file-label { font-size: .9rem; font-weight: 400; }
 input[type="file"] { padding: 6px; overflow: hidden; }
 input:disabled, select:disabled, textarea:disabled { opacity: .65; }

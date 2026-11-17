@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -52,7 +53,24 @@ def fetch(work):
             raise ValueError(f"patched source mismatch: {name}")
 
 
+def writable_compiler_cache(work):
+    """Use a private cache without chmod/chown of the pinned SDK installation."""
+    if os.environ.get("EM_CACHE"):
+        return
+    executable = shutil.which("emcc")
+    if not executable:
+        raise ValueError("Emscripten 3.1.74 emcc is required")
+    original = Path(executable).resolve().parent / "cache"
+    cache = work / "build/emscripten-cache"
+    if original.is_dir():
+        shutil.copytree(original, cache, dirs_exist_ok=True)
+    else:
+        cache.mkdir(parents=True, exist_ok=True)
+    os.environ["EM_CACHE"] = str(cache)
+
+
 def build(work, check):
+    writable_compiler_cache(work)
     compiler = run("emcc", "--version", capture=True)
     if not re.search(r"\b3\.1\.74\b", compiler.splitlines()[0]):
         raise ValueError("Require exactly Emscripten 3.1.74")
@@ -60,6 +78,14 @@ def build(work, check):
     for name in ("ssh/bridge.c", "ssh/libssh2-browser-callback.patch"):
         if digest(SSH.parent / name) != provenance["integrity"][name]:
             raise ValueError(f"build input differs from reviewed provenance: {name}")
+    for name, expected in provenance["licenseIntegrity"].items():
+        origin = provenance["licenseSources"][name]
+        sdk = Path(shutil.which("emcc")).resolve().parent
+        source = (work / "source" / origin["source"]) if "source" in origin else sdk / origin["sdk"]
+        if digest(source) != expected:
+            raise ValueError(f"license differs from pinned dependency/toolchain source: {name}")
+        if digest(SSH.parent / name) != expected:
+            raise ValueError(f"license input differs from reviewed provenance: {name}")
     # Verify source identity and the complete tracked diff before compilation.
     for name, _, commit in SOURCES:
         source = work / "source" / name

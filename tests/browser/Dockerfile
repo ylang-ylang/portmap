@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssh-server 
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10000 --shell /bin/sh probe \
     && mkdir -p /run/sshd /state /meta
-COPY tests/browser/fixture.py tests/browser/target.py /app/tests/browser/
+COPY tests/browser/fixture.py tests/browser/target.py tests/browser/managed_fixture.py /app/tests/browser/
 CMD ["python", "/app/tests/browser/target.py"]
 
 FROM base AS browser

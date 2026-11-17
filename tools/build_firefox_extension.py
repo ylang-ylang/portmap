@@ -41,7 +41,7 @@ STABLE_UPDATE_FEED = b'''{
 }
 '''
 RUNTIME_FILES = (
-    "manifest.json", "core.js", "controller.js", "background.js",
+    "manifest.json", "core.js", "managed-identity.js", "controller.js", "background.js",
     "proxy.js", "transports.js", "transport/api.js", "transport/schema.json",
     "options.html", "options.js", "options.css", "icon.svg",
     "connection-code.js", "scan.js",
@@ -54,12 +54,13 @@ RUNTIME_FILES = (
 )
 
 EXPERIMENTAL_DISTRIBUTION = "experimental-capability-only"
-EVIDENCE_SCHEMA = "portmap-browser-capability-qr-v2"
+EVIDENCE_SCHEMA = "portmap-browser-managed-ssh-v3"
 HARNESS_FILES = tuple("tests/browser/" + name for name in (
     "runner.py", "android.py", "autofill.py", "network_evidence.py", "run.sh",
     "traced-geckodriver.sh", "control.py", "compose.yaml", "compose.android.yaml",
     "Dockerfile", "Android.Dockerfile", "fixture.py", "target.py", "dns.py", "requirements.txt",
     "qr.py", "camera_scene.py", "camera_probe.py", "CameraProbe.Dockerfile",
+    "managed.py", "managed_fixture.py",
 )) + (
     "tools/build_firefox_extension.py", "tools/build_firefox_ssh.py", "pyproject.toml",
     "src/portmap/cli.py", "src/portmap/connection_qr.py",
@@ -85,6 +86,22 @@ REQUIRED_EXPERIMENTAL_CASES = frozenset((
     "qr-reject-malformed", "qr-reject-foreign-url", "qr-reject-secret",
     "qr-reject-version", "qr-reject-duplicate", "qr-reject-unknown-field",
     "qr-reject-overlap", "qr-camera-track-cancel-lifecycle",
+    "managed-browser-key-generate-copy-manual-login",
+    "managed-password-bootstrap-fresh-key-login",
+    "managed-duplicate-preserves-bytes-and-restricted-options",
+    "managed-wrong-pin-rejected-before-authentication", "managed-wrong-password-no-save",
+    "managed-password-disabled-no-save", "managed-password-disabled-manual-key-login",
+    "managed-restricted-exec-no-save", "managed-partial-install-fresh-key-failure-no-save",
+    "managed-reject-authorized-keys-symlink", "managed-reject-ssh-directory-symlink",
+    "managed-reject-world-writable-authorized-keys", "managed-reject-world-writable-ssh-directory",
+    "managed-reject-foreign-owned-authorized-keys", "managed-cancel-inflight-no-stale-save",
+    "managed-closed-options-no-stale-save", "managed-password-not-persisted",
+    "managed-browser-restart-key-route", "managed-reset-destroys-profile-key",
+    "advanced-default-ports-save-closed-and-reedit", "advanced-custom-ports-save-reedit-and-route",
+    "advanced-null-https-preserved-through-edit-and-route", "advanced-cancel-and-reset-restore-new-defaults",
+    "advanced-invalid-hidden-ports-expand-block-and-allow-correction",
+    "qr-imported-custom-ports-retained-through-edit",
+    "qr-imported-null-https-retained-through-edit-and-route",
 ))
 REQUIRED_EXPERIMENTAL_PLATFORM_CASES = {
     "desktop-firefox": frozenset(("qr-camera-native-fake-lifecycle",)),
@@ -133,10 +150,16 @@ def runtime_files(root: Path) -> tuple[dict, dict[str, bytes]]:
                 raise ValueError("experimental compatibility must be capability-only, not version-gated")
         provenance = json.loads(files["ssh/PROVENANCE.json"])
         integrity = provenance["integrity"]
-        for name in ("ssh/bridge.c", "ssh/libssh2.js", "ssh/libssh2.wasm",
+        for name in ("ssh/bridge.c", "ssh/ssh.js", "ssh/libssh2.js", "ssh/libssh2.wasm",
                      "ssh/libssh2-browser-callback.patch"):
             if hashlib.sha256(files[name]).hexdigest() != integrity.get(name):
                 raise ValueError(f"SSH source/payload integrity mismatch: {name}")
+        for name in (name for name in RUNTIME_FILES if name.startswith("ssh/licenses/")):
+            if hashlib.sha256(files[name]).hexdigest() != provenance.get("licenseIntegrity", {}).get(name):
+                raise ValueError(f"SSH license integrity mismatch: {name}")
+        recipe = "tools/build_firefox_ssh.py"
+        if sha256(root / recipe) != provenance.get("buildInputs", {}).get(recipe):
+            raise ValueError("SSH build recipe integrity mismatch")
         qr_provenance = json.loads(files["vendor/PROVENANCE.json"])
         for name in ("jsQR.js", "jsQR.LICENSE"):
             actual = hashlib.sha256(files["vendor/" + name]).hexdigest()
@@ -368,11 +391,12 @@ def check_experimental_observations(proof: dict, *, platform: str, source: dict)
     def digest(value):
         return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
     fixtures = proof.get("qr_fixtures")
-    require(isinstance(fixtures, dict) and set(fixtures) == {"direct", "ssh", "camera"},
+    require(isinstance(fixtures, dict) and set(fixtures) == {"direct", "http-only", "ssh", "camera"},
             "lacks actual CLI QR fixtures")
     targets = proof.get("targets")
     require(isinstance(targets, dict), "lacks QR fixture receiver targets")
-    for label, mode, target_name in (("direct", "direct", "a"), ("ssh", "ssh", "b"), ("camera", "direct", "a")):
+    for label, mode, target_name in (("direct", "direct", "a"), ("http-only", "direct", "a"),
+                                     ("ssh", "ssh", "b"), ("camera", "direct", "a")):
         fixture, target = fixtures[label], targets.get(target_name)
         fields = {"command", "png_sha256", "wire_sha256", "domain"}
         if label == "camera":
@@ -387,22 +411,41 @@ def check_experimental_observations(proof: dict, *, platform: str, source: dict)
                 target.get("sshPort") == 2222 and type(target.get("sshPort")) is int,
                 f"lacks observed {label} CLI QR receiver metadata")
         command = fixture["command"]
-        require(isinstance(command, list) and len(command) == (28 if mode == "ssh" else 20) and
+        require(isinstance(command, list) and len(command) >= 4 and
                 all(isinstance(arg, str) and bool(arg) for arg in command) and
                 Path(command[0]).is_absolute() and
                 command[1:4] == ["-c", "from portmap.cli import main; raise SystemExit(main())", "connection-qr"],
                 f"lacks actual {label} connection-qr CLI invocation")
-        expected = [
-            "--name", "Owned QR " + label, "--domain", fixture["domain"], "--mode", mode,
-            "--host", target["host"], "--http-port", str(target["httpPort"]),
-            "--https-port", str(target["httpsPort"]), "--png", "/artifacts/qr/" + label + ".png",
-            "--wire", "--no-terminal",
-        ]
+        # Flag order is not CLI semantics. Reject unknown/duplicate flags and
+        # validate their public values rather than pinning an incidental order.
+        expected = {
+            "--name": "Owned QR " + label, "--domain": fixture["domain"], "--mode": mode,
+            "--host": target["host"], "--http-port": str(target["httpPort"]),
+            "--png": "/artifacts/qr/" + label + ".png", "--wire": True, "--no-terminal": True,
+        }
+        expected.update({"--no-https": True} if label == "http-only" else
+                        {"--https-port": str(target["httpsPort"])})
         if mode == "ssh":
-            require(digest(command[-1]), "has invalid public SSH QR host-key fingerprint")
-            expected += ["--ssh-port", str(target["sshPort"]), "--ssh-username", "probe",
-                         "--ssh-target-host", "127.0.0.1", "--ssh-host-key-sha256", command[-1]]
-        require(command[4:] == expected, f"has inconsistent or non-public {label} CLI QR arguments")
+            expected.update({"--ssh-port": str(target["sshPort"]), "--ssh-username": "probe",
+                             "--ssh-target-host": "127.0.0.1", "--ssh-host-key-sha256": None})
+        flags = {}
+        at = 4
+        while at < len(command):
+            flag = command[at]
+            require(flag in expected and flag not in flags,
+                    f"has inconsistent or non-public {label} CLI QR arguments")
+            if expected[flag] is True:
+                flags[flag] = True
+                at += 1
+            else:
+                require(at + 1 < len(command), f"has incomplete {label} CLI QR arguments")
+                flags[flag] = command[at + 1]
+                at += 2
+        if mode == "ssh":
+            pin = flags.get("--ssh-host-key-sha256")
+            require(digest(pin), "has invalid public SSH QR host-key fingerprint")
+            expected["--ssh-host-key-sha256"] = pin
+        require(flags == expected, f"has inconsistent or non-public {label} CLI QR arguments")
         if label == "camera":
             require(digest(fixture["synthetic_padded_scene_sha256"]) and
                     fixture["synthetic_padded_scene_sha256"] != fixture["png_sha256"],
@@ -454,6 +497,95 @@ def check_experimental_observations(proof: dict, *, platform: str, source: dict)
     else:
         require(camera.get("source") == "Firefox native fake source; no QR scene" and "route" not in camera,
                 "overclaims desktop fake-camera QR scene/route observations")
+    managed = proof.get("managed_ssh")
+    require(isinstance(managed, dict) and managed.get("real_server") is True and
+            managed.get("browser_webcrypto") is True and
+            managed.get("private_material_exported_to_proof") is False and
+            positive_integer(managed.get("disposable_accounts")),
+            "lacks real browser-managed SSH boundary")
+    for field in ("profile_key_fingerprint", "public_key_sha256"):
+        require(isinstance(managed.get(field), str) and
+                re.fullmatch(r"[0-9a-f]{64}", managed[field]) is not None,
+                "lacks managed SSH public identity digest")
+
+    def managed_case(suffix, true_fields=()):
+        name = "managed-" + suffix
+        value = observations.get(name)
+        require(isinstance(value, dict), f"lacks {name} observation")
+        require(all(value.get(field) is True for field in true_fields),
+                f"lacks required {name} security observations")
+        fixture = value.get("fixture")
+        if fixture is not None:
+            require(isinstance(fixture, dict), f"has invalid {name} fixture")
+            events = fixture.get("events")
+            require(isinstance(events, dict) and all(
+                type(events.get(field)) is int and events[field] >= 0
+                for field in ("passwordAccepted", "passwordFailed", "keyAccepted", "execStarted")),
+                f"lacks real {name} SSH server event counters")
+        return value
+
+    generated = managed_case("browser-key-generate-copy-manual-login", (
+        "fingerprint_confirmed", "inspection_no_auth", "endpoint_change_invalidates_confirmation",
+        "public_key_copied", "fresh_key_login", "route_loopback"))
+    require(isinstance(generated.get("identity_before"), dict) and
+            generated["identity_before"].get("present") is False,
+            "managed SSH identity was not generated in a fresh profile")
+    identity = generated.get("identity_after")
+    require(isinstance(identity, dict) and identity.get("present") is True and
+            type(identity.get("rsaBits")) is int and identity["rsaBits"] >= 3072 and
+            identity.get("privateFieldsPresent") is True and
+            identity.get("publicReferenceMatches") is True and identity.get("localPrivateCopy") is False and
+            identity.get("keyFingerprint") == managed["profile_key_fingerprint"],
+            "lacks persisted isolated RSA managed SSH identity")
+    saved = generated.get("saved")
+    require(isinstance(saved, dict) and saved.get("authType") == "managed" and
+            saved.get("credentialFree") is True, "managed SSH connection contains credential material")
+    installed = managed_case("password-bootstrap-fresh-key-login", (
+        "fresh_key_login", "route_loopback", "https_route_loopback",
+        "password_cleared", "existing_bytes_preserved"))
+    fixture = installed.get("fixture")
+    require(isinstance(fixture, dict), "lacks SSH bootstrap server observations")
+    events, keys = fixture.get("events", {}), fixture.get("authorizedKeys", {})
+    require(events.get("passwordAccepted") == 1 and events.get("keyAccepted", 0) >= 1 and
+            events.get("execStarted", 0) >= 1 and isinstance(keys, dict) and
+            keys.get("managedOccurrences") == 1 and keys.get("baselinePreserved") is True and
+            keys.get("fileMode") == "0o600" and keys.get("directoryMode") == "0o700",
+            "lacks real append/fresh-key-login/bootstrap permissions evidence")
+    managed_case("duplicate-preserves-bytes-and-restricted-options", (
+        "bytes_unchanged", "restricted_options_preserved", "arbitrary_quoted_comment_preserved",
+        "fresh_key_login"))
+    wrong_pin = managed_case("wrong-pin-rejected-before-authentication", (
+        "inspection_no_auth", "wrong_pin_before_auth", "bytes_unchanged"))
+    require(wrong_pin.get("saved") is None and isinstance(wrong_pin.get("fixture"), dict) and
+            all(wrong_pin["fixture"]["events"].get(field) == 0 for field in (
+                "passwordAccepted", "passwordFailed", "keyAccepted", "execStarted")),
+            "managed SSH wrong pin permitted authentication or saving")
+    for suffix in ("wrong-password-no-save", "password-disabled-no-save", "restricted-exec-no-save",
+                   "reject-authorized-keys-symlink", "reject-ssh-directory-symlink",
+                   "reject-world-writable-authorized-keys", "reject-world-writable-ssh-directory",
+                   "reject-foreign-owned-authorized-keys"):
+        rejected = managed_case(suffix, ("bytes_unchanged", "password_cleared"))
+        require(rejected.get("saved") is None and isinstance(rejected.get("ui_error"), str) and
+                bool(rejected["ui_error"]), f"managed SSH {suffix} lacks honest rejection")
+    managed_case("password-disabled-manual-key-login", ("fresh_key_login", "route_loopback"))
+    partial = managed_case("partial-install-fresh-key-failure-no-save", (
+        "remote_key_installed", "partial_change_disclosed", "password_cleared"))
+    require(partial.get("saved") is None and partial.get("fresh_key_login") is False,
+            "managed SSH partial installation was incorrectly saved")
+    for suffix, closed in (("cancel-inflight-no-stale-save", False), ("closed-options-no-stale-save", True)):
+        cancelled = managed_case(suffix, ("no_stale_save", "password_cleared"))
+        require(cancelled.get("saved") is None and cancelled.get("options_closed") is closed and
+                type(cancelled.get("remote_key_present")) is bool,
+                "managed SSH cancellation conceals partial remote state or saved a stale node")
+    managed_case("password-not-persisted", (
+        "password_absent", "managed_auth_credential_free", "snapshot_has_no_private_material",
+        "private_key_not_in_storage_local", "password_input_empty"))
+    restarted = managed_case("browser-restart-key-route", (
+        "same_profile_key", "native_process_changed", "first_route_loopback", "route_loopback"))
+    require(restarted.get("reinstalled") is False, "managed SSH restart reinstalled the extension")
+    managed_case("reset-destroys-profile-key", (
+        "identity_removed", "reference_removed", "connections_removed", "new_key_differs",
+        "old_route_blocked", "remote_key_retained"))
 
 
 def check_evidence(path: Path, *, platform: str, digest: str, version: str, commit: str,

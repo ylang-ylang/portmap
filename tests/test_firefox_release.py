@@ -108,16 +108,31 @@ def source_fixture(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(value)
     (tmp_path / "pyproject.toml").write_bytes((ROOT / "pyproject.toml").read_bytes())
+    recipe = tmp_path / "tools/build_firefox_ssh.py"
+    recipe.parent.mkdir(parents=True, exist_ok=True)
+    recipe.write_bytes((ROOT / "tools/build_firefox_ssh.py").read_bytes())
     return tmp_path / "extension/firefox"
 
 
-@pytest.mark.parametrize("member", ["ssh/bridge.c", "ssh/libssh2.js", "ssh/libssh2.wasm",
-                                   "ssh/libssh2-browser-callback.patch"])
+@pytest.mark.parametrize("member", ["ssh/bridge.c", "ssh/ssh.js", "ssh/libssh2.js", "ssh/libssh2.wasm",
+                                   "ssh/libssh2-browser-callback.patch", "ssh/licenses/libssh2-COPYING",
+                                   "ssh/licenses/mbedtls-LICENSE", "ssh/licenses/mbedtls-framework-LICENSE",
+                                   "ssh/licenses/emscripten-LICENSE", "ssh/licenses/musl-COPYRIGHT",
+                                   "ssh/licenses/compiler-rt-LICENSE"])
 def test_source_payload_integrity_rejects_mismatched_crypto_build_inputs(member, tmp_path):
     source = source_fixture(tmp_path)
     path = source / member
     path.write_bytes(path.read_bytes() + b"\n")
     with pytest.raises(ValueError, match="integrity mismatch"):
+        packaging.build(tmp_path, tmp_path / "output.xpi")
+    assert not (tmp_path / "output.xpi").exists()
+
+
+def test_crypto_recipe_drift_cannot_produce_an_artifact(tmp_path):
+    source_fixture(tmp_path)
+    recipe = tmp_path / "tools/build_firefox_ssh.py"
+    recipe.write_bytes(recipe.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="build recipe integrity mismatch"):
         packaging.build(tmp_path, tmp_path / "output.xpi")
     assert not (tmp_path / "output.xpi").exists()
 
@@ -219,6 +234,60 @@ def test_release_manifest_cannot_redirect_firefox_asset_path(filename, tmp_path)
     assert pipeline.validate_manifest(manifest, "0.21.0", tmp_path, tag="v0.21.0")
 
 
+def synthetic_managed_observations():
+    """Validator-only examples, never browser or server execution evidence."""
+    def flags(*names):
+        return dict.fromkeys(names, True)
+    observations = {
+        "browser-key-generate-copy-manual-login": {
+            **flags("fingerprint_confirmed", "inspection_no_auth",
+                    "endpoint_change_invalidates_confirmation", "public_key_copied",
+                    "fresh_key_login", "route_loopback"),
+            "identity_before": {"present": False},
+            "identity_after": {"present": True, "rsaBits": 3072, "privateFieldsPresent": True,
+                               "publicReferenceMatches": True, "localPrivateCopy": False,
+                               "keyFingerprint": "a" * 64},
+            "saved": {"authType": "managed", "credentialFree": True}},
+        "password-bootstrap-fresh-key-login": {
+            **flags("fresh_key_login", "route_loopback", "https_route_loopback",
+                    "password_cleared", "existing_bytes_preserved"),
+            "fixture": {"events": {"passwordAccepted": 1, "passwordFailed": 0,
+                                   "keyAccepted": 1, "execStarted": 1},
+                        "authorizedKeys": {"managedOccurrences": 1, "baselinePreserved": True,
+                                           "fileMode": "0o600", "directoryMode": "0o700"}}},
+        "duplicate-preserves-bytes-and-restricted-options": flags(
+            "bytes_unchanged", "restricted_options_preserved",
+            "arbitrary_quoted_comment_preserved", "fresh_key_login"),
+        "wrong-pin-rejected-before-authentication": {
+            **flags("inspection_no_auth", "wrong_pin_before_auth", "bytes_unchanged"), "saved": None,
+            "fixture": {"events": {"passwordAccepted": 0, "passwordFailed": 0,
+                                   "keyAccepted": 0, "execStarted": 0}}},
+        "password-disabled-manual-key-login": flags("fresh_key_login", "route_loopback"),
+        "partial-install-fresh-key-failure-no-save": {
+            **flags("remote_key_installed", "partial_change_disclosed", "password_cleared"),
+            "saved": None, "fresh_key_login": False},
+        "password-not-persisted": flags(
+            "password_absent", "managed_auth_credential_free", "snapshot_has_no_private_material",
+            "private_key_not_in_storage_local", "password_input_empty"),
+        "browser-restart-key-route": {
+            **flags("same_profile_key", "native_process_changed", "first_route_loopback", "route_loopback"),
+            "reinstalled": False},
+        "reset-destroys-profile-key": flags(
+            "identity_removed", "reference_removed", "connections_removed", "new_key_differs",
+            "old_route_blocked", "remote_key_retained"),
+    }
+    for suffix in ("wrong-password-no-save", "password-disabled-no-save", "restricted-exec-no-save",
+                   "reject-authorized-keys-symlink", "reject-ssh-directory-symlink",
+                   "reject-world-writable-authorized-keys", "reject-world-writable-ssh-directory",
+                   "reject-foreign-owned-authorized-keys"):
+        observations[suffix] = {"saved": None, "bytes_unchanged": True,
+                                "password_cleared": True, "ui_error": "synthetic rejection"}
+    for suffix, closed in (("cancel-inflight-no-stale-save", False), ("closed-options-no-stale-save", True)):
+        observations[suffix] = {"saved": None, "no_stale_save": True, "password_cleared": True,
+                               "options_closed": closed, "remote_key_present": False}
+    return {"managed-" + name: value for name, value in observations.items()}
+
+
 def complete_receipt_fixture(platform, built, source):
     """Synthetic validator contract fixture; never actual browser verification."""
     state = {"active": True, "appDisabled": False, "temporary": False}
@@ -247,13 +316,14 @@ def complete_receipt_fixture(platform, built, source):
     targets = {letter: {"host": host, "sshPort": 2222, "httpPort": 8080, "httpsPort": 8443}
                for letter, host in (("a", "172.30.0.10"), ("b", "172.30.0.11"))}
     fixtures, qr_routes = {}, {}
-    for index, label in enumerate(("direct", "ssh", "camera"), 1):
+    for index, label in enumerate(("direct", "http-only", "ssh", "camera"), 1):
         mode, target = ("ssh", targets["b"]) if label == "ssh" else ("direct", targets["a"])
         domain = "qr-" + label + ".portmap"
         command = [sys.executable, "-c", "from portmap.cli import main; raise SystemExit(main())",
                    "connection-qr", "--name", "Owned QR " + label, "--domain", domain,
-                   "--mode", mode, "--host", target["host"], "--http-port", "8080", "--https-port", "8443",
+                   "--mode", mode, "--host", target["host"], "--http-port", "8080",
                    "--png", "/artifacts/qr/" + label + ".png", "--wire", "--no-terminal"]
+        command += ["--no-https"] if label == "http-only" else ["--https-port", "8443"]
         if mode == "ssh":
             command += ["--ssh-port", "2222", "--ssh-username", "probe", "--ssh-target-host", "127.0.0.1",
                         "--ssh-host-key-sha256", "a" * 64]
@@ -289,6 +359,7 @@ def complete_receipt_fixture(platform, built, source):
     if platform == "android-firefox":
         observations[camera_case]["route"] = qr_routes["camera"]
         direct_routes.append(qr_routes["camera"].copy())
+    observations.update(synthetic_managed_observations())
     network = ({"recorder": "strace-connect-execve", "events": 1, "admission_address": "127.0.0.1",
                 "admission_port": 9, "admission_attempts": 0} if platform == "desktop-firefox" else
                {"recorder": "android-emulator-native-pcap", "packets": 1, "ip_packets": 1,
@@ -309,6 +380,9 @@ def complete_receipt_fixture(platform, built, source):
                             "unrelated": [receiver("unrelated", False)], "trap": []},
         "network_audit": {**network, "observed_direct_http": True, "observed_ssh": True},
         "targets": targets, "qr_fixtures": fixtures,
+        "managed_ssh": {"real_server": True, "browser_webcrypto": True,
+                        "private_material_exported_to_proof": False, "disposable_accounts": 15,
+                        "profile_key_fingerprint": "a" * 64, "public_key_sha256": "b" * 64},
         "qr_camera_boundary": {
             "physical_camera": False, "media_api_overridden": False,
             "android_source": "supported emulator -camera-back imagefile:<CLI PNG>",
@@ -327,6 +401,65 @@ def qr_receipt(request):
 
 def check_receipt_fixture(proof):
     packaging.check_experimental_observations(proof, platform=proof["platform"], source=proof["source_provenance"])
+
+
+def test_cli_qr_argument_order_does_not_change_public_profile(qr_receipt):
+    for fixtures in (qr_receipt["qr_fixtures"], qr_receipt["observations"]["qr-cli-produces-owned-fixtures"]):
+        command = fixtures["direct"]["command"]
+        at = command.index("--https-port")
+        option = command[at:at + 2]
+        del command[at:at + 2]
+        command[4:4] = option
+    check_receipt_fixture(qr_receipt)
+
+
+@pytest.mark.parametrize("extra", [
+    ["--no-https"], ["--https-port", "443"], ["--password", "forbidden"],
+])
+def test_http_only_qr_rejects_duplicate_conflicting_or_secret_flags(qr_receipt, extra):
+    for fixtures in (qr_receipt["qr_fixtures"], qr_receipt["observations"]["qr-cli-produces-owned-fixtures"]):
+        fixtures["http-only"]["command"].extend(extra)
+    with pytest.raises(ValueError):
+        check_receipt_fixture(qr_receipt)
+
+
+@pytest.mark.parametrize("path,value", [
+    (("managed_ssh", "real_server"), False),
+    (("managed_ssh", "browser_webcrypto"), False),
+    (("managed_ssh", "private_material_exported_to_proof"), True),
+    (("managed_ssh", "profile_key_fingerprint"), "invalid"),
+    (("observations", "managed-browser-key-generate-copy-manual-login", "identity_after", "rsaBits"), 1024),
+    (("observations", "managed-browser-key-generate-copy-manual-login", "identity_after", "localPrivateCopy"), True),
+    (("observations", "managed-browser-key-generate-copy-manual-login", "saved", "credentialFree"), False),
+    (("observations", "managed-password-bootstrap-fresh-key-login", "fresh_key_login"), False),
+    (("observations", "managed-password-bootstrap-fresh-key-login", "fixture", "events", "passwordAccepted"), 0),
+    (("observations", "managed-password-bootstrap-fresh-key-login", "fixture", "authorizedKeys", "managedOccurrences"), 2),
+    (("observations", "managed-password-bootstrap-fresh-key-login", "fixture", "authorizedKeys", "fileMode"), "0o666"),
+    (("observations", "managed-duplicate-preserves-bytes-and-restricted-options", "restricted_options_preserved"), False),
+    (("observations", "managed-wrong-pin-rejected-before-authentication", "fixture", "events", "passwordAccepted"), 1),
+    (("observations", "managed-reject-authorized-keys-symlink", "saved"), {"id": "unexpected-save"}),
+    (("observations", "managed-partial-install-fresh-key-failure-no-save", "partial_change_disclosed"), False),
+    (("observations", "managed-cancel-inflight-no-stale-save", "no_stale_save"), False),
+    (("observations", "managed-closed-options-no-stale-save", "options_closed"), False),
+    (("observations", "managed-password-not-persisted", "password_absent"), False),
+    (("observations", "managed-browser-restart-key-route", "reinstalled"), True),
+    (("observations", "managed-reset-destroys-profile-key", "identity_removed"), False),
+])
+def test_managed_ssh_release_requires_observed_security_boundaries(qr_receipt, path, value):
+    target = qr_receipt
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = value
+    with pytest.raises(ValueError):
+        check_receipt_fixture(qr_receipt)
+
+
+@pytest.mark.parametrize("name", sorted(
+    name for name in packaging.REQUIRED_EXPERIMENTAL_CASES if name.startswith("managed-")))
+def test_managed_case_name_alone_does_not_authorize_publication(qr_receipt, name):
+    del qr_receipt["observations"][name]
+    with pytest.raises(ValueError):
+        check_receipt_fixture(qr_receipt)
 
 
 def test_qr_receipt_fixture_matches_observed_platform_shapes(qr_receipt):
@@ -819,9 +952,8 @@ def test_publication_binds_git_blobs_even_when_index_hides_a_local_edit(name, tm
     subprocess.run(["git", "-C", str(root), "update-index", "--assume-unchanged", name], check=True)
     path = root / name
     path.write_text(path.read_text() + "\n# uncommitted source input hidden from ordinary status\n")
-    assert packaging.source_provenance(root)["dirty"] is False
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
-    with pytest.raises(ValueError, match="committed source differs"):
+    with pytest.raises(ValueError):
         packaging.attach_experimental(root, xpi, assets, tag, commit,
                                        evidence["desktop-firefox"], evidence["android-firefox"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before

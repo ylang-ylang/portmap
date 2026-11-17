@@ -71,6 +71,23 @@ EMSCRIPTEN_KEEPALIVE int probe_key(LIBSSH2_SESSION *s, const char *user, const c
 EMSCRIPTEN_KEEPALIVE LIBSSH2_CHANNEL *probe_open(LIBSSH2_SESSION *s, const char *host, int port) {
   return libssh2_channel_direct_tcpip_ex(s, host, port, "127.0.0.1", 0);
 }
+EMSCRIPTEN_KEEPALIVE LIBSSH2_CHANNEL *probe_open_session(LIBSSH2_SESSION *s) {
+  return libssh2_channel_open_session(s);
+}
+/* This ABI is private to ssh.js; only its fixed authorized_keys installer uses exec. */
+EMSCRIPTEN_KEEPALIVE int probe_exec(LIBSSH2_CHANNEL *c, const char *command) {
+  return libssh2_channel_exec(c, command);
+}
+EMSCRIPTEN_KEEPALIVE int probe_read_stderr(LIBSSH2_CHANNEL *c, char *buf, int len) {
+  return (int)libssh2_channel_read_stderr(c, buf, len);
+}
+EMSCRIPTEN_KEEPALIVE int probe_send_eof(LIBSSH2_CHANNEL *c) { return libssh2_channel_send_eof(c); }
+EMSCRIPTEN_KEEPALIVE int probe_exit_status(LIBSSH2_CHANNEL *c) { return libssh2_channel_get_exit_status(c); }
+EMSCRIPTEN_KEEPALIVE int probe_exit_signal(LIBSSH2_CHANNEL *c) {
+  size_t length = 0;
+  int result = libssh2_channel_get_exit_signal(c, NULL, &length, NULL, NULL, NULL, NULL);
+  return result ? result : length != 0;
+}
 EMSCRIPTEN_KEEPALIVE int probe_errno(LIBSSH2_SESSION *s) { return libssh2_session_last_errno(s); }
 EMSCRIPTEN_KEEPALIVE int probe_read(LIBSSH2_CHANNEL *c, char *buf, int len) { return (int)libssh2_channel_read(c, buf, len); }
 EMSCRIPTEN_KEEPALIVE int probe_write(LIBSSH2_CHANNEL *c, const char *buf, int len) { return (int)libssh2_channel_write(c, buf, len); }
