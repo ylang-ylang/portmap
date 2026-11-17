@@ -1,22 +1,31 @@
 {
   "manifest_version": 2,
   "name": "Portmap Connections",
-  "version": "0.23.0",
-  "description": "Keep independent local node connections and route original .portmap URLs through authenticated SOCKS5 with remote DNS.",
+  "version": "0.26.0",
+  "description": "Route independent .portmap connections through direct TCP or pinned browser-side SSH using experimental networking capabilities.",
   "browser_specific_settings": {
     "gecko": {
       "id": "firefox@portmap.ylang-ylang.github.io",
-      "strict_min_version": "140.0",
-      "update_url": "https://github.com/ylang-ylang/portmap/releases/latest/download/firefox-updates.json",
+      "update_url": "https://github.com/ylang-ylang/portmap/releases/latest/download/firefox-experimental-updates.json",
       "data_collection_permissions": {
         "required": ["authenticationInfo", "browsingActivity", "websiteContent"]
       }
     },
-    "gecko_android": { "strict_min_version": "142.0" }
+    "gecko_android": {}
   },
-  "permissions": ["storage", "proxy", "webRequest", "webRequestBlocking", "<all_urls>"],
+  "permissions": ["storage", "clipboardWrite", "proxy", "webRequest", "webRequestBlocking", "<all_urls>"],
+  "experiment_apis": {
+    "portmapTransport": {
+      "schema": "transport/schema.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "script": "transport/api.js",
+        "paths": [["portmapTransport"]]
+      }
+    }
+  },
   "background": {
-    "scripts": ["core.js", "controller.js", "background.js"],
+    "scripts": ["core.js", "managed-identity.js", "ssh/libssh2.js", "ssh/ssh.js", "proxy.js", "transports.js", "controller.js", "background.js"],
     "persistent": true
   },
   "browser_action": {
@@ -25,5 +34,5 @@
   },
   "icons": { "48": "icon.svg", "96": "icon.svg" },
   "options_ui": { "page": "options.html", "open_in_tab": true },
-  "content_security_policy": "script-src 'self'; object-src 'none'; base-uri 'none'"
+  "content_security_policy": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'"
 }

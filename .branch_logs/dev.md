@@ -339,3 +339,18 @@
   browser suites30 passed; final30s runtime also passed real public current/
   available/download checks on desktop and native Android. Normal TLS and the
   existing automatic updater remain unchanged; no node/VPN/workspace changes.
+- Integrate release/v0.23.0 before main: synchronized four version declarations;
+  independent CLI/package identity and pinned self-hosted lint preflight passed.
+  Ship name-based form completion, remove unwanted pairing and expose explicit
+  manual check/download without claiming installation. Exact-tag signed stable
+  platform gates and checked Brew distribution remain mandatory before delivery.
+- Merge feat/firefox-capability-transports for 0.26.0: browser-local direct TCP
+  and pinned SSH, managed browser identity with explicit one-time-password
+  public-key installation and fresh key-auth verification, safe QR onboarding,
+  and default-closed Advanced HTTP/HTTPS ports. Preserve isolation, fail-closed
+  routing, unchanged signed-channel feed bytes and explicit experimental labels.
+  The integration owner's final 682 Python/56 JS/3 actual sshd checks and both
+  72-case development browser runs passed; final exact-main/tag clean CI proofs,
+  immutable assets and checked Brew distribution remain required. The user
+  reviewed final settings screenshots and cleared publication of v0.26.0 only;
+  no v0.25.0 tag is authorized.

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Run only after the integration owner freezes implementation.
 set -eu
+umask 077
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 project="portmap-browser-$(date +%s)-$$"
 artifacts=
@@ -8,9 +9,11 @@ xpi=
 mode=
 android=0
 cleanup_only=0
+android_prebuilt=${BROWSER_ANDROID_IMAGE:-}
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --development|--require-signed) [ -z "$mode" ] || { echo 'Choose one explicit install mode' >&2; exit 2; }; mode=$1; shift ;;
+    --development) [ -z "$mode" ] || { echo 'Choose one explicit install mode' >&2; exit 2; }; mode=$1; shift ;;
+    --require-signed) echo 'This is an experimental capability-only addon, not an ordinary AMO-signed build' >&2; exit 2 ;;
     --xpi) xpi=$2; shift 2 ;;
     --project) project=$2; shift 2 ;;
     --artifacts) artifacts=$2; shift 2 ;;
@@ -26,7 +29,7 @@ mkdir -p "$artifacts"
 artifacts=$(CDPATH= cd -- "$artifacts" && pwd)
 export BROWSER_ARTIFACTS="$artifacts"
 export BROWSER_IMAGE="$project-browser:fixture"
-export BROWSER_ANDROID_IMAGE="$project-android:fixture"
+export BROWSER_ANDROID_IMAGE="${android_prebuilt:-$project-android:fixture}"
 export BROWSER_UID="$(id -u)" BROWSER_GID="$(id -g)"
 export BROWSER_KVM_GID=0
 export BROWSER_SOURCE_COMMIT="${BROWSER_SOURCE_COMMIT:-$(git -C "$root" rev-parse HEAD)}"
@@ -42,8 +45,7 @@ if [ "$android" = 1 ]; then platform=android-firefox; fi
 # Invalidate any earlier passing envelope before setup or prerequisite checks.
 # No unexercised cases are invented; the Python runner replaces this on entry.
 printf '{"status":"failed","platform":"%s","extension_sha256":null,"extension_version":null,"browser_version":null,"source_commit":null,"signature_required":false,"cases":[],"error":"Fixture prerequisites or setup did not complete; inspect command output and compose.log"}\n' "$platform" > "$artifacts/result.json"
-[ -n "$mode" ] || { echo 'Use explicit --development or --require-signed' >&2; exit 2; }
-if [ "$mode" = --require-signed ] && [ -z "$xpi" ]; then echo '--require-signed requires --xpi FILE' >&2; exit 2; fi
+[ "$mode" = --development ] || { echo 'Use explicit --development for this experimental addon' >&2; exit 2; }
 if [ "$android" = 1 ]; then
   [ "${ACCEPT_ANDROID_SDK_LICENSE:-0}" = 1 ] || { echo 'Read https://developer.android.com/studio/terms then explicitly set ACCEPT_ANDROID_SDK_LICENSE=1' >&2; exit 2; }
   BROWSER_KVM_GID=$(stat -c %g /dev/kvm)
@@ -71,16 +73,16 @@ fi
 compose build browser node-a node-b unrelated trap dns
 docker image inspect --format '{{.Id}}' "$BROWSER_IMAGE" > "$artifacts/browser-image-id.txt"
 if [ "$android" = 1 ]; then
-  channel=release
-  if [ "$mode" = --development ]; then channel=nightly; fi
-  docker build --file "$root/tests/browser/Android.Dockerfile" --build-arg "BROWSER_BASE=$BROWSER_IMAGE" --build-arg ACCEPT_ANDROID_SDK_LICENSE=1 --build-arg "FIREFOX_ANDROID_CHANNEL=$channel" --tag "$BROWSER_ANDROID_IMAGE" "$root"
+  if [ -z "$android_prebuilt" ]; then
+    docker build --file "$root/tests/browser/Android.Dockerfile" --build-arg "BROWSER_BASE=$BROWSER_IMAGE" --build-arg ACCEPT_ANDROID_SDK_LICENSE=1 --build-arg FIREFOX_ANDROID_CHANNEL=nightly --tag "$BROWSER_ANDROID_IMAGE" "$root"
+  fi
   docker image inspect --format '{{.Id}}' "$BROWSER_ANDROID_IMAGE" > "$artifacts/android-image-id.txt"
 fi
 compose up --detach --wait --wait-timeout 90 node-a node-b unrelated trap dns
 export BROWSER_DNS_IP="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(compose ps --quiet dns)")"
 compose images --format json > "$artifacts/images.json"
 if [ "$android" = 1 ]; then
-  compose --profile android run --rm --no-deps android python /app/tests/browser/android.py "$@"
+  python3 "$root/tests/browser/control.py" "$artifacts" "$project" "$root" android "$@"
 else
-  compose run --rm --no-deps browser python /app/tests/browser/runner.py "$@"
+  python3 "$root/tests/browser/control.py" "$artifacts" "$project" "$root" browser "$@"
 fi

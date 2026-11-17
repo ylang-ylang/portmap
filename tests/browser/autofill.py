@@ -9,8 +9,8 @@ from runner import ARTIFACTS, require
 def exercise(browser, case):
     def fresh_form():
         browser.options()
-        # Android focuses an existing options tab; each independent scenario
-        # needs an actual reload, not an assumption that opening clears edits.
+        # Each scenario starts with an actual reload, not an assumption that
+        # opening the native menu clears the current editor.
         browser.driver.refresh()
         WebDriverWait(browser.driver, 10).until(lambda driver:
             driver.find_element(By.ID, "status").get_attribute("data-state") == "ready")
@@ -19,12 +19,10 @@ def exercise(browser, case):
         return browser.driver.find_element(By.ID, field).get_attribute("value")
 
     def enter(field, text):
-        element = browser.driver.find_element(By.ID, field)
-        element.clear()
-        element.send_keys(text)
+        browser.enter(field, text)
 
     def addresses(domain, host):
-        require(value("domain") == domain and value("proxy-host") == host,
+        require(value("domain") == domain and value("host") == host,
                 "Name-derived addresses did not match expected endpoints")
 
     def defaults():
@@ -34,8 +32,6 @@ def exercise(browser, case):
         addresses("voxmani.portmap", "voxmani")
         enter("name", "OTHER.portmap")
         addresses("other.portmap", "other")
-        for field in ("proxy-port", "username", "password"):
-            require(value(field) == "", "Name invented an actual endpoint setting")
         browser.driver.find_element(By.ID, "connection-form").screenshot(str(ARTIFACTS / "name-autofill-form.png"))
         for label in ("Display only", "portmap", "节点"):
             enter("name", label)
@@ -51,19 +47,19 @@ def exercise(browser, case):
         enter("domain", "custom.portmap")
         enter("name", "second")
         addresses("custom.portmap", "second")
-        enter("proxy-host", "100.64.0.10")
-        for field, text in (("proxy-port", "18080"), ("username", "fixture-user"), ("password", "fixture-secret")):
-            enter(field, text)
+        enter("host", "100.64.0.10")
+        enter("http-port", "8123")
+        enter("https-port", "8443")
         enter("name", "third")
         addresses("custom.portmap", "100.64.0.10")
-        require(value("proxy-port") == "18080" and value("username") == "fixture-user" and value("password") == "fixture-secret", "Name changed explicit port/credentials")
+        require(value("http-port") == "8123" and value("https-port") == "8443", "Name changed explicit ingress ports")
     case("name-autofill-preserves-independent-manual-overrides", overrides, fatal=True)
 
     def save_from_name():
         fresh_form()
         enter("name", "a")
         addresses("a.portmap", "a")
-        for field, text in (("proxy-port", "18080"), ("username", "user-a"), ("password", "pass-a")):
+        for field, text in (("http-port", "8080"), ("https-port", "8443")):
             enter(field, text)
         browser.driver.find_element(By.ID, "save").click()
         WebDriverWait(browser.driver, 10).until(lambda _driver: value("name") == "" and len(browser.cards("a.portmap")) == 1)

@@ -196,3 +196,15 @@
   release-version/lint preflight passed. Exact-tag CI signs, verifies stable
   desktop/Android, publishes source-bound assets and completes checked Brew
   distribution; no installed node, workspace, VPN or host DNS change occurs.
+- Release v0.26.0: explicitly experimental browser-local direct TCP and pinned
+  SSH, managed browser key identity with user-requested one-time-password key
+  installation and fresh key-auth verification, QR onboarding and collapsed
+  Advanced HTTP/HTTPS controls defaulting to 80/443. Source/extension versions
+  match; v0.25.0 remains an unpublished preview, not a release tag.
+  Final integrated pretag Python gate passed 2135 tests (4 integration cases
+  deselected); hosted feature CI passed offline exact SSH reproduction,
+  JavaScript/packaging checks and actual desktop browser verification. Tag CI
+  must regenerate clean exact-main dual-platform 72-case receipts and matching
+  raw network evidence before publishing immutable experimental assets plus
+  byte-exact signed v0.23.0 feed compatibility metadata and completing checked
+  Brew distribution. Publication never upgrades machines or restarts workloads.
