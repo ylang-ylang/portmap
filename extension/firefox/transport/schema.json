@@ -1,0 +1,134 @@
+[
+  {
+    "namespace": "portmapTransport",
+    "description": "Addon-private raw byte-string networking; strings contain bytes 0..255, never UTF8.",
+    "functions": [
+      {
+        "name": "connect",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "host",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          },
+          {
+            "name": "port",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        ]
+      },
+      {
+        "name": "read",
+        "type": "function",
+        "async": true,
+        "description": "One pending read, at most 65536 bytes; empty string is EOF. 120-second timeout closes socket.",
+        "parameters": [
+          {
+            "name": "id",
+            "type": "integer",
+            "minimum": 1
+          }
+        ]
+      },
+      {
+        "name": "write",
+        "type": "function",
+        "async": true,
+        "description": "Serialized complete nonblocking writes; at most 65536 bytes per call, 1 MiB queued. 30-second deadline.",
+        "parameters": [
+          {
+            "name": "id",
+            "type": "integer",
+            "minimum": 1
+          },
+          {
+            "name": "data",
+            "type": "string",
+            "maxLength": 65536
+          }
+        ]
+      },
+      {
+        "name": "close",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "id",
+            "type": "integer",
+            "minimum": 1
+          }
+        ]
+      },
+      {
+        "name": "listen",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "accept",
+        "type": "function",
+        "async": true,
+        "description": "One pending accept, queue limit 16; rejects after 60 idle seconds without closing listener.",
+        "parameters": [
+          {
+            "name": "listenerId",
+            "type": "integer",
+            "minimum": 1
+          }
+        ]
+      },
+      {
+        "name": "closeListener",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "listenerId",
+            "type": "integer",
+            "minimum": 1
+          }
+        ]
+      },
+      {
+        "name": "configure",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "endpoints",
+            "type": "array",
+            "maxItems": 512,
+            "items": {
+              "type": "object",
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "selfCheck",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      }
+    ]
+  }
+]

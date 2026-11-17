@@ -1,0 +1,75 @@
+{
+  "format": 1,
+  "purpose": "Packaged browser-side SSH implementation; experimental developer distribution only.",
+  "runtimeSources": [
+    {
+      "url": "https://github.com/libssh2/libssh2.git",
+      "tag": "libssh2-1.11.1",
+      "commit": "a312b43325e3383c865a87bb1d26cb52e3292641",
+      "license": "BSD-3-Clause",
+      "licenseFile": "ssh/licenses/libssh2-COPYING",
+      "sourceModifications": "src/session.c opt-in LIBSSH2_BROWSER_CALLBACK_IO excludes POSIX descriptor inspection/mutation/restoration, rejects synchronous socket wait with BAD_USE, and adds private terminal abort/free plus read-cancellation safety helpers. Abort marks DISCONNECTED, clears only inline outgoing packet state, then invokes existing allocation-owning session_free. src/misc.c makes default POSIX SEND/RECV callbacks return hard -ENOTSUP without retaining send/recv or Emscripten FS/SOCKFS. Actual I/O requires bridge callbacks. No crypto/auth changes. ssh/bridge.c is the separate local ABI bridge."
+    },
+    {
+      "url": "https://github.com/Mbed-TLS/mbedtls.git",
+      "tag": "mbedtls-3.6.5",
+      "commit": "e185d7fd85499c8ce5ca2a54f5cf8fe7dbe3f8df",
+      "licenseChoice": "Apache-2.0",
+      "licenseFile": "ssh/licenses/mbedtls-LICENSE",
+      "sourceModifications": "None; build selects MBEDTLS_NO_PLATFORM_ENTROPY and MBEDTLS_ENTROPY_HARDWARE_ALT; bridge supplies WebCrypto entropy"
+    }
+  ],
+  "buildSources": [
+    {
+      "url": "https://github.com/Mbed-TLS/mbedtls-framework",
+      "commit": "457996474728cb8e968ed21953b72f74d2f536b2",
+      "licenseChoice": "Apache-2.0",
+      "licenseFile": "ssh/licenses/mbedtls-framework-LICENSE"
+    }
+  ],
+  "buildToolchain": {
+    "image": "emscripten/emsdk:3.1.74",
+    "compiler": "Emscripten 3.1.74",
+    "factory": "NightlySshWasm",
+    "filesystem": false,
+    "dynamicExecution": false,
+    "maximumMemoryBytes": 134217728,
+    "recipe": "tools/build_firefox_ssh.py",
+    "imageIdentity": "Record resolved image digest with independent build evidence; never infer a digest from the tag."
+  },
+  "reproduction": {
+    "fetch": "python3 tools/build_firefox_ssh.py fetch --work-dir /tmp/portmap-ssh-build",
+    "build": "python3 tools/build_firefox_ssh.py build --work-dir /tmp/portmap-ssh-build --check",
+    "outputs": [
+      "/tmp/portmap-ssh-build/generated/libssh2.js",
+      "/tmp/portmap-ssh-build/generated/libssh2.wasm"
+    ],
+    "network": "Only fetch requires network. Run compiler with network disabled. Generated runtime loads only packaged WASM."
+  },
+  "patchReview": [
+    "Only src/misc.c and src/session.c change under opt-in LIBSSH2_BROWSER_CALLBACK_IO.",
+    "Default POSIX send/recv hard fail ENOTSUP, descriptor startup/restoration are excluded, synchronous wait rejects BAD_USE; real I/O requires bridge callbacks.",
+    "Terminal abort requires closed native socket and quiesced JS operations, rejects remote listeners, marks disconnected and clears borrowed inline outgoing packet state only before existing allocation-owning session_free.",
+    "Read cancellation is safe only when channel read state is idle and no outgoing packet remains. No cryptographic/authentication algorithm edits."
+  ],
+  "patchedSources": {
+    "libssh2/src/misc.c": "d625d40375e4aae582c88079babd827a0db9390cfd936a441a0a2a66a7311276",
+    "libssh2/src/session.c": "16ab5ac87796001b031c6d79a99c13f9aca7114a9509cae07c248821a0018c3a"
+  },
+  "integrity": {
+    "ssh/bridge.c": "2d9b48907f75da9e1856a1e0cf870de35854e75f8dddb5fbf659a4f25a93b362",
+    "ssh/libssh2.js": "1f6179822bec010e1f9e6d40fd3c3fcc9379fcca0fca4d53fc7984548f65d4af",
+    "ssh/libssh2.wasm": "3943b5bb2a80c5ac8bb5944336396e36bd11e719ceb1b772d9c9187dfca3d719",
+    "ssh/libssh2-browser-callback.patch": "3d336ad2e994aac9c1910e62b2edfa1b13df5006ac873e4e1f5b91b0e7cca6dd"
+  },
+  "artifactOrigin": "Generated JS/WASM copied byte-for-byte from the corrected source-derived reference build; independent reproduction against this recipe is required after integration freeze. Reference fixture configuration, credentials, rejected sitepi wrapper, build products and vendor git trees are not included.",
+  "licenses": {
+    "libssh2": "ssh/licenses/libssh2-COPYING",
+    "mbedtls": "ssh/licenses/mbedtls-LICENSE (Apache-2.0 choice)",
+    "mbedtls-framework": "ssh/licenses/mbedtls-framework-LICENSE (build input only)",
+    "emscripten": "ssh/licenses/emscripten-LICENSE (MIT choice)",
+    "musl": "ssh/licenses/musl-COPYRIGHT",
+    "compiler-rt": "ssh/licenses/compiler-rt-LICENSE"
+  },
+  "installationAdmission": "No browser identity/version gate. Firefox must admit a custom Experiment before addon code or its UI can execute; unsigned packages can be rejected by mandatory signing policy. Runtime then requires actual local capability self-check success. The separate firefox-experimental-updates.json feed never offers ordinary signed payloads; publication requires exact source payload and actual desktop plus Android capability-enabled evidence."
+}

@@ -22,6 +22,6 @@ FROM ${BROWSER_BASE}
 ARG FIREFOX_ANDROID_CHANNEL=release
 ENV ANDROID_FIREFOX_CHANNEL=${FIREFOX_ANDROID_CHANNEL} ANDROID_HOME=/opt/android ANDROID_SDK_ROOT=/opt/android ANDROID_AVD_HOME=/tmp/android-avd
 ENV PATH=/opt/android/platform-tools:/opt/android/emulator:$PATH
-RUN apt-get update && apt-get install -y --no-install-recommends libpulse0 libvulkan1 libxkbcommon0 libxcb-cursor0 && rm -rf /var/lib/apt/lists/* && dpkg-query -W > /app/browser-system-packages.txt
+RUN apt-get update && apt-get install -y --no-install-recommends libpulse0 libvulkan1 libdrm2 libxkbcommon0 libxcb-cursor0 && rm -rf /var/lib/apt/lists/* && dpkg-query -W > /app/browser-system-packages.txt
 COPY --from=android-tools /opt/android /opt/android
 CMD ["python", "/app/tests/browser/android.py"]

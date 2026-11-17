@@ -53,6 +53,12 @@ def cmd_runtime_env(args: argparse.Namespace) -> int:
     return run_action(args.action)
 
 
+def cmd_connection_qr(args: argparse.Namespace) -> int:
+    from .connection_qr import run
+
+    return run(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="portmap")
     parser.add_argument("--version", action="version", version=f"portmap {__version__}")
@@ -74,11 +80,36 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_env.add_argument("action", choices=("activate", "verify-api"))
     runtime_env.set_defaults(func=cmd_runtime_env)
 
-    browser_proxy = subparsers.add_parser(
-        "browser-proxy", help="serve an explicitly configured authenticated SOCKS5 browser ingress in the foreground",
+    connection_qr = subparsers.add_parser(
+        "connection-qr",
+        help="export a public-only node QR without starting services or probing the network",
+        epilog=(
+            "Explicit --domain --host --http-port bypass settings discovery. Otherwise only saved "
+            "server-role namespace/LAN metadata is read. HTTPS defaults to absent; SSH username "
+            "defaults to empty and must be supplied in Firefox before saving. QR codes disclose "
+            "infrastructure metadata; verify the destination and SSH fingerprint on a trusted device."
+        ),
     )
-    browser_proxy.add_argument("--config", type=Path, required=True, help="private JSON file defining this node's domain, credentials and fixed ingress")
-    browser_proxy.set_defaults(func=cmd_browser_proxy)
+    connection_qr.add_argument("--name", help="display name; defaults to the normalized node domain")
+    connection_qr.add_argument("--domain", help="node namespace, such as node.portmap")
+    connection_qr.add_argument("--mode", choices=("direct", "ssh"), default="direct")
+    connection_qr.add_argument("--host", help="reachable physical node/SSH host; never inferred from wildcard or loopback")
+    connection_qr.add_argument("--http-port", type=int, help="actual HTTP listener port, not a proxy/backend guess")
+    https = connection_qr.add_mutually_exclusive_group()
+    https.add_argument("--https-port", type=int, help="explicit HTTPS listener port; absent by default")
+    https.add_argument("--no-https", dest="https_port", action="store_const", const=None)
+    connection_qr.add_argument("--state-dir", type=Path, help="read saved node role from this publishing state directory")
+    connection_qr.add_argument("--ssh-port", type=int, help="explicit SSH listener port")
+    connection_qr.add_argument("--ssh-username", help="public SSH username; defaults to empty, never root")
+    connection_qr.add_argument("--ssh-target-host", help="HTTP target reached from the SSH server")
+    pin = connection_qr.add_mutually_exclusive_group()
+    pin.add_argument("--ssh-host-key-sha256", help="verified 64-hex or OpenSSH SHA256 host-key fingerprint")
+    pin.add_argument("--ssh-host-key-file", type=Path, help="explicit OpenSSH PUBLIC .pub host-key file only")
+    connection_qr.add_argument("--png", type=Path, help="create a new PNG file exclusively (never overwrite)")
+    connection_qr.add_argument("--svg", type=Path, help="create a new SVG file exclusively (never overwrite)")
+    connection_qr.add_argument("--wire", action="store_true", help="also print the exact canonical wire text")
+    connection_qr.add_argument("--no-terminal", action="store_true", help="omit terminal QR; use with --wire/--png/--svg")
+    connection_qr.set_defaults(func=cmd_connection_qr)
 
     up = subparsers.add_parser("up", help="publish local projects through the shared HTTP gateway")
     up.add_argument("--no-sudo", action="store_true", help="do not invoke sudo for split DNS and HTTP ingress")
@@ -296,12 +327,6 @@ def build_parser() -> argparse.ArgumentParser:
         action for action in subparsers._choices_actions if not action.dest.startswith("_")
     ]
     return parser
-
-
-def cmd_browser_proxy(args: argparse.Namespace) -> int:
-    from .browser_proxy import run_browser_proxy
-
-    return run_browser_proxy(args.config)
 
 
 def cmd_init(args: argparse.Namespace) -> int:

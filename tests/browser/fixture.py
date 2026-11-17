@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import html
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -74,14 +75,29 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(self.connection, ssl.SSLSocket) and not in_domain(host.split(":")[0]):
             self.reply("{}", status=421)
             return
-        body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode()
-        evidence = {"node": NODE, "host": host, "path": self.path, "method": self.command, "body": body,
+        length = int(self.headers.get("Content-Length", "0"))
+        if not 0 <= length <= 262144 or self.headers.get("Transfer-Encoding"):
+            self.reply("{}", status=413)
+            self.close_connection = True
+            return
+        body = self.rfile.read(length)
+        peer = self.client_address[0]
+        evidence = {"node": NODE, "host": host, "path": self.path, "method": self.command,
+                    "body": None if path == "/binary-echo" else body.decode("utf-8", errors="replace"),
+                    "bodyLength": len(body), "bodySha256": hashlib.sha256(body).hexdigest(),
+                    "peer": peer, "peerLoopback": ipaddress.ip_address(peer).is_loopback,
                     "authorization": "Authorization" in self.headers,
                     "originAuthorizationCorrect": self.headers.get("Authorization") == "Bearer fixture-origin-token",
                     "proxyAuthorization": "Proxy-Authorization" in self.headers}
         with LOCK:
             REQUESTS.append(evidence)
-        if path == "/redirect":
+        if path.startswith("/ssh-only") and not evidence["peerLoopback"]:
+            self.reply(json.dumps(evidence), status=403)
+        elif path == "/binary":
+            self.reply(bytes(range(256)), "application/octet-stream")
+        elif path == "/binary-echo":
+            self.reply(body, "application/octet-stream")
+        elif path == "/redirect":
             self.reply("", status=302, extra={"Location": "/landing?via=redirect"})
         elif path == "/asset.js":
             self.reply("window.fixtureAsset=" + json.dumps(NODE) + ";", "application/javascript")
@@ -112,13 +128,20 @@ class Handler(BaseHTTPRequestHandler):
             size = struct.unpack("!H", self.rfile.read(2))[0]
         elif size == 127:
             size = struct.unpack("!Q", self.rfile.read(8))[0]
-        if not first[1] & 128 or size > 65536 or first[0] & 15 != 1:
+        opcode = first[0] & 15
+        if not first[1] & 128 or size > 65536 or opcode not in (1, 2):
             return
         mask = self.rfile.read(4)
         encoded = self.rfile.read(size)
-        evidence["message"] = bytes(value ^ mask[index % 4] for index, value in enumerate(encoded)).decode()
-        payload = json.dumps(evidence).encode()
-        frame = bytes([129, len(payload)]) if len(payload) < 126 else bytes([129, 126]) + struct.pack("!H", len(payload))
+        decoded = bytes(value ^ mask[index % 4] for index, value in enumerate(encoded))
+        evidence.update(websocket=True, opcode=opcode, payloadLength=len(decoded),
+                        payloadSha256=hashlib.sha256(decoded).hexdigest())
+        if opcode == 1:
+            evidence["message"] = decoded.decode()
+            payload = json.dumps(evidence).encode()
+        else:
+            payload = decoded
+        frame = bytes([128 | opcode, len(payload)]) if len(payload) < 126 else bytes([128 | opcode, 126]) + struct.pack("!H", len(payload))
         self.wfile.write(frame + payload)
         self.wfile.flush()
         self.close_connection = True

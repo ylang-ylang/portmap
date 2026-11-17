@@ -11,7 +11,7 @@ import time
 import xml.etree.ElementTree as ET
 
 from selenium import webdriver
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import NoAlertPresentException, WebDriverException
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -57,7 +57,7 @@ def prepare(args, proof):
     (avd / "config.ini").write_text("AvdId=portmap\navd.ini.encoding=UTF-8\nabi.type=x86_64\nhw.cpu.arch=x86_64\nhw.cpu.ncore=2\nhw.ramSize=2048\nhw.gpu.enabled=yes\nhw.gpu.mode=swiftshader_indirect\nhw.lcd.width=1080\nhw.lcd.height=1920\nhw.lcd.density=420\nimage.sysdir.1=system-images/android-30/default/x86_64/\ntag.id=default\ntag.display=Default\ndisk.dataPartition.size=3G\n")
     subprocess.run(["adb", "start-server"], check=True)
     log = (runner.ARTIFACTS / "android-emulator.log").open("w")
-    process = subprocess.Popen(["emulator", "-avd", "portmap", "-port", "5554", "-accel", "on", "-no-window", "-no-audio", "-no-snapshot", "-no-boot-anim", "-gpu", "swiftshader_indirect", "-dns-server", socket.gethostbyname("dns"), "-tcpdump", str(runner.ARTIFACTS / "android-network.pcap")], stdout=log, stderr=subprocess.STDOUT)
+    process = subprocess.Popen(["emulator", "-avd", "portmap", "-port", "5554", "-accel", "on", "-no-window", "-no-audio", "-no-snapshot", "-no-boot-anim", "-gpu", "swiftshader_indirect", "-camera-back", "imagefile:" + str(runner.ARTIFACTS / "qr/camera-scene.png"), "-camera-front", "none", "-dns-server", socket.gethostbyname("dns"), "-tcpdump", str(runner.ARTIFACTS / "android-network.pcap")], stdout=log, stderr=subprocess.STDOUT)
     PROCESSES.append(process)
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
@@ -85,9 +85,15 @@ def prepare(args, proof):
 
 
 class AndroidBrowser(runner.Browser):
+    def configuration(self):
+        options = super().configuration()
+        # Real Android capture pipeline reads only the owned synthetic imagefile.
+        options.set_preference("media.navigator.streams.fake", False)
+        return options
+
     def start(self, native_url=None):
         options = self.configuration()
-        arguments = ["--allow-system-access", "--log", "debug"]
+        arguments = ["--allow-system-access", "--log", "info"]
         if getattr(self, "native_profile", None):
             # Reattach to the SAME native profile and app data. Another Android
             # NewSession would run geckodriver's unconditional pm clear, which
@@ -113,8 +119,9 @@ class AndroidBrowser(runner.Browser):
             options.mobile_options["env"] = {"MOZ_REMOTE_ALLOW_SYSTEM_ACCESS": "1"}
         self.driver = webdriver.Firefox(options=options, service=Service("/usr/local/bin/geckodriver", service_args=arguments, log_output=str(runner.ARTIFACTS / "geckodriver.log")))
         self.driver.set_page_load_timeout(20)
-        self.driver.set_script_timeout(15)
+        self.driver.set_script_timeout(40)
         runner.require(self.driver.capabilities.get("platformName", "").lower() == "android", "Driver did not connect to real Android Firefox")
+        adb("shell", "pm", "grant", PACKAGE, "android.permission.CAMERA")
         if native_url:
             # Bind Marionette to the exact tab opened by the actual native VIEW
             # intent, not an arbitrary restored, potentially detached GeckoView.
@@ -146,7 +153,8 @@ class AndroidBrowser(runner.Browser):
         while time.monotonic() < deadline:
             adb("shell", "uiautomator", "dump", "/sdcard/portmap-ui.xml", stdout=subprocess.DEVNULL)
             xml = adb("exec-out", "cat", "/sdcard/portmap-ui.xml", capture_output=True, text=True).stdout
-            (runner.ARTIFACTS / "android-ui.xml").write_text(xml)
+            if not self.sensitive_input:
+                (runner.ARTIFACTS / "android-ui.xml").write_text(xml)
             nodes = list(ET.fromstring(xml).iter("node"))
             install_notice = any("portmap connections" in element.get("text", "").lower() and "added" in element.get("text", "").lower() for element in nodes)
             for element in reversed(nodes) if last else nodes:
@@ -160,11 +168,11 @@ class AndroidBrowser(runner.Browser):
                             break  # Dismiss the actual install sheet before finding the requested control.
                         return
             time.sleep(1)
-        with (runner.ARTIFACTS / "android-native.png").open("wb") as image:
-            adb("exec-out", "screencap", "-p", stdout=image)
+        self.screenshot("android-native")
         raise RuntimeError("Actual Android UI control not found: " + repr(labels))
 
     def options(self):
+        before = set(self.driver.window_handles)
         # Marionette forbids direct moz-extension navigation on Android. Enter
         # through Firefox's actual native extension menu and browser_action.
         self.native_tap(("More options", "Menu"))
@@ -172,15 +180,45 @@ class AndroidBrowser(runner.Browser):
         # The menu summary repeats this title; the final match is the actual
         # extension action row, not the expandable Extensions section header.
         self.native_tap(("Portmap connections",), last=True)
-        def options_context(driver):
-            for handle in driver.window_handles:
-                driver.switch_to.window(handle)
-                if driver.current_url == runner.OPTIONS_URL:
-                    return driver.find_element(By.ID, "status").get_attribute("data-state") == "ready"
-            return False
-        WebDriverWait(self.driver, 15).until(options_context)
+        self.select_created_context(before, runner.OPTIONS_URL)
+        self.wait_options()
 
-    def assert_no_admission_connections(self):
+    def select_created_context(self, before, url):
+        # Bind to the context caused by this native action. Enumerating old
+        # documents can reactivate stale Marionette prompt records in hidden
+        # Fenix tabs, even after the real native dialog was dismissed.
+        observed = {"before": sorted(before), "expected_url": url}
+        def created_context(driver):
+            created = set(driver.window_handles) - before
+            observed["created"] = sorted(created)
+            if not created:
+                return False
+            runner.require(len(created) == 1, "Native action created ambiguous browser contexts")
+            selected = next(iter(created))
+            driver.switch_to.window(selected)
+            observed.update(selected=selected, url=driver.current_url,
+                            visibility=driver.execute_script("return document.visibilityState"))
+            return observed["url"] == url and observed["visibility"] == "visible"
+        try:
+            WebDriverWait(self.driver, 20).until(created_context)
+        finally:
+            with (runner.ARTIFACTS / "android-native-contexts.jsonl").open("a") as output:
+                output.write(json.dumps(observed) + "\n")
+
+    def action(self, domain, action):
+        if action not in ("open", "open-https"):
+            return super().action(domain, action)
+        self.options()
+        cards = self.cards(domain)
+        runner.require(len(cards) == 1, "Expected one connection for " + domain)
+        self.opened_page_before = set(self.driver.window_handles)
+        cards[0].find_element(By.CSS_SELECTOR, '[data-action="' + action + '"]').click()
+
+    def focus_page(self, url):
+        self.select_created_context(self.opened_page_before, url)
+        self.opened_page_before = None
+
+    def assert_network_paths(self):
         import network_evidence
         self.close()
         adb("emu", "kill", capture_output=True)
@@ -189,16 +227,25 @@ class AndroidBrowser(runner.Browser):
         PROCESSES.clear()
         network_evidence.android(runner.ARTIFACTS)
 
-    def save(self, domain, host, user, password, port=18080, edit=False):
-        # The real guest reaches the isolated Docker network through emulator
-        # user-mode NAT, just as its unrelated-origin browsing already does.
-        super().save(domain, socket.gethostbyname(host), user, password, port=port, edit=edit)
-        with (runner.ARTIFACTS / "android-options-configured.png").open("wb") as image:
-            adb("exec-out", "screencap", "-p", stdout=image)
+    def confirm_dialog(self):
+        # Fenix's visible dialog and Marionette's prompt record are separate:
+        # native OK dismisses the real UI; acknowledge any remaining driver
+        # record before the next ordinary WebDriver command.
+        self.native_tap(("OK",), last=True)
+        try:
+            self.driver.switch_to.alert.accept()
+        except NoAlertPresentException:
+            pass  # A correctly synchronized browser already cleared it.
 
-    def snapshot_native_profile(self):
-        # Stop native process before copying native disk state; never re-add the
-        # extension or replay connection configuration to make persistence pass.
+    def screenshot(self, name):
+        if self.capture_allowed(name):
+            self.settle_render()
+            with (runner.ARTIFACTS / (name + ".png")).open("wb") as image:
+                adb("exec-out", "screencap", "-p", stdout=image, timeout=10)
+
+    def locate_native_profile(self):
+        # Keep all profile bytes inside this disposable guest; they contain SSH
+        # credentials. Only locate the existing state, never export or reseed it.
         adb("shell", "am", "force-stop", PACKAGE)
         reported = self.driver.capabilities.get("moz:profile", "")
         exists = adb("shell", "test", "-d", reported, check=False, capture_output=True).returncode if reported.startswith(("/data/", "/sdcard/")) else 1
@@ -210,18 +257,14 @@ class AndroidBrowser(runner.Browser):
             runner.require(len(candidates) == 1, "Cannot uniquely locate native Android profile for restart; no storage reseeding fallback")
             remote = candidates[0]
         self.native_profile = remote
-        snapshot = runner.ARTIFACTS / ("android-native-profile-" + str(time.time_ns()))
-        snapshot.mkdir()
-        adb("pull", remote + "/.", str(snapshot), timeout=60, stdout=subprocess.DEVNULL)
-        return snapshot
+        return remote
 
     def close(self):
         if self.driver:
             with (runner.ARTIFACTS / "android-logcat.txt").open("wb") as output:
                 adb("logcat", "-d", "-v", "threadtime", stdout=output)
-            with (runner.ARTIFACTS / "android-final-screen.png").open("wb") as output:
-                adb("exec-out", "screencap", "-p", stdout=output)
-            self.snapshot_native_profile()
+            self.screenshot("android-final-screen")
+            self.locate_native_profile()
             try:
                 super().close()
             except WebDriverException:
@@ -229,7 +272,7 @@ class AndroidBrowser(runner.Browser):
 
     def restart(self, first_url=None):
         first_restart = not getattr(self, "retained_native_session", False)
-        self.snapshot_native_profile()
+        self.locate_native_profile()
         config = "/data/local/tmp/" + PACKAGE + "-geckoview-config.yaml"
         backup = "/data/local/tmp/portmap-retained-native-profile"
         if first_restart:

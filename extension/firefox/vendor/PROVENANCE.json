@@ -1,0 +1,25 @@
+{
+  "name": "jsQR",
+  "package": "jsqr",
+  "version": "1.4.0",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/cozmo/jsQR",
+  "upstreamCommit": "49a9633931fb8030ac2fc9cecc121d6e5a19f9a3",
+  "metadata": "https://registry.npmjs.org/jsqr/1.4.0",
+  "archive": "https://registry.npmjs.org/jsqr/-/jsqr-1.4.0.tgz",
+  "archiveIntegrity": "sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==",
+  "archiveSha256": "b5299b37917a1fe7a8cab9dd5cc6b8accf82663add80abe5bf7761a921cc6602",
+  "files": {
+    "jsQR.js": {
+      "member": "package/dist/jsQR.js",
+      "sha256": "bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859",
+      "modifications": "none"
+    },
+    "jsQR.LICENSE": {
+      "member": "package/LICENSE",
+      "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+      "modifications": "none"
+    }
+  },
+  "runtime": "Bundled standalone browser decoder. No CDN, native helper, runtime download or BarcodeDetector dependency."
+}

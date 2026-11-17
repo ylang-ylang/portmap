@@ -1,0 +1,154 @@
+diff --git a/src/misc.c b/src/misc.c
+index 6c28327..ba849fe 100644
+--- a/src/misc.c
++++ b/src/misc.c
+@@ -155,6 +155,16 @@ ssize_t
+ _libssh2_recv(libssh2_socket_t sock, void *buffer, size_t length,
+               int flags, void **abstract)
+ {
++#ifdef LIBSSH2_BROWSER_CALLBACK_IO
++    /* Nightly probe has no POSIX socket transport. The bridge must install
++     * SEND/RECV callbacks; accidental use of this default is a hard error. */
++    (void)sock;
++    (void)buffer;
++    (void)length;
++    (void)flags;
++    (void)abstract;
++    return -ENOTSUP;
++#else
+     ssize_t rc;
+ 
+     (void)abstract;
+@@ -184,6 +194,7 @@ _libssh2_recv(libssh2_socket_t sock, void *buffer, size_t length,
+             return -err;
+     }
+     return rc;
++#endif
+ }
+ 
+ /* _libssh2_send
+@@ -194,6 +205,15 @@ ssize_t
+ _libssh2_send(libssh2_socket_t sock, const void *buffer, size_t length,
+               int flags, void **abstract)
+ {
++#ifdef LIBSSH2_BROWSER_CALLBACK_IO
++    /* Do not retain Emscripten FS/SOCKFS or silently emulate successful I/O. */
++    (void)sock;
++    (void)buffer;
++    (void)length;
++    (void)flags;
++    (void)abstract;
++    return -ENOTSUP;
++#else
+     ssize_t rc;
+ 
+     (void)abstract;
+@@ -218,6 +238,7 @@ _libssh2_send(libssh2_socket_t sock, const void *buffer, size_t length,
+         return -err;
+     }
+     return rc;
++#endif
+ }
+ 
+ /* libssh2_ntohu32
+diff --git a/src/session.c b/src/session.c
+index 2d77b05..bd3c42e 100644
+--- a/src/session.c
++++ b/src/session.c
+@@ -593,6 +593,11 @@ libssh2_session_callback_set(LIBSSH2_SESSION * session,
+  */
+ int _libssh2_wait_socket(LIBSSH2_SESSION *session, time_t start_time)
+ {
++#ifdef LIBSSH2_BROWSER_CALLBACK_IO
++    (void)start_time;
++    return _libssh2_error(session, LIBSSH2_ERROR_BAD_USE,
++                          "Synchronous socket wait unsupported in browser");
++#else
+     int rc;
+     int seconds_to_next;
+     int dir;
+@@ -725,6 +730,7 @@ int _libssh2_wait_socket(LIBSSH2_SESSION *session, time_t start_time)
+     }
+ 
+     return 0; /* ready to try again */
++#endif
+ }
+ 
+ static int
+@@ -742,6 +748,11 @@ session_startup(LIBSSH2_SESSION *session, libssh2_socket_t sock)
+         }
+         session->socket_fd = sock;
+ 
++#ifdef LIBSSH2_BROWSER_CALLBACK_IO
++        /* Nightly probe: SEND/RECV callbacks own an asynchronous browser socket,
++         * not a POSIX descriptor. Never inspect or mutate host descriptor 0. */
++        session->socket_prev_blockstate = 0;
++#else
+         session->socket_prev_blockstate =
+             !get_socket_nonblocking(session->socket_fd);
+ 
+@@ -754,6 +765,7 @@ session_startup(LIBSSH2_SESSION *session, libssh2_socket_t sock)
+                                       "blocking state to non-blocking");
+             }
+         }
++#endif
+ 
+         session->startup_state = libssh2_NB_state_created;
+     }
+@@ -1142,6 +1154,7 @@ session_free(LIBSSH2_SESSION *session)
+     _libssh2_debug((session, LIBSSH2_TRACE_TRANS,
+                    "Extra packets left %d", packets_left));
+ 
++#ifndef LIBSSH2_BROWSER_CALLBACK_IO
+     if(session->socket_prev_blockstate) {
+         /* if the socket was previously blocking, put it back so */
+         rc = session_nonblock(session->socket_fd, 0);
+@@ -1150,6 +1163,7 @@ session_free(LIBSSH2_SESSION *session)
+                            "unable to reset socket's blocking state"));
+         }
+     }
++#endif
+ 
+     if(session->server_hostkey) {
+         LIBSSH2_FREE(session, session->server_hostkey);
+@@ -1166,6 +1180,40 @@ session_free(LIBSSH2_SESSION *session)
+     return 0;
+ }
+ 
++#ifdef LIBSSH2_BROWSER_CALLBACK_IO
++/*
++ * Nightly probe private ABI. The caller has irreversibly closed its native
++ * socket and quiesced every JS operation before terminal destruction. No SSH
++ * message can be sent after this point. Incoming allocation ownership stays
++ * intact for session_free(), including partial handshake/open/read state.
++ */
++int _libssh2_browser_probe_abort(LIBSSH2_SESSION *session)
++{
++    if(!session)
++        return LIBSSH2_ERROR_BAD_USE;
++    /* This narrow bridge exposes direct-tcpip, never remote listeners. */
++    if(_libssh2_list_first(&session->listeners))
++        return _libssh2_error(session, LIBSSH2_ERROR_BAD_USE,
++                              "Browser probe cannot abort remote listeners");
++    session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
++    /* outbuf is inline, not allocated. Abandon the terminal packet's borrowed
++     * input pointer without changing any incoming heap-allocation fields. */
++    session->packet.odata = NULL;
++    session->packet.olen = 0;
++    session->packet.ototal_num = 0;
++    session->packet.osent = 0;
++    /* channel_free skips close I/O for DISCONNECTED, so pending outgoing
++     * WINDOW_ADJUST/OPEN/WRITE cannot cause send_existing's pointer EAGAIN. */
++    return session_free(session);
++}
++
++int _libssh2_browser_probe_read_cancel_safe(LIBSSH2_CHANNEL *channel)
++{
++    return channel->read_state == libssh2_NB_state_idle &&
++        channel->session->packet.olen == 0;
++}
++#endif
++
+ /*
+  * libssh2_session_free
+  *

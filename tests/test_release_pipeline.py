@@ -295,7 +295,7 @@ def rest_response(
     ``tamper`` overrides the digest of named assets (for refusal tests).
     """
     manifest = json.loads(anchor_text)
-    records = manifest["assets"] + list(manifest.get("firefox", {}).values())
+    records = release_pipeline.release_assets(manifest)
     entries = []
     for name in release_pipeline.release_file_names(manifest):
         if name in skip:
@@ -489,12 +489,17 @@ def test_validate_tag_push_new_style(tmp_path: Path, tag: str, version: str) -> 
 
 
 @pytest.mark.parametrize("extension_version", ["0.30.0", "0.29.0"])
-def test_tagged_extension_requires_matching_version_and_signed_release_assets(tmp_path: Path, extension_version: str) -> None:
+@pytest.mark.parametrize("experimental", [False, True])
+def test_tagged_extension_requires_matching_version_and_distribution_assets(tmp_path: Path, extension_version: str,
+                                                                          experimental: bool) -> None:
     work = make_repo(tmp_path)
     write_repo_files(work, "0.30.0")
     extension = work / "extension/firefox/manifest.json"
     extension.parent.mkdir(parents=True)
-    extension.write_text(json.dumps({"version": extension_version}))
+    extension_manifest = {"version": extension_version}
+    if experimental:
+        extension_manifest["experiment_apis"] = {"portmapTransport": {}}
+    extension.write_text(json.dumps(extension_manifest))
     git(work, "add", "-A")
     git(work, "commit", "-m", "include Firefox extension")
     git(work, "tag", "v0.30.0")
@@ -506,6 +511,7 @@ def test_tagged_extension_requires_matching_version_and_signed_release_assets(tm
         return
     result = release_pipeline.validate_tag(work, event_name="push", event_tag="v0.30.0", event_sha=commit)
     assert result["firefox"] is True
+    assert release_pipeline.firefox_release_field(work, commit) == ("firefox_experimental" if experimental else "firefox")
     assets, _ = make_assets(tmp_path, "0.30.0", "v0.30.0", commit)
     gh = FakeGh([NOT_FOUND])
     with pytest.raises(release_pipeline.ReleaseError, match="missing from the immutable release manifest"):
@@ -827,16 +833,20 @@ def test_publish_creates_complete_draft_then_publishes(tmp_path: Path, tag: str,
 
 
 @pytest.mark.parametrize("recover_draft", [False, True])
-def test_publish_firefox_assets_and_recover_missing_signed_bytes(tmp_path: Path, recover_draft: bool) -> None:
+@pytest.mark.parametrize("experimental", [False, True])
+def test_publish_firefox_assets_and_recover_original_distribution_bytes(tmp_path: Path, recover_draft: bool,
+                                                                      experimental: bool) -> None:
     work = make_repo(tmp_path)
     tag, version = "v0.20.0", "0.20.0"
     commit = git_text(work, "rev-parse", f"{tag}^{{commit}}")
     assets, text = make_assets(tmp_path, version, tag, commit)
     manifest = json.loads(text)
     firefox = {}
+    prefix = "portmap-firefox-experimental-" if experimental else "portmap-firefox-"
+    feedname = "firefox-experimental-updates.json" if experimental else "firefox-updates.json"
     for key, filename, content in (
-        ("xpi", f"portmap-firefox-{version}.xpi", b"original signed bytes fixture"),
-        ("updates", "firefox-updates.json", b'{"addons":{}}\n'),
+        ("xpi", f"{prefix}{version}.xpi", b"original distribution bytes fixture"),
+        ("updates", feedname, b'{"addons":{}}\n'),
     ):
         (assets / filename).write_bytes(content)
         sha = release_pipeline.digest(assets / filename)
@@ -845,7 +855,10 @@ def test_publish_firefox_assets_and_recover_missing_signed_bytes(tmp_path: Path,
             "filename": filename, "sha256": sha, "size": len(content),
             "source_url": release_pipeline.canonical_source_url(tag, filename),
         }
-    manifest["firefox"] = firefox
+        if experimental:
+            firefox[key].update(distribution="experimental-capability-only",
+                                signature_required=False, capability_required=True)
+    manifest["firefox_experimental" if experimental else "firefox"] = firefox
     anchor_text = json.dumps(manifest, indent=2) + "\n"
     (assets / "release.json").write_text(anchor_text)
     missing = {record["filename"] for record in firefox.values()}

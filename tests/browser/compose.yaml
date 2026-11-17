@@ -1,18 +1,26 @@
-# No service can reach external networks; image downloads happen only at build time.
+# Runtime network is internal-only; downloads occur only during image builds.
 x-fixture: &fixture
-  build:
-    context: ../..
-    dockerfile: tests/browser/Dockerfile
-    target: fixture
+  build: {context: ../.., dockerfile: tests/browser/Dockerfile, target: fixture}
   networks: [isolated]
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
   command: [python, /app/tests/browser/fixture.py]
   healthcheck:
-    test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+    test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
     interval: 1s
     timeout: 3s
     retries: 30
+x-target: &target
+  <<: *fixture
+  build: {context: ../.., dockerfile: tests/browser/Dockerfile, target: target}
+  command: [python, /app/tests/browser/target.py]
+  user: '0:0'
+  cap_add: [SYS_CHROOT, SETUID, SETGID, CHOWN, DAC_OVERRIDE, KILL]
+  depends_on:
+    certificates: {condition: service_completed_successfully}
+x-target-environment: &target-environment
+  BROWSER_UID: ${BROWSER_UID:?Use run.sh}
+  BROWSER_GID: ${BROWSER_GID:?Use run.sh}
 
 services:
   certificates:
@@ -20,70 +28,32 @@ services:
     command: [python, /app/tests/browser/fixture.py, certificates]
     healthcheck: {disable: true}
     volumes: [certificates:/certs]
-
-  fixture-a:
-    <<: *fixture
-    environment: {NODE_ID: node-a, NODE_DOMAIN: a.portmap}
-    depends_on:
-      certificates: {condition: service_completed_successfully}
-    volumes: [certificates:/certs:ro]
-
-  fixture-b:
-    <<: *fixture
-    environment: {NODE_ID: node-b, NODE_DOMAIN: b.portmap}
-    depends_on:
-      certificates: {condition: service_completed_successfully}
-    volumes: [certificates:/certs:ro]
-
+  node-a:
+    <<: *target
+    environment: {<<: *target-environment, NODE_ID: node-a, NODE_DOMAIN: a.portmap}
+    networks:
+      isolated: {aliases: [a]}
+    volumes: [certificates:/certs:ro, state-a:/state, metadata-a:/meta]
+  node-b:
+    <<: *target
+    environment: {<<: *target-environment, NODE_ID: node-b, NODE_DOMAIN: b.portmap}
+    networks:
+      isolated: {aliases: [b]}
+    volumes: [certificates:/certs:ro, state-b:/state, metadata-b:/meta]
   unrelated:
     <<: *fixture
     environment: {NODE_ID: unrelated}
-
   dns:
     <<: *fixture
     command: [python, /app/tests/browser/dns.py]
     sysctls: {net.ipv4.ip_unprivileged_port_start: 0}
-
-  # Deliberately resolvable trap: DIRECT/public-DNS fallback must NOT look like success.
   trap:
     <<: *fixture
     environment: {NODE_ID: dns-leak-trap}
     sysctls: {net.ipv4.ip_unprivileged_port_start: 0}
-
-  node-a:
-    <<: *fixture
-    command: [python, -m, portmap.cli, browser-proxy, --config, /app/tests/browser/node-a.json]
-    networks:
-      isolated:
-        aliases: [a]
-    depends_on:
-      fixture-a: {condition: service_healthy}
-    healthcheck:
-      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 18080), timeout=2).close()"]
-      interval: 1s
-      timeout: 3s
-      retries: 30
-
-  node-b:
-    <<: *fixture
-    command: [python, -m, portmap.cli, browser-proxy, --config, /app/tests/browser/node-b.json]
-    networks:
-      isolated:
-        aliases: [b]
-    depends_on:
-      fixture-b: {condition: service_healthy}
-    healthcheck:
-      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 18080), timeout=2).close()"]
-      interval: 1s
-      timeout: 3s
-      retries: 30
-
   browser:
     image: ${BROWSER_IMAGE:?Use run.sh}
-    build:
-      context: ../..
-      dockerfile: tests/browser/Dockerfile
-      target: browser
+    build: {context: ../.., dockerfile: tests/browser/Dockerfile, target: browser}
     networks: [isolated]
     dns: ["${BROWSER_DNS_IP:-127.0.0.1}"]
     user: ${BROWSER_UID:?Use run.sh}:${BROWSER_GID:?Use run.sh}
@@ -99,12 +69,23 @@ services:
     environment:
       HOME: /tmp
       BROWSER_SOURCE_COMMIT: ${BROWSER_SOURCE_COMMIT:-}
+      MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: '1'
     volumes:
       - certificates:/certs:ro
-      - ${BROWSER_ARTIFACTS:?Use run.sh to create a scoped artifact directory}:/artifacts
+      - metadata-a:/meta/a:ro
+      - metadata-b:/meta/b:ro
+      - ${BROWSER_ARTIFACTS:?Use run.sh}:/artifacts
 
+      - .:/app/tests/browser:ro
+      - ../../extension/firefox:/app/extension/firefox:ro
+      - ../../tools:/app/tools:ro
+      - ../../src:/app/src:ro
+      - ../../pyproject.toml:/app/pyproject.toml:ro
 networks:
-  isolated:
-    internal: true
+  isolated: {internal: true}
 volumes:
   certificates:
+  state-a:
+  state-b:
+  metadata-a:
+  metadata-b:

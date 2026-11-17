@@ -37,6 +37,7 @@ analysis = Analysis(
         (str(root / "LICENSE"), "licenses/portmap"),
         (str(Path(sysconfig.get_path("stdlib")) / "LICENSE.txt"), "licenses/python"),
         (str(freezer.locate_file(freezer_license)), "licenses/pyinstaller"),
+        (str(package_root / "_qr_encoder.LICENSE"), "licenses/nayuki-qrcodegen"),
         # Notices for the shared libraries from the pinned Debian build image.
         *[
             (f"/usr/share/doc/{package}/copyright", f"licenses/system/{package}")

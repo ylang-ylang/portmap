@@ -1,7 +1,0 @@
-{
-  "domain": "b.portmap",
-  "listen": {"host": "0.0.0.0", "port": 18080},
-  "credentials": {"username": "user-b:β", "password": "pass-b-密"},
-  "ingress": {"host": "fixture-b", "port": 8080, "scope": "public"},
-  "tls_ingress": {"host": "fixture-b", "port": 8443, "scope_domain": "b.portmap"}
-}
