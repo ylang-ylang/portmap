@@ -679,178 +679,280 @@ networks, not the public Internet.
 
 ### Firefox on Android and Desktop
 
-`extension/firefox` is one Firefox extension for Android and desktop, requiring
-Firefox 140 or later on desktop and 142 or later on Android, including built-in
-data-transmission consent. Each browser stores its own node connections; no central
-Portmap manager is required. The extension selects an authenticated SOCKS5 node
-with remote DNS for each configured namespace while retaining the original
-`.portmap` URL, Host, origin credentials and request body. The node maps that
-namespace to a fixed existing ingress, not an external DNS lookup. Other websites
-retain the browser's existing routing. It does not change system DNS, VPNs,
-Tailscale preferences or Coder workspace state.
+`extension/firefox` supports Firefox installations that actually provide its
+experimental networking APIs. Compatibility is **not** inferred from a browser
+name, version, release channel, user agent, or preference value. The background
+checks the required methods and runs a bounded, local, bidirectional binary
+socket self-check before enabling either connection mode:
 
-Firefox can independently issue speculative DNS queries, including HTTPS
-resource records, for these original names even when actual requests use the
-selected SOCKS node. Remote-DNS routing does not guarantee zero browser DNS
-queries: the browser's configured resolver may see internal domain names.
-This known limitation is disclosed and accepted; tests retain DNS diagnostics
-but gate actual routing, authentication, TLS and no-direct-traffic fallback.
-No browser-wide prediction or DNS settings are changed to hide the queries.
+- **Direct:** connect to the configured node host and existing HTTP ingress port.
+- **SSH:** authenticate inside the extension using bundled libssh2/WebAssembly,
+  verify the pinned server host key before authentication, and open SSH
+  `direct-tcpip` channels to the configured remote ingress.
 
-The browser must already be able to reach each node, for example over Tailscale.
-Do not exclude Firefox from Tailscale app-based split tunneling. The extension
-does not implement SSH, establish a tailnet, or start sleeping workspaces.
-Configured namespaces must not overlap. Initial requests wait for local storage
-validation; missing, disabled, invalid or revoked `.portmap` connections fail
-closed instead of using another node or ordinary browser routing. Removing a
-connection blocks new requests; established WebSockets/streams require closing
-their tabs.
+Each browser owns its connections and each node has its own namespace and
+transport. No central Portmap node, separate client SSH application, new
+node-side SOCKS service, or native-messaging helper is required. The extension
+uses an authenticated, loopback-only HTTP proxy internally to connect ordinary
+browser requests to those transports. Original `.portmap` URLs, Host headers,
+origin authorization and request bodies are retained; unrelated websites keep
+the browser's existing routing.
 
-#### Explicit node endpoint
+If the networking APIs are absent or their self-check fails, the options page
+explains how to enable experiments or switch to a compatible Firefox build, and
+disables **both** Direct and SSH. Claimed `.portmap` traffic stays blocked. A
+remote connection/authentication failure is a node error, not a reason to change
+transport, use another node, or fall back to ordinary direct browsing.
 
-Start the compatibility endpoint only after identifying this node's existing
-public/web ingress. This is a foreground command; it does not run setup,
-restart containers or change service boot configuration:
+#### Install a compatible experimental build
+
+Firefox Nightly is one compatible option when configured for experiments:
+[desktop downloads](https://www.firefox.com/channel/desktop/) and
+[Android Nightly](https://play.google.com/store/apps/details?id=org.mozilla.fenix).
+Another Firefox build is acceptable if the actual networking self-check works.
+
+1. In a build that permits extension experiments, enable
+   `extensions.experiments.enabled` in `about:config` **before installing**.
+2. This package is an **unsigned experimental extension**, not an ordinary
+   AMO-signed release. Where the browser permits unsigned developer installation,
+   `xpinstall.signatures.required` must be `false`.
+3. Restart the browser and install the experimental XPI using its add-on
+   file-install action. On Android builds with the developer menu, enable it in
+   **Settings → About Firefox** by tapping the logo five times, then use
+   **Settings → Install extension from file**. Desktop offers **Add-ons and
+   themes → Install Add-on From File**.
+4. If installed while experiments were disabled, enable experiments, restart,
+   and **reinstall the experimental XPI**. Observed Android behavior retained
+   missing API registrations after a preference change and restart alone.
+
+These preferences weaken normal add-on installation restrictions. Use only
+trusted packages, preferably in a separate experimental browser/profile. The
+extension does not change these preferences automatically. A browser that
+rejects the unsigned package before installation cannot display the extension's
+own guidance; use a compatible build rather than bypassing an unrelated
+browser/security error. Conversely, a preference value is not authoritative:
+observed installed APIs could remain available after a later preference change.
+The running APIs and self-check, not those settings, decide compatibility.
+
+#### Configure independent connections
+
+In **Portmap connections**, enter a node name such as `voxmani`. The form fills
+the namespace with `voxmani.portmap` and the physical host with `voxmani`.
+The short host must actually resolve; otherwise replace it with the real IP or
+hostname. This is local completion, not node discovery. Each address follows
+name changes only until manually edited. Renaming a saved label never rewrites
+its saved endpoints.
+
+For Direct, supply the reachable host. New connections default to HTTP **80**
+and HTTPS **443**; open the collapsed **Advanced** section to change ports or
+clear HTTPS to disable it. Editing and QR import preserve the saved/imported
+ports, including disabled HTTPS. For SSH, enter its reachable host and username;
+the default **Browser key** flow manages a dedicated key for this browser profile.
+The SSH target host defaults to `127.0.0.1`: that address is relative to the
+**remote SSH server**, not the phone. Use the real remote ingress ports.
+Defaults do not start an HTTPS server or bypass certificate validation.
+The settings page keeps guidance brief; this section contains the full setup
+and security details. The extension does not discover arbitrary ports, start
+node services, or automatically trust an unknown host key.
+
+For a new SSH connection:
+
+1. Choose **Check server fingerprint**, compare it through a trusted channel,
+   then explicitly confirm the server. Inspection performs no authentication;
+   changing the destination invalidates the confirmation. A scanned fingerprint
+   is not automatically trusted.
+2. Open **Set up passwordless login**, enter the account password, and click
+   **Install key and save**. This is the explicit authorization to append this
+   browser's public key to that account's `~/.ssh/authorized_keys`.
+3. The plugin closes the password session and verifies a **new**, fingerprint-
+   pinned key-authenticated session before saving the node. The one-time password
+   is cleared rather than stored; future connections use the browser key.
+
+Automatic installation requires remote command execution and Python 3 on a
+POSIX SSH server. It uses only the authenticated account, without sudo or
+changes to sshd configuration. Existing keys, comments and restrictions are
+preserved; repeated installation does not add an unrestricted duplicate.
+Symlinks, hard links, unsafe ownership/permissions and unsupported environments
+are rejected rather than overwritten. Servers with nonstandard authorized-key
+paths, disabled password login or restricted commands need manual setup.
+
+Under **SSH advanced**, choose **Copy browser public key** for manual installation,
+then **Test and save**. Saved-password and imported-key authentication are also
+available there; existing nodes retain their original authentication choice.
+If installation is interrupted or verification fails, the public key may already
+have been appended remotely. The plugin reports that possibility, does not
+claim success or silently fall back, and does not delete existing server entries.
+
+The fingerprint accepts 64 hexadecimal SHA256 characters or OpenSSH's
+`SHA256:...` representation. Obtain it through a trusted management channel
+and use the host key actually negotiated with that server. Current key
+authentication supports a traditional **RSA PEM private key**, its **OpenSSH RSA
+public key**, and an optional passphrase; Ed25519 and OpenSSH private-key
+containers are not claimed as supported. Local key-file inputs and pasted keys
+are available. Normal public-key files ending in LF/CRLF are accepted. Editing
+an existing connection preserves its credentials without displaying them;
+replacing credentials requires a complete new password or key pair.
+
+Namespace claims cannot overlap. HTTP/WS logical port 80 maps to the configured
+HTTP ingress; HTTPS/WSS logical port 443 maps to the configured HTTPS
+ingress (443 by default for new connections). That ingress must already have a trusted certificate for the
+original namespace and enforce its own SNI/Host isolation. The extension does
+not terminate origin TLS, install a CA, ignore certificate errors, or turn a
+plain HTTP Portmap ingress into HTTPS.
+
+Choose the intended public/private ingress deliberately: namespace restrictions
+do not remove private catalog/control endpoints served within that namespace.
+The network must already reach each configured physical destination. A LAN,
+VPN such as Tailscale, or another suitable route can provide that reachability;
+there is no Tailscale-specific connection mode. Direct HTTP is not encrypted by
+the extension. SSH encrypts the SSH leg; origin HTTPS remains independently
+validated. The extension changes no system DNS, VPN, routing, workspace or
+node service settings.
+
+SSH provides the forwarding needed for browser traffic plus the narrow,
+explicitly requested public-key installer—not an interactive terminal, SFTP
+client, arbitrary remote-command interface, remote `ssh -R` listener or SSH agent.
+Each browser profile creates its own WebCrypto RSA-3072 identity. The private
+key stays in local IndexedDB, is not returned to the settings page, and is not
+included in QR codes. Saved managed connections contain only a managed-key
+reference. A missing, corrupt or unexpectedly changed identity fails closed
+rather than silently replacing keys.
+
+Saved passwords/imported keys use local extension storage; no credentials are
+synchronized by this extension or encrypted by it at rest. Anyone controlling
+the browser profile or privileged extension code can read them. Reset removes
+the local managed identity and connections, but does not revoke public keys
+already installed on servers; remove those remotely when retiring a browser.
+Only browser contexts granted extension access are covered.
+
+Old schema-2 SOCKS connections cannot be safely converted: their listener port
+and credentials do not identify an HTTP ingress or SSH account. The extension
+preserves that old storage and explains the incompatibility instead of guessing
+or silently deleting it. Record any settings needed for rollback, then use the
+explicitly confirmed reset action to create Direct/SSH connections. The old
+standalone `browser-proxy` adapter/command is removed in this cutover; no running
+node is upgraded or stopped merely by installing the browser extension.
+
+Firefox may independently issue speculative DNS queries, including HTTPS
+resource records, for original `.portmap` names. Correct transport routing does
+not guarantee zero DNS metadata exposure to the configured resolver. Tests
+retain those diagnostics and reject actual namespace traffic reaching a
+fallback origin; no browser-wide prediction/DNS settings are changed to hide
+queries.
+
+#### Add a connection by QR code
+
+In **Portmap connections**, open **Scan or import QR**, then use the camera or import
+a PNG/JPEG image. Decoding is local; no image or connection code is sent to an
+external service. Review the destination and namespace before confirming.
+Direct connections are saved after confirmation. SSH connections populate the
+editor, clear previous authentication and trust confirmation, and default to
+the browser-key setup flow. Existing or overlapping namespaces are rejected,
+not replaced. Camera access requires browser/device permission; image import
+is available when camera access is unavailable.
+
+Generate a QR with the updated Portmap CLI on a trusted machine. For example,
+replace these example addresses and ports with the node's actual ingress:
 
 ```bash
-portmap browser-proxy --config /private/path/browser-proxy.json
+portmap connection-qr --name dev --domain dev.portmap \
+  --host 192.168.1.20 --http-port 8080 --png dev.png
 ```
 
-Example configuration (replace the example Tailscale address, namespace and
-credentials with this node's actual values, and protect the file with mode 0600):
+The command displays a terminal QR and writes a PNG. Use `--svg` for SVG export,
+or `--no-terminal` when only a file is needed. Existing output files are never
+overwritten. When domain, host and HTTP port are supplied explicitly, no saved
+node state is read. Otherwise the command can read saved local node metadata;
+it does not discover remote nodes or start/change node services. Supply a
+phone-reachable address explicitly if the saved bind is not suitable.
 
-```json
-{
-  "domain": "a.portmap",
-  "listen": {"host": "100.64.0.10", "port": 18080},
-  "credentials": {"username": "browser", "password": "use-a-unique-private-secret"},
-  "ingress": {"host": "100.64.0.10", "port": 80, "scope": "public"}
-}
-```
-
-The `ingress` address must already serve the specified **local public/web**
-namespace. In particular, do not substitute Portmap's default private
-`127.0.0.1:80` listener: it can expose imported remote catalogs and controls.
-`scope` records the operator's explicit choice, not automatic discovery or
-proof of the ingress role. Choosing `private` emits an exposure warning.
-Limit reachability of the new listener with tailnet grants/firewall rules.
-SOCKS5 does not encrypt credentials or HTTP content itself: keep Tailscale
-connected and use its encrypted private reachability. The extension cannot
-verify Android's VPN state. Never expose this listener to the public Internet.
-Each username and password must contain 1–255 UTF-8 bytes.
-
-In the extension's **Portmap connections** page, enter the node name once:
-`voxmani` fills **Portmap domain** with `voxmani.portmap` and **Proxy host**
-with `voxmani`. Names are trimmed/lowercased and an existing `.portmap` suffix
-is not duplicated. The short host must actually resolve, for example through
-Tailscale MagicDNS; otherwise override it with the node's real address.
-This is local form completion, not node discovery or a pairing command.
-
-Each address follows name changes until you edit that address manually.
-Renaming a saved connection preserves its existing endpoints and enabled state;
-saving or cancelling an edit resets automatic completion for the next new
-connection. A display-only name that is not a valid hostname leaves automatic
-addresses empty for explicit entry. The real proxy port, username and password
-are still required: the extension never invents credentials or a listening port.
-
-Secrets are stored only in this browser's local extension storage, not synced;
-anyone controlling the browser profile can read them. Grant the extension access
-only in the browser contexts you intend to use; private windows without extension
-permission are not covered.
-
-Only authenticated SOCKS5 CONNECT with a domain-name destination is accepted;
-client-resolved IP destinations, anonymous authentication and other commands
-are rejected. HTTP and WebSocket targets use port 80: the adapter validates one
-inner HTTP request and binds its Host to the authorized SOCKS destination before
-opening the fixed ingress. It forwards opaque WebSocket frames only after a
-verified upgrade, never arbitrary plaintext TCP.
-
-HTTPS/WSS targets use port 443 and require a separately prepared isolated TLS
-ingress: `"tls_ingress": {"host": "127.0.0.1", "port": 8443, "scope_domain": "a.portmap"}`.
-The fixed TLS ingress must enforce both SNI and encrypted HTTP Host scope itself,
-because the adapter does not decrypt origin TLS. Existing Portmap HTTP ingress
-does not supply this optional TLS capability. No certificate checks are disabled.
-There is no HTTP-proxy mode or SOCKS-over-TLS listener; transport encryption is
-provided by Tailscale, independently of the browser's end-to-end origin HTTPS.
-
-#### Development verification and release
-
-The reproducible unsigned development package is built with:
+For SSH, use the SSH server's verified **public** host key, never its private key:
 
 ```bash
-python3 tools/build_firefox_extension.py build --output /tmp/portmap-development.xpi
+portmap connection-qr --name dev --domain dev.portmap --mode ssh \
+  --host 192.168.1.20 --http-port 8080 \
+  --ssh-port 22 --ssh-username alice --ssh-target-host 127.0.0.1 \
+  --ssh-host-key-file /etc/ssh/ssh_host_rsa_key.pub --png dev-ssh.png
+```
+
+Alternatively supply `--ssh-host-key-sha256` with a trusted SHA256 fingerprint.
+The target host and HTTP port are relative to the SSH server. An HTTPS ingress,
+if available, must be explicitly included with `--https-port`.
+
+QR codes contain public connection metadata, including hostnames, usernames
+and host-key fingerprints, but never passwords, private keys or passphrases.
+They are **not signed identities or authorization grants**: trust their source
+and verify the destination/fingerprint. Exporting a QR does not grant access
+or create credentials. Neither scanning nor importing changes system DNS,
+VPN settings or Tailscale.
+
+#### Development verification and experimental distribution
+
+Build and validate the unsigned experimental package:
+
+```bash
+python3 tools/build_firefox_extension.py build --output /tmp/portmap-experimental.xpi
+python3 tools/build_firefox_extension.py validate --xpi /tmp/portmap-experimental.xpi
 node --test extension/firefox/tests/*.test.cjs
-sh tests/browser/run.sh --development
+sh tests/browser/run.sh --development --xpi /tmp/portmap-experimental.xpi
+ACCEPT_ANDROID_SDK_LICENSE=1 sh tests/browser/run.sh --android --development \
+  --xpi /tmp/portmap-experimental.xpi
 ```
 
-The Docker fixture uses two independent nodes and actual Firefox, with separate
-namespace-scoped TLS fixtures, ordinary browsing and a leak trap. It never mounts
-the host runtime socket or uses host networking. Each run has its own Compose
-project and cleans only that project's resources. Retained evidence identifies
-the exact extension digest, browser version, install mode and exercised cases.
-Desktop viewport resizing is not Android verification.
+Both platforms consume the same XPI bytes. Packaging uses fixed ZIP metadata
+and uncompressed members so identity does not vary with zlib implementations.
+The crypto provenance, reviewed callback/teardown patch, licenses and
+`tools/build_firefox_ssh.py` provide a pinned, offline-compilable reproduction
+path using Emscripten 3.1.74, libssh2 1.11.1 and mbedTLS 3.6.5; `build --check`
+compares the generated JavaScript/WASM with the shipped bytes.
 
-Actual Android development testing uses the isolated Nightly fixture:
+The Docker harness uses two independent ordinary SSH/HTTP targets and real
+Firefox installations. It exercises missing-API guidance in a fresh permitted
+installation, enabled native self-check, actual options controls, Direct/SSH
+pages, resources, POST, TLS, WebSockets, binary/concurrent requests, failed
+authentication/pins, isolated outages and saved configuration across a real
+browser restart. Android is an AOSP emulator running the official APK, not a
+desktop viewport. It needs `/dev/kvm` and explicitly accepted
+[Android SDK terms](https://developer.android.com/studio/terms).
+The QR cases exercise CLI-generated PNG import, preview/cancel, independent
+Direct/SSH additions, malformed/secret-bearing/conflicting input rejection,
+and native camera-track cancellation. Android additionally scans a synthetic
+CLI-generated QR through the emulator's imagefile camera and real
+`getUserMedia`; desktop uses Firefox's native fake camera for lifecycle checks
+and real PNG import for decoding. These are not physical-camera tests.
 
-```bash
-ACCEPT_ANDROID_SDK_LICENSE=1 sh tests/browser/run.sh --android --development
-```
+Runtime networks are internal-only, without host networking, published host
+ports, privileged containers or a mounted runtime socket. Each run cleans only
+its own project. Desktop connection traces can inspect the exact local
+admission endpoint; the emulator's external-interface PCAP cannot observe
+guest-loopback attempts, and its receipt states that limit. Receiver peers and
+the fallback trap provide independent transport evidence. Credential-bearing
+native profiles stay inside the disposable guest, and secret-bearing editor
+screenshots are omitted rather than uploaded.
 
-This development mode is not signed-release proof; the release gate below uses
-official release Firefox with signature enforcement.
+Experimental distribution is separate from the historical signed channel:
+`portmap-firefox-experimental-VERSION.xpi` and
+`firefox-experimental-updates.json`, never experimental replacement bytes in the
+legacy `firefox-updates.json` feed. Each new latest experimental release carries
+the byte-exact historical v0.23.0 stable feed and checksum as separately
+digest-bound compatibility metadata, so existing signed installations keep
+their original version and signed-XPI URL. It does not advertise a signed
+0.25.0 build. `attach-experimental` requires a clean exact source
+commit, matching payload/tooling/harness identities, complete versioned desktop
+and Android receipts for the same XPI, real permanent-install/capability
+observations, and the required network/receiver/restart boundaries before
+writing immutable assets. Receipts are trusted workflow evidence, not an
+authentication mechanism for arbitrary JSON. Uncommitted local test receipts
+explicitly identify their base commit and changed source bytes and cannot
+authorize publication.
 
-Release mode installs a **Mozilla-signed** XPI permanently with signature
-enforcement enabled. Both actual desktop and Android evidence must pass for
-the same signed bytes and source commit before attaching release assets:
-
-```bash
-sh tests/browser/run.sh --require-signed --xpi /path/to/signed.xpi --artifacts /tmp/desktop-proof
-ACCEPT_ANDROID_SDK_LICENSE=1 sh tests/browser/run.sh --android --require-signed \
-  --xpi /path/to/signed.xpi --artifacts /tmp/android-proof
-```
-
-The Android fixture needs `/dev/kvm` and explicitly accepted
-[Android SDK terms](https://developer.android.com/studio/terms); it passes only
-that device to its isolated emulator container, never `--privileged`.
-Missing SDK/APK, signing credentials, failed tests or absent Android evidence
-block release; unsigned development installation is not a release substitute.
-
-Self-distribution uses Mozilla's **unlisted** channel, GitHub Releases for
-`portmap-firefox-VERSION.xpi`, and `firefox-updates.json` at the fixed latest-release
-HTTPS URL. Every version still needs Mozilla signing and review compliance.
-CI requires repository secrets `AMO_JWT_ISSUER` and `AMO_JWT_SECRET`, plus the
-explicit `ACCEPT_ANDROID_SDK_LICENSE=1` repository variable for the emulator.
-Do not paste these secrets into issue reports, command lines or extension files.
-Signed payloads are compared to the source allowlist: runtime files must be
-byte-identical, while `manifest.json` may differ only in JSON formatting/key
-order introduced by the signing tool. Changed values/types/permissions and
-duplicate keys are rejected. Browser installation verifies the real signature.
-Artifacts are covered by the same immutable release manifest as the runtime
-archives. Published bytes are never
-replaced; retries reuse retained signed output and original release artifacts.
-
-For first installation on Android, download the signed XPI, open **Settings →
-About Firefox**, tap the Firefox logo five times, then use **Install Extension
-from File**. On desktop use **Add-ons and themes → Install Add-on From File**.
-Subsequent compatible versions are discovered through the extension update URL.
-
-The settings page also has **Check for updates** and, when a newer release is
-available, **Download VERSION (.xpi)**. This user-triggered check reads the same
-official GitHub feed immediately, without waiting for Firefox's automatic
-schedule. It compares numeric release versions and only offers this extension's
-version-pinned official download. No node configuration is sent, and a failed
-check leaves saved connections and an unsaved form unchanged. Firefox's own
-automatic update mechanism is not disabled or rescheduled.
-
-**Downloading is not installing.** On Android, use **Settings → Install
-extension from file**, manually select the downloaded XPI, then confirm **Add**.
-Actual stable Firefox160 testing found that clicking the GitHub XPI only opens
-a download dialog; tapping the completed download reports that no app can open
-the XPI, even with the correct MIME type. The file-install menu is therefore
-required for this manual path. On desktop, follow Firefox's installation prompt
-or use the add-ons manager's file-install action. Firefox validates signature
-and compatibility; the extension neither installs itself nor reports a completed
-upgrade merely because a download was offered or started.
+**Check for updates** fetches only the configured official experimental feed,
+preserves an unsaved editor on failure, and offers only a validated compatible
+experimental payload. An unpublished or unreachable feed produces a real check
+failure, not an invented update. Numeric version comparison is used for updates,
+never for deciding whether networking is supported. Downloading an XPI does not
+install it: use the browser's installation action and confirm it. The extension
+does not install itself or report an upgrade merely because a download started.
 
 ### Container Runtime: Docker or Podman
 

@@ -1,8 +1,4 @@
-"""Exercise actual Firefox, the installed XPI and actual adapter CLI over Docker.
-
-No extension API is replaced or invoked from injected browser script. Scripts
-below only inspect page DOM or generate genuine fetch/WebSocket traffic.
-"""
+"""Actual Firefox UI, native networking and real OpenSSH fixtures; no API mocks."""
 import argparse
 import hashlib
 import http.client
@@ -13,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
 import traceback
 import uuid
 import zipfile
@@ -22,13 +19,13 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import Select, WebDriverWait
 
-EXTENSION_ID = "firefox@portmap.ylang-ylang.github.io"
-EXTENSION_UUID = "181307fa-a3eb-420c-8fd9-a232d676672a"
-OPTIONS_URL = "moz-extension://" + EXTENSION_UUID + "/options.html"
-ARTIFACTS = Path("/artifacts")
-ORIGINS = ("fixture-a", "fixture-b", "unrelated", "trap")
+EXTENSION_ID = 'firefox@portmap.ylang-ylang.github.io'
+EXTENSION_UUID = '181307fa-a3eb-420c-8fd9-a232d676672a'
+OPTIONS_URL = 'moz-extension://' + EXTENSION_UUID + '/options.html'
+ARTIFACTS = Path('/artifacts')
+ORIGINS = ('node-a', 'node-b', 'unrelated', 'trap')
 
 
 def require(condition, message):
@@ -36,86 +33,56 @@ def require(condition, message):
         raise AssertionError(message)
 
 
-def records(origin, path="/requests"):
+def records(origin, path='/requests'):
     connection = http.client.HTTPConnection(origin, 8080, timeout=5)
     try:
-        connection.request("GET", path)
+        connection.request('GET', path)
         response = connection.getresponse()
-        require(response.status == 200, "Fixture evidence endpoint unavailable")
+        require(response.status == 200, 'Fixture evidence unavailable')
         return json.loads(response.read())
     finally:
         connection.close()
 
 
-def socks_status(host="a.portmap", credentials=("user-a", "pass-a"), methods=b"\x02", port=80, command=1, address_type=3, payload=None):
-    """Exchange real RFC1928/1929 frames with the actual adapter CLI."""
-    with socket.create_connection(("node-a", 18080), timeout=5) as connection:
-        def receive(size):
-            data = bytearray()
-            while len(data) < size:
-                block = connection.recv(size - len(data))
-                require(bool(block), "Actual SOCKS5 server truncated its reply")
-                data.extend(block)
-            return bytes(data)
-        connection.sendall(b"\x05" + bytes((len(methods),)) + methods)
-        selection = receive(2)
-        require(selection[0] == 5, "Actual endpoint did not speak SOCKS5")
-        if selection[1] == 255:
-            return ("method", 255)
-        require(selection[1] == 2, "Adapter did not require RFC1929 authentication")
-        username, password = (value.encode("utf-8") for value in credentials)
-        connection.sendall(b"\x01" + bytes((len(username),)) + username + bytes((len(password),)) + password)
-        authentication = receive(2)
-        require(authentication[0] == 1, "Invalid RFC1929 authentication reply")
-        if authentication[1] != 0:
-            return ("auth", authentication[1])
-        address = bytes((len(host),)) + host.encode("ascii") if address_type == 3 else (b"\x7f\x00\x00\x01" if address_type == 1 else b"\0" * 16)
-        connection.sendall(bytes((5, command, 0, address_type)) + address + port.to_bytes(2, "big"))
-        reply = receive(4)
-        require(reply[0] == 5 and reply[2] == 0, "Invalid RFC1928 CONNECT reply")
-        require(reply[3] in (1, 3, 4), "Invalid SOCKS5 bound-address type")
-        length = 4 if reply[3] == 1 else (16 if reply[3] == 4 else receive(1)[0])
-        receive(length + 2)
-        if reply[1] != 0 or payload is None:
-            return ("connect", reply[1])
-        connection.sendall(payload)
-        response = http.client.HTTPResponse(connection)
-        response.begin()
-        response.read()
-        return ("http", response.status)
-
-
 class Browser:
-    def __init__(self, profile, signed):
-        self.profile = profile
-        self.signed = signed
-        self.driver = None
+    experiments_enabled = True
+
+    def __init__(self, profile, signed=False):
+        self.profile, self.signed, self.driver = profile, signed, None
+        self.sensitive_input = False
         self.start()
 
     def configuration(self):
         options = Options()
-        options.set_capability("acceptInsecureCerts", False)
-        options.set_preference("xpinstall.signatures.required", self.signed)
-        options.set_preference("extensions.webextensions.uuids", json.dumps({EXTENSION_ID: EXTENSION_UUID}))
-        options.set_preference("network.trr.mode", 5)
-        options.set_preference("network.proxy.no_proxies_on", "")
-        options.set_preference("browser.shell.checkDefaultBrowser", False)
-        options.set_preference("browser.startup.page", 0)
-        options.set_preference("datareporting.policy.dataSubmissionEnabled", False)
-        options.set_preference("toolkit.telemetry.enabled", False)
-        options.set_preference("signon.rememberSignons", False)
+        options.set_capability('acceptInsecureCerts', False)
+        options.set_preference('xpinstall.signatures.required', self.signed)
+        options.set_preference('extensions.experiments.enabled', self.experiments_enabled)
+        options.set_preference('extensions.webextensions.uuids', json.dumps({EXTENSION_ID: EXTENSION_UUID}))
+        options.set_preference('network.trr.mode', 5)
+        options.set_preference('network.proxy.no_proxies_on', '')
+        options.set_preference('browser.shell.checkDefaultBrowser', False)
+        options.set_preference('browser.startup.page', 0)
+        options.set_preference('datareporting.policy.dataSubmissionEnabled', False)
+        options.set_preference('toolkit.telemetry.enabled', False)
+        options.set_preference('signon.rememberSignons', False)
+        options.set_preference('marionette.log.level', 'Info')
+        # Browser-native synthetic camera; no JS media API replacement and no
+        # host camera device. Android explicitly selects its emulator backend.
+        options.set_preference('media.navigator.permission.disabled', True)
+        options.set_preference('media.navigator.streams.fake', True)
         return options
 
     def start(self):
         options = self.configuration()
-        options.binary_location = "/opt/firefox/firefox"
-        # Exact profile, never Selenium's automatically cloned one.
-        options.add_argument("-profile")
+        options.binary_location = '/opt/firefox/firefox'
+        options.add_argument('-profile')
         options.add_argument(str(self.profile))
-        options.add_argument("-headless")
-        self.driver = webdriver.Firefox(options=options, service=Service("/app/tests/browser/traced-geckodriver.sh", service_args=["--allow-system-access"], log_output=str(ARTIFACTS / "geckodriver.log")))
-        self.driver.set_page_load_timeout(12)
-        self.driver.set_script_timeout(12)
+        options.add_argument('-headless')
+        self.driver = webdriver.Firefox(options=options, service=Service(
+            '/app/tests/browser/traced-geckodriver.sh', service_args=['--allow-system-access', '--log', 'info'],
+            log_output=str(ARTIFACTS / 'geckodriver.log')))
+        self.driver.set_page_load_timeout(20)
+        self.driver.set_script_timeout(40)
 
     def restart(self, first_url=None):
         self.driver.quit()
@@ -129,14 +96,57 @@ class Browser:
             self.driver.quit()
             self.driver = None
 
-    def assert_no_admission_connections(self):
+    def capture_allowed(self, name):
+        if self.sensitive_input:
+            (ARTIFACTS / (name + '-capture-skipped.json')).write_text(json.dumps({
+                'reason':'Credential editor may contain private material; screenshot intentionally omitted'}))
+            return False
+        return True
+
+    def settle_render(self):
+        return self.driver.execute_async_script('''
+          const done=arguments[arguments.length-1];
+          const timer=setTimeout(()=>done(false),2000);
+          const paint=()=>requestAnimationFrame(()=>requestAnimationFrame(()=>{
+            clearTimeout(timer);done(true);
+          }));
+          Promise.resolve(document.fonts?.ready).then(paint,paint);
+        ''')
+
+    def confirm_dialog(self):
+        self.driver.switch_to.alert.accept()
+
+    def screenshot(self, name):
+        if self.capture_allowed(name):
+            self.settle_render()
+            self.driver.save_screenshot(str(ARTIFACTS / (name + '.png')))
+
+    def assert_network_paths(self):
         import network_evidence
-        self.close()  # Finish actual syscall recording before inspecting it.
+        self.close()
         network_evidence.desktop(ARTIFACTS)
 
     def options(self):
         self.driver.get(OPTIONS_URL)
-        WebDriverWait(self.driver, 10).until(lambda driver: driver.find_element(By.ID, "status").get_attribute("data-state") == "ready")
+        self.wait_options()
+
+    def wait_options(self):
+        WebDriverWait(self.driver, 15).until(lambda driver:
+            driver.find_element(By.ID, 'status').get_attribute('data-state') in ('ready', 'unsupported', 'error'))
+        require(self.driver.execute_script('return document.visibilityState') == 'visible', 'Options are not native-visible')
+
+    def focus_page(self, url):
+        def visible(driver):
+            matches = []
+            for handle in driver.window_handles:
+                driver.switch_to.window(handle)
+                if driver.current_url == url and driver.execute_script('return document.visibilityState') == 'visible':
+                    matches.append(handle)
+            if len(matches) != 1:
+                return False
+            driver.switch_to.window(matches[0])
+            return True
+        WebDriverWait(self.driver, 20).until(visible)
 
     def cards(self, domain):
         return self.driver.find_elements(By.CSS_SELECTOR, 'article[data-domain="' + domain + '"]')
@@ -144,344 +154,588 @@ class Browser:
     def action(self, domain, action):
         self.options()
         cards = self.cards(domain)
-        require(len(cards) == 1, "Expected one stored connection for " + domain)
+        require(len(cards) == 1, 'Expected one connection for ' + domain)
         cards[0].find_element(By.CSS_SELECTOR, '[data-action="' + action + '"]').click()
-        if action == "delete":
-            try:
-                self.driver.switch_to.alert.accept()
-            except WebDriverException:
-                pass  # UI may use an inline confirmation instead of a modal.
-            WebDriverWait(self.driver, 5).until(lambda _driver: not self.cards(domain))
-        elif action == "toggle":
-            WebDriverWait(self.driver, 5).until(lambda driver: driver.find_element(By.ID, "status").get_attribute("data-state") == "ready")
+        if action == 'delete':
+            self.confirm_dialog()
+            WebDriverWait(self.driver, 10).until(lambda _: not self.cards(domain))
+        elif action == 'toggle':
+            WebDriverWait(self.driver, 10).until(lambda d: d.find_element(By.ID, 'status').get_attribute('data-state') == 'ready')
 
-    def save(self, domain, host, user, password, port=18080, edit=False):
+    def advanced(self, opened=True):
+        details = self.driver.find_element(By.ID, 'advanced-settings')
+        if details.get_property('open') is not opened:
+            details.find_element(By.CSS_SELECTOR, 'summary').click()
+        WebDriverWait(self.driver, 10).until(lambda _: details.get_property('open') is opened)
+
+    def ssh_advanced(self, opened=True):
+        details = self.driver.find_element(By.ID, 'ssh-advanced-settings')
+        if details.get_property('open') is not opened:
+            details.find_element(By.CSS_SELECTOR, 'summary').click()
+        WebDriverWait(self.driver, 10).until(lambda _: details.get_property('open') is opened)
+
+    def saved_connection(self, domain):
+        # Observe only public endpoint metadata, never stored authentication.
+        result = self.driver.execute_async_script('''
+          const [domain,done]=arguments;
+          browser.storage.local.get('config').then(({config})=>{
+            const entry=config?.connections.find(entry=>entry.domain===domain);
+            done({connection:entry?{id:entry.id,domain:entry.domain,mode:entry.mode,
+              httpPort:entry.httpPort,httpsPort:entry.httpsPort}:null});
+          }).catch(error=>done({error:String(error)}));
+        ''', domain)
+        require('connection' in result, 'Cannot observe persisted endpoint metadata')
+        return result['connection']
+
+    def enter(self, field, value):
+        if field in ('http-port', 'https-port'):
+            self.advanced()
+        if field in ('ssh-port', 'ssh-target-host', 'ssh-host-key', 'ssh-password',
+                     'ssh-private-key', 'ssh-public-key', 'ssh-passphrase'):
+            self.ssh_advanced()
+        element = self.driver.find_element(By.ID, field)
+        element.clear()
+        if value:
+            element.send_keys(str(value))
+
+    def save(self, domain, host, *, mode='direct', auth='password', metadata=None, fault=None, edit=False):
+        self.sensitive_input = self.sensitive_input or mode == 'ssh'
         if edit:
-            self.action(domain, "edit")
+            self.action(domain, 'edit')
         else:
             self.options()
-        values = {"name": domain, "domain": domain, "proxy-host": host,
-                  "proxy-port": str(port), "username": user, "password": password}
-        for name, value in values.items():
-            element = self.driver.find_element(By.ID, name)
-            element.clear()
-            element.send_keys(value)
-        enabled = self.driver.find_element(By.ID, "enabled")
+        self.enter('name', domain.removesuffix('.portmap'))
+        self.enter('domain', domain)
+        Select(self.driver.find_element(By.ID, 'mode')).select_by_value(mode)
+        self.enter('host', host)
+        self.enter('http-port', 18081 if fault == 'direct-port' else 8080)
+        self.enter('https-port', 8443)
+        if mode == 'ssh':
+            self.ssh_advanced()
+            for field, value in (('ssh-username', metadata['username']),
+                                 ('ssh-port', 18081 if fault == 'ssh-port' else metadata['sshPort']),
+                                 ('ssh-target-host', '127.0.0.1'),
+                                 ('ssh-host-key', '0' * 64 if fault == 'pin' else metadata['hostKeySha256Hex'])):
+                self.enter(field, value)
+            Select(self.driver.find_element(By.ID, 'ssh-auth-type')).select_by_value(auth)
+            replacement = self.driver.find_element(By.ID, 'replace-credentials')
+            if replacement.is_displayed() and not replacement.is_selected():
+                replacement.click()
+            if auth == 'password':
+                self.enter('ssh-password', 'invalid-' + metadata['password'] if fault == 'password' else metadata['password'])
+            else:
+                self.enter('ssh-private-key', metadata['privateKey'])
+                self.enter('ssh-public-key', metadata['publicKey'])
+                self.enter('ssh-passphrase', metadata.get('passphrase', ''))
+        enabled = self.driver.find_element(By.ID, 'enabled')
         if not enabled.is_selected():
             enabled.click()
-        self.driver.find_element(By.ID, "save").click()
-        WebDriverWait(self.driver, 5).until(lambda driver: driver.find_element(By.ID, "name").get_attribute("value") == "")
-        require(len(self.cards(domain)) == 1, "Connection was not saved through actual options UI")
+        self.driver.find_element(By.ID, 'save').click()
+        WebDriverWait(self.driver, 15).until(lambda d:
+            d.find_element(By.ID, 'name').get_attribute('value') == '' and len(self.cards(domain)) == 1)
+        require(self.cards(domain)[0].get_attribute('data-mode') == mode, 'Wrong saved transport mode')
+        self.sensitive_input = False
 
-    def page(self, url, node, navigate=True):
+    def page(self, url, node, *, loopback=None, navigate=True):
         if navigate:
             self.driver.get(url)
-        require(self.driver.current_url == url, "Original address was replaced: " + self.driver.current_url)
-        evidence = json.loads(self.driver.find_element(By.ID, "evidence").text)
-        require(evidence["node"] == node, "Incorrect node: " + repr(evidence))
-        require(not evidence["authorization"] and not evidence["proxyAuthorization"], "Credentials leaked to origin")
+        require(self.driver.current_url == url, 'Original address replaced')
+        require(self.driver.execute_script('return document.visibilityState') == 'visible', 'App loaded in hidden context')
+        evidence = json.loads(self.driver.find_element(By.ID, 'evidence').text)
+        require(evidence['node'] == node, 'Wrong receiver node')
+        require(not evidence['authorization'] and not evidence['proxyAuthorization'], 'Proxy credential leaked to origin')
+        if loopback is not None:
+            require(evidence['peerLoopback'] is loopback, 'Receiver peer contradicts selected transport')
+        WebDriverWait(self.driver, 10).until(lambda d: d.execute_script('return window.fixtureAsset') == node)
+        require(self.driver.execute_script("return getComputedStyle(document.getElementById('asset-proof')).color") == 'rgb(1, 2, 3)', 'Real stylesheet did not load')
         return evidence
 
-    def denied(self, host, label):
-        # Firefox retains the prior document when webRequest cancels navigation.
-        # Clear it first so its DOM cannot masquerade as this probe's response.
-        self.driver.get("about:blank")
-        marker = "/denied-" + label + "-" + uuid.uuid4().hex
-        # An HTTP error document is also a rejection, but a
-        # working origin page must never be accepted merely because get() did
-        # not throw. Evidence from every actual origin and the DNS trap decides.
+    def denied(self, host, label, scheme='http'):
+        self.driver.get('about:blank')
+        marker = '/denied-' + label + '-' + uuid.uuid4().hex
         try:
-            self.driver.get("http://" + host + marker)
+            self.driver.get(scheme + '://' + host + marker)
         except (TimeoutException, WebDriverException):
             try:
-                self.driver.execute_script("window.stop()")
+                self.driver.execute_script('window.stop()')
             except WebDriverException:
                 pass
-        require(not self.driver.find_elements(By.ID, "evidence"), "Blocked request rendered an origin document")
+        require(not self.driver.find_elements(By.ID, 'evidence'), 'Blocked request rendered an origin document')
         for origin in ORIGINS:
-            require(not any(marker in row["path"] for row in records(origin)), "Blocked request reached " + origin)
+            require(not any(marker in row['path'] for row in records(origin)), 'Blocked request reached ' + origin)
 
-    def denied_websocket(self):
-        self.page("http://unrelated:8080/unmapped-ws-context", "unrelated")
-        host = "ws-unmapped-" + uuid.uuid4().hex + ".portmap"
-        result = self.driver.execute_async_script("""
-            const [url, done] = arguments;
-            const ws = new WebSocket(url);
-            const timer = setTimeout(() => { ws.close(); done({timeout:true}); }, 8000);
-            ws.onopen = () => { clearTimeout(timer); done({opened:true}); ws.close(); };
-            ws.onerror = () => { clearTimeout(timer); done({blocked:true}); };
-        """, "ws://" + host + "/unmapped-ws-probe")
-        require(result.get("blocked") is True, "Unmapped WebSocket did not reject: " + repr(result))
-        for origin in ORIGINS:
-            require(not any(row["host"].split(":")[0] == host for row in records(origin)), "Unmapped WebSocket reached " + origin)
-
-    def fetch(self, path, method="GET", body=None, headers=None):
-        result = self.driver.execute_async_script("""
-            const [path, method, body, headers, done] = arguments;
-            fetch(path, {method, body, headers, cache:'no-store', signal:AbortSignal.timeout(8000)})
-              .then(async response => done({status:response.status, data:await response.json()}))
-              .catch(error => done({error:String(error)}));
-        """, path, method, body, headers or {})
-        require(result.get("status") == 200, "Real page fetch failed: " + repr(result))
-        return result["data"]
+    def fetch(self, path, method='GET', body=None, headers=None):
+        result = self.driver.execute_async_script('''
+          const [path, method, body, headers, done] = arguments;
+          fetch(path,{method,body,headers,cache:'no-store',signal:AbortSignal.timeout(15000)})
+            .then(async r=>done({status:r.status,data:await r.json()})).catch(e=>done({error:String(e)}));
+        ''', path, method, body, headers or {})
+        require(result.get('status') == 200, 'Actual page fetch failed')
+        return result['data']
 
     def websocket(self, scheme, host):
-        result = self.driver.execute_async_script("""
-            const [url, done] = arguments;
-            const ws = new WebSocket(url);
-            const timeout = setTimeout(() => { ws.close(); done({error:'timeout'}); }, 8000);
-            ws.onopen = () => ws.send('portmap-real-websocket');
-            ws.onerror = () => { clearTimeout(timeout); done({error:'websocket error'}); };
-            ws.onmessage = event => { clearTimeout(timeout); done(JSON.parse(event.data)); ws.close(); };
-        """, scheme + "://" + host + "/ws")
-        require(result.get("message") == "portmap-real-websocket", "Actual WebSocket echo failed: " + repr(result))
-        require(not result["authorization"] and not result["proxyAuthorization"], "WebSocket credentials leaked")
+        result = self.driver.execute_async_script('''
+          const [url,done]=arguments; const ws=new WebSocket(url);
+          const timer=setTimeout(()=>{ws.close();done({error:'timeout'});},15000);
+          ws.onopen=()=>ws.send('portmap-real-websocket-✓');
+          ws.onerror=()=>{clearTimeout(timer);done({error:'websocket'});};
+          ws.onmessage=e=>{clearTimeout(timer);done(JSON.parse(e.data));ws.close();};
+        ''', scheme + '://' + host + '/ws')
+        require(result.get('message') == 'portmap-real-websocket-✓', 'WebSocket payload corrupted')
+        require(not result['proxyAuthorization'], 'Proxy credential leaked in WebSocket upgrade')
         return result
 
 
+def advanced_ports(browser, case, host):
+    """Exercise native details disclosure, form validation and saved endpoints."""
+    driver = browser.driver
+
+    def value(field):
+        return driver.find_element(By.ID, field).get_attribute('value')
+
+    def closed(http='80', https='443'):
+        require(driver.find_element(By.ID, 'advanced-settings').get_property('open') is False,
+                'Advanced settings unexpectedly opened')
+        require(not driver.find_element(By.ID, 'http-port').is_displayed() and
+                not driver.find_element(By.ID, 'https-port').is_displayed(), 'Collapsed ports remain visible')
+        require(value('http-port') == http and value('https-port') == https,
+                'Collapsed editor lost its endpoint values')
+
+    def screenshot(name):
+        # Keep the disclosure and native validation target inside the viewport.
+        driver.execute_script('document.getElementById("advanced-settings").scrollIntoView({behavior:"instant",block:"center"})')
+        browser.screenshot(name)
+
+    def begin(label):
+        browser.options()
+        driver.refresh()
+        browser.wait_options()
+        closed()
+        # Reuse the fixture's real *.a.portmap certificate for HTTPS routing.
+        domain = 'ports-' + label + '.a.portmap'
+        browser.enter('name', 'ports-' + label)
+        browser.enter('domain', domain)
+        browser.enter('host', host)
+        return domain
+
+    def save(domain):
+        driver.find_element(By.ID, 'save').click()
+        WebDriverWait(driver, 15).until(lambda _: value('name') == '' and len(browser.cards(domain)) == 1)
+        closed()
+        return browser.saved_connection(domain)
+
+    def persisted(entry, http, https):
+        require(entry and entry['httpPort'] == http and entry['httpsPort'] == https,
+                'Persisted ports differ from the actual form submission')
+        return entry
+
+    def defaults():
+        domain = begin('defaults')
+        screenshot('advanced-defaults-collapsed')
+        original = persisted(save(domain), 80, 443)
+        browser.action(domain, 'edit')
+        closed()
+        browser.enter('name', 'Renamed default endpoint')
+        closed()
+        renamed = persisted(save(domain), 80, 443)
+        require(renamed['id'] == original['id'], 'Editing default ports replaced the saved identity')
+        browser.action(domain, 'delete')
+        return {'saved': renamed, 'advanced_closed_at_save': True, 'ports_touched': False}
+    case('advanced-default-ports-save-closed-and-reedit', defaults, fatal=True)
+
+    def custom():
+        domain = begin('custom')
+        browser.enter('http-port', '8080')
+        browser.enter('https-port', '8443')
+        require(driver.find_element(By.ID, 'http-port').is_displayed(), 'User interaction did not reveal ports')
+        screenshot('advanced-custom-ports-expanded')
+        browser.advanced(False)
+        original = persisted(save(domain), 8080, 8443)
+        browser.action(domain, 'edit')
+        closed('8080', '8443')
+        browser.advanced()
+        require(value('http-port') == '8080' and value('https-port') == '8443', 'Edit replaced custom ports with defaults')
+        screenshot('advanced-custom-ports-reedit')
+        browser.advanced(False)
+        browser.enter('name', 'Renamed custom endpoint')
+        renamed = persisted(save(domain), 8080, 8443)
+        require(renamed['id'] == original['id'], 'Editing custom ports replaced the saved identity')
+        route = browser.page('http://' + domain + '/advanced-custom-' + uuid.uuid4().hex, 'node-a', loopback=False)
+        tls_route = browser.page('https://' + domain + '/advanced-custom-tls-' + uuid.uuid4().hex, 'node-a', loopback=False)
+        browser.action(domain, 'delete')
+        return {'saved': renamed, 'http_route': route, 'https_route': tls_route}
+    case('advanced-custom-ports-save-reedit-and-route', custom, fatal=True)
+
+    def no_https():
+        domain = begin('no-https')
+        browser.enter('http-port', '8080')
+        browser.enter('https-port', '')
+        screenshot('advanced-https-disabled')
+        browser.advanced(False)
+        original = persisted(save(domain), 8080, None)
+        browser.action(domain, 'edit')
+        closed('8080', '')
+        browser.enter('name', 'Renamed HTTP-only endpoint')
+        renamed = persisted(save(domain), 8080, None)
+        require(renamed['id'] == original['id'], 'Editing HTTP-only ports replaced the saved identity')
+        route = browser.page('http://' + domain + '/advanced-no-https-' + uuid.uuid4().hex, 'node-a', loopback=False)
+        browser.denied(domain, 'advanced-disabled-https', scheme='https')
+        browser.action(domain, 'delete')
+        return {'saved': renamed, 'http_route': route, 'https_blocked': True}
+    case('advanced-null-https-preserved-through-edit-and-route', no_https, fatal=True)
+
+    def reset():
+        domain = begin('reset')
+        browser.enter('http-port', '8123')
+        browser.enter('https-port', '')
+        original = persisted(save(domain), 8123, None)
+        browser.action(domain, 'edit')
+        closed('8123', '')
+        browser.enter('http-port', '9191')
+        driver.find_element(By.ID, 'cancel-edit').click()
+        closed()
+        require(value('name') == '' and browser.saved_connection(domain) == original,
+                'Cancel changed saved ports or failed to clear the new editor')
+        browser.action(domain, 'edit')
+        browser.advanced()
+        driver.find_element(By.ID, 'reset').click()
+        browser.confirm_dialog()
+        WebDriverWait(driver, 15).until(lambda _: not browser.cards(domain) and value('name') == '')
+        closed()
+        require(browser.saved_connection(domain) is None, 'Reset retained the saved connection')
+        screenshot('advanced-reset-restores-defaults')
+        return {'cancel_restored_defaults': True, 'reset_restored_defaults': True, 'saved_connection_removed': True}
+    case('advanced-cancel-and-reset-restore-new-defaults', reset, fatal=True)
+
+    def invalid_hidden():
+        observations = []
+        for label, field, invalid in (('http-low', 'http-port', '0'),
+                                      ('http-required', 'http-port', ''),
+                                      ('https-high', 'https-port', '65536')):
+            domain = begin('invalid-' + label)
+            browser.enter(field, invalid)
+            browser.advanced(False)
+            require(not driver.find_element(By.ID, field).is_displayed(), 'Invalid field was not hidden before Save')
+            driver.execute_script('''
+              window.portValidationEvents={invalid:[],submits:0};
+              document.getElementById('connection-form').addEventListener('invalid',event=>{
+                window.portValidationEvents.invalid.push(event.target.id);
+              },true);
+              document.getElementById('connection-form').addEventListener('submit',()=>{
+                window.portValidationEvents.submits++;
+              },true);
+            ''')
+            driver.find_element(By.ID, 'save').click()
+            WebDriverWait(driver, 10).until(lambda _:
+                driver.find_element(By.ID, 'advanced-settings').get_property('open') is True and
+                driver.find_element(By.ID, field).is_displayed())
+            observed = driver.execute_script('''
+              const field=document.getElementById(arguments[0]);
+              return {...window.portValidationEvents,active:document.activeElement.id,
+                valid:field.validity.valid,visible:field.getClientRects().length>0,
+                validationMessage:field.validationMessage};
+            ''', field)
+            require(field in observed['invalid'] and observed['submits'] == 0 and not observed['valid'] and
+                    observed['visible'] and observed['validationMessage'], 'Native invalid-port validation was bypassed')
+            require(not browser.cards(domain) and browser.saved_connection(domain) is None and value('name'),
+                    'Invalid hidden port saved a connection or erased the draft')
+            screenshot('advanced-invalid-' + label + '-revealed')
+            # Android can reveal a native-invalid field without auto-focusing
+            # it. Record that difference; require the user can tap and repair it.
+            corrected = '8080' if field == 'http-port' else '8443'
+            driver.find_element(By.ID, field).click()
+            browser.enter(field, corrected)
+            require(value(field) == corrected and driver.execute_script(
+                'return document.getElementById(arguments[0]).validity.valid', field),
+                'Real user input did not correct the revealed invalid port')
+            screenshot('advanced-invalid-' + label + '-corrected')
+            saved = persisted(save(domain), 8080 if field == 'http-port' else 80,
+                              8443 if field == 'https-port' else 443)
+            submits = driver.execute_script('return window.portValidationEvents.submits')
+            require(submits == 1, 'Corrected port did not produce exactly one native form submission')
+            observations.append({'field': field, 'input': invalid, **observed, 'saved': False,
+                                 'correction': {'input': corrected, 'submits': submits, 'saved': saved}})
+            browser.action(domain, 'delete')
+        browser.options()
+        driver.refresh()
+        browser.wait_options()
+        return observations
+    case('advanced-invalid-hidden-ports-expand-block-and-allow-correction', invalid_hidden, fatal=True)
+
+
+def observe(browser):
+    global OPTIONS_URL
+    browser.driver.set_context('chrome')
+    try:
+        result = browser.driver.execute_async_script('''
+          const [id,done]=arguments;
+          (async()=>{
+            const {AddonManager}=ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs');
+            const a=await AddonManager.getAddonByID(id);
+            const uuid=JSON.parse(Services.prefs.getStringPref('extensions.webextensions.uuids','{}'))[id];
+            done({addon_state:a&&{active:a.isActive,appDisabled:a.appDisabled,temporary:a.temporarilyInstalled,signedState:a.signedState},
+              options_url:uuid&&'moz-extension://'+uuid+'/options.html',processID:Services.appinfo.processID,
+              browser_version:Services.appinfo.version,buildID:Services.appinfo.appBuildID,
+              signature_required:Services.prefs.getBoolPref('xpinstall.signatures.required'),
+              experiments_preference:Services.prefs.getBoolPref('extensions.experiments.enabled')});
+          })().catch(e=>done({error:String(e)}));
+        ''', EXTENSION_ID)
+    finally:
+        browser.driver.set_context('content')
+    require(result.get('addon_state', {}).get('active') is True, 'Actual experimental addon not active')
+    require(result['addon_state']['temporary'] is False, 'Install was temporary')
+    require(result.get('options_url'), 'No native options URL')
+    OPTIONS_URL = result['options_url']
+    return result
+
+
+def profile_at(directory):
+    directory.mkdir()
+    subprocess.run(['certutil','-N','--empty-password','-d','sql:' + str(directory)], check=True)
+    subprocess.run(['certutil','-A','-n','Isolated fixture CA','-t','C,,','-i','/certs/ca.pem','-d','sql:' + str(directory)], check=True)
+    return directory
+
+
 def run(args, proof, browser_factory):
-    ARTIFACTS.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="portmap-firefox-isolated-") as work:
-        work = Path(work)
-        unsigned = work / "development.xpi"
-        subprocess.run(["python", "/app/tools/build_firefox_extension.py", "build", "--output", str(unsigned)], check=True)
-        xpi = Path(args.xpi) if args.xpi else unsigned
-        raw = xpi.read_bytes()
-        proof["extension_sha256"] = hashlib.sha256(raw).hexdigest()
-        shutil.copyfile(xpi, ARTIFACTS / "extension-under-test.xpi")
-        with zipfile.ZipFile(xpi) as archive:
-            manifest = json.loads(archive.read("manifest.json"))
-        proof["extension_version"] = manifest["version"]
-        require(manifest.get("browser_specific_settings", {}).get("gecko", {}).get("id") == EXTENSION_ID, "XPI has unexpected identity")
-        profile = work / "profile"
-        profile.mkdir()
-        subprocess.run(["certutil", "-N", "--empty-password", "-d", "sql:" + str(profile)], check=True)
-        subprocess.run(["certutil", "-A", "-n", "Portmap isolated fixture CA", "-t", "C,,", "-i", "/certs/ca.pem", "-d", "sql:" + str(profile)], check=True)
-        shutil.copyfile("/app/browser-installed.txt", ARTIFACTS / "python-versions.txt")
-        shutil.copyfile("/app/browser-system-packages.txt", ARTIFACTS / "system-versions.txt")
-        browser = browser_factory(profile, args.require_signed)
-        driver = browser.driver
-        proof["browser_version"] = driver.capabilities["browserVersion"]
-        proof["driver_version"] = driver.capabilities.get("moz:geckodriverVersion")
-        require(driver.capabilities["browserName"] == "firefox", "Not a real Firefox session")
-        def case(name, action, fatal=False):
-            row = {"name": name, "status": "failed"}
-            proof["cases"].append(row)
-            try:
-                action()
-            except Exception:
-                proof.setdefault("case_errors", {})[name] = traceback.format_exc()
+    browser = None
+    def save_proof():
+        (ARTIFACTS / 'result.json').write_text(json.dumps(proof, indent=2))
+    def case(name, action, fatal=False):
+        row = {'name':name,'status':'failed','started_at':time.time()}
+        proof['cases'].append(row)
+        try:
+            value = action()
+            if value is not None:
+                proof.setdefault('observations', {})[name] = value
+            row['status'] = 'passed'
+        except Exception:
+            row['error'] = traceback.format_exc()
+            if browser and browser.driver:
                 try:
-                    if browser.driver:
-                        browser.driver.save_screenshot(str(ARTIFACTS / (name + "-failed.png")))
+                    browser.screenshot(name + '-failed')
+                    row['current_url'] = browser.driver.current_url
+                    if row['current_url'] == OPTIONS_URL:
+                        # Only the application's fixed validation message, never
+                        # editor values, whole DOM or connection snapshots.
+                        messages = browser.driver.find_elements(By.ID, 'error')
+                        if messages:
+                            row['ui_error'] = messages[0].text[:300]
                 except WebDriverException:
                     pass
-                if fatal:
-                    raise
-            else:
-                row["status"] = "passed"
+            if fatal:
+                raise
+        finally:
+            row['finished_at'] = time.time()
+            save_proof()
+        return row['status'] == 'passed'
+
+    with tempfile.TemporaryDirectory(prefix='portmap-browser-capability-') as directory:
+        work = Path(directory)
+        xpi = Path(args.xpi) if args.xpi else work / 'experimental.xpi'
+        if not args.xpi:
+            subprocess.run(['python','/app/tools/build_firefox_extension.py','build','--output',str(xpi)], check=True)
+        subprocess.run(['python','/app/tools/build_firefox_extension.py','validate','--xpi',str(xpi)], check=True)
+        proof['extension_sha256'] = hashlib.sha256(xpi.read_bytes()).hexdigest()
+        shutil.copyfile(xpi, ARTIFACTS / 'extension-under-test.xpi')
+        with zipfile.ZipFile(xpi) as archive:
+            proof['extension_version'] = json.loads(archive.read('manifest.json'))['version']
+        metadata = {letter:json.loads(Path('/meta', letter, 'client.json').read_text()) for letter in ('a','b')}
+        addresses = {letter:socket.gethostbyname('node-' + letter) for letter in ('a','b')}
+        proof['targets'] = {letter:{'host':addresses[letter],'sshPort':2222,'httpPort':8080,'httpsPort':8443} for letter in addresses}
         try:
-            def external_isolation():
-                try:
-                    connection = socket.create_connection(("1.1.1.1", 443), timeout=2)
-                except OSError:
-                    return
-                connection.close()
-                raise AssertionError("Fixture container has external network access")
-            case("fixture-external-network-isolation", external_isolation, fatal=True)
-            case("ordinary-browsing-before-install", lambda: browser.page("http://unrelated:8080/baseline", "unrelated"))
-            if args.require_signed:
-                def signature_enforcement():
-                    try:
-                        installed = driver.install_addon(str(unsigned), temporary=False)
-                    except WebDriverException as error:
-                        require("signed" in str(error).lower() or "signature" in str(error).lower(), "Unsigned control failed for a reason other than signature verification")
-                    else:
-                        driver.uninstall_addon(installed)
-                        raise AssertionError("Browser accepted unsigned control with --require-signed")
-                    proof["signature_required"] = True
-                case("browser-rejects-unsigned-control", signature_enforcement, fatal=True)
-            case("actual-xpi-installed", lambda: require(driver.install_addon(str(xpi), temporary=False) == EXTENSION_ID, "Actual extension install failed"), fatal=True)
-            case("unconfigured-fails-closed", lambda: browser.denied("a.portmap", "unconfigured"))
-            case("unconfigured-websocket-fails-closed", browser.denied_websocket)
+            browser_factory.experiments_enabled = False
+            browser = browser_factory(profile_at(work / 'unsupported-profile'), False)
+            browser.driver.install_addon(str(xpi), temporary=False)
+            proof['unsupported_install'] = observe(browser)
+            def unavailable():
+                browser.options()
+                require(browser.driver.find_element(By.ID,'status').get_attribute('data-state') == 'unsupported', 'Missing APIs did not show unsupported state')
+                require(browser.driver.find_element(By.ID,'capability-guidance').is_displayed(), 'Missing compatible-browser guidance')
+                require(not browser.driver.find_element(By.ID,'mode').is_enabled() and not browser.driver.find_element(By.ID,'save').is_enabled(), 'Unsupported connection controls enabled')
+                require(not browser.driver.find_element(By.ID, 'qr-open').is_enabled(), 'Unsupported capability allowed QR onboarding')
+                browser.screenshot('unsupported-capability')
+                browser.denied('a.portmap','capability-unavailable')
+                browser.page('http://unrelated:8080/unsupported-ordinary','unrelated')
+            case('actual-missing-capability-blocks-both-modes', unavailable, fatal=True)
+            browser.close()
+            browser = None
+            browser_factory.experiments_enabled = True
+            browser = browser_factory(profile_at(work / 'supported-profile'), False)
+            proof['browser_version'] = browser.driver.capabilities['browserVersion']
+            require(browser.driver.capabilities['acceptInsecureCerts'] is False, 'TLS validation bypassed')
+            browser.driver.install_addon(str(xpi), temporary=False)
+            admitted = observe(browser)
+            proof.update(addon_state=admitted['addon_state'], signature_required=admitted['signature_required'], experimental=True)
+            proof['supported_install'] = admitted
+            def capability_ready():
+                browser.options()
+                ready = browser.driver.find_element(By.ID,'status').get_attribute('data-state') == 'ready'
+                enabled = browser.driver.find_element(By.ID,'mode').is_enabled()
+                require(ready and enabled, 'Actual native capability self-check did not enable editor')
+                proof['capability_available'] = True
+                browser.screenshot('capability-ready')
+            case('actual-native-self-check-enables-both-modes', capability_ready, fatal=True)
+            case('unconfigured-fails-closed', lambda: browser.denied('a.portmap','unconfigured'))
+            advanced_ports(browser, case, addresses['a'])
             import autofill
             autofill.exercise(browser, case)
-            case("save-two-independent-connections", lambda: (browser.save("a.portmap", "node-a", "user-a", "pass-a"), browser.save("b.portmap", "node-b", "user-b:β", "pass-b-密")))
-            def unavailable_update_feed():
-                # This fixture intentionally has no external egress: exercise a
-                # real failed fetch, not a mocked successful installation.
+            case('save-independent-direct-and-ssh-nodes', lambda: (
+                browser.save('a.portmap',addresses['a']),
+                browser.save('b.portmap',addresses['b'],mode='ssh',metadata=metadata['b'])), fatal=True)
+            def open_from_card():
+                browser.action('a.portmap', 'open')
+                browser.focus_page('http://a.portmap/')
+                result = browser.page('http://a.portmap/', 'node-a', loopback=False, navigate=False)
+                browser.screenshot('open-node-from-options')
+                return result
+            case('open-node-from-real-options-control', open_from_card, fatal=True)
+
+            def application(domain, node, ssh, scheme='http'):
+                label = domain.split('.')[0] + '-' + ('ssh' if ssh else 'direct') + '-' + scheme
+                row = browser.page(scheme + '://' + domain + '/application-' + uuid.uuid4().hex,node,loopback=ssh)
+                echo = browser.fetch('/echo','POST','portmap-body-✓',{'Authorization':'Bearer fixture-origin-token'})
+                require(echo['body'] == 'portmap-body-✓' and echo['originAuthorizationCorrect'] and echo['peerLoopback'] is ssh, 'POST/origin auth/path mismatch')
+                ws = browser.websocket('wss' if scheme == 'https' else 'ws',domain)
+                require(ws['peerLoopback'] is ssh, 'WebSocket used wrong transport')
+                gate = browser.driver.execute_async_script("const done=arguments[0];fetch('/ssh-only').then(r=>done(r.status)).catch(()=>done(0));")
+                require(gate == (200 if ssh else 403), 'SSH-only gate contradicts transport')
+                browser.screenshot(label)
+                return {'page':row,'post':echo,'websocket':ws,'ssh_only_status':gate}
+
+            def binary():
+                result = browser.driver.execute_async_script('''
+                  const done=arguments[0];(async()=>{
+                    const bytes=Uint8Array.from({length:131072},(_,i)=>i%256);
+                    const response=await fetch('/binary-echo',{method:'POST',body:bytes});
+                    const got=new Uint8Array(await response.arrayBuffer());
+                    const rows=await Promise.all(Array.from({length:4},(_,i)=>fetch('/echo?parallel='+i).then(r=>r.json())));
+                    const binaryWs=await new Promise((resolve,reject)=>{
+                      const ws=new WebSocket(location.origin.replace(/^http/,'ws')+'/ws');ws.binaryType='arraybuffer';
+                      const timer=setTimeout(()=>{ws.close();reject(new Error('timeout'));},15000);
+                      ws.onopen=()=>ws.send(bytes.subarray(0,32768));ws.onerror=()=>{clearTimeout(timer);reject(new Error('WebSocket failed'));};
+                      ws.onmessage=e=>{clearTimeout(timer);const data=new Uint8Array(e.data);ws.close();resolve(data.length===32768&&data.every((v,i)=>v===i%256));};
+                    });
+                    done({status:response.status,binary:got.length===bytes.length&&got.every((v,i)=>v===i%256),rows,binaryWs});
+                  })().catch(e=>done({error:String(e)}));
+                ''')
+                require(result.get('status') == 200 and result.get('binary') is True and result.get('binaryWs') is True, 'Binary transfer failed')
+                require([row['path'] for row in result['rows']] == ['/echo?parallel=' + str(i) for i in range(4)], 'Concurrent channels crossed')
+                return result
+
+            for domain,node,ssh in [('a.portmap','node-a',False),('b.portmap','node-b',True)]:
+                case(domain + '-http-app',lambda d=domain,n=node,s=ssh: application(d,n,s),fatal=True)
+                case(domain + '-binary-concurrency',binary)
+                case(domain + '-https-wss',lambda d=domain,n=node,s=ssh: application(d,n,s,'https'))
+                case(domain + '-descendant',lambda d=domain,n=node,s=ssh: application('app.'+d,n,s))
+            case('ssh-key-configuration',lambda: browser.save('b.portmap',addresses['b'],mode='ssh',auth='key',metadata=metadata['b'],edit=True),fatal=True)
+            case('ssh-key-http-app',lambda: application('b.portmap','node-b',True),fatal=True)
+            case('ssh-key-binary-concurrency',binary)
+            case('ssh-key-https-wss',lambda: application('b.portmap','node-b',True,'https'))
+            case('unknown-namespace-rejected',lambda: browser.denied('unknown.portmap','unknown'))
+
+            def bad_connection(fault):
+                browser.save('b.portmap',addresses['b'],mode='ssh',metadata=metadata['b'],fault=fault,edit=True)
+                browser.denied('b.portmap',fault)
+                browser.page('http://a.portmap/other-node-remains-' + fault,'node-a',loopback=False)
+                browser.page('http://unrelated:8080/ordinary-after-' + fault,'unrelated')
+            for fault in ('password','pin','ssh-port'):
+                case('ssh-reject-' + fault,lambda f=fault: bad_connection(f))
+            browser.save('b.portmap',addresses['b'],mode='ssh',auth='key',metadata=metadata['b'],edit=True)
+            def unreachable_direct():
+                browser.save('a.portmap', addresses['a'], fault='direct-port', edit=True)
+                browser.denied('a.portmap', 'direct-port')
+                application('b.portmap', 'node-b', True)
+                browser.save('a.portmap', addresses['a'], edit=True)
+            case('unreachable-direct-keeps-other-node', unreachable_direct)
+            def lost_session():
+                application('b.portmap','node-b',True)
+                gate = uuid.uuid4().hex
+                (ARTIFACTS/'control-request.json').write_text(json.dumps({'gate':gate,'action':'terminate-ssh','service':'node-b'}))
+                deadline = time.monotonic()+60
+                while time.monotonic()<deadline:
+                    path=ARTIFACTS/'control-response.json'
+                    if path.exists():
+                        response=json.loads(path.read_text())
+                        if response.get('gate')==gate:
+                            require(response.get('terminated',0)>0,'No live owned SSH process terminated')
+                            break
+                    time.sleep(.1)
+                else:
+                    raise AssertionError('Owned SSH interruption controller timed out')
+                browser.denied('b.portmap','active-session-loss')
+                browser.page('http://a.portmap/independent-after-ssh-loss','node-a',loopback=False)
+                return response
+            case('active-ssh-loss-no-direct-fallback',lost_session)
+            # Explicitly reapply after a failed session: this is not an auto-reconnect claim.
+            browser.save('b.portmap',addresses['b'],mode='ssh',auth='key',metadata=metadata['b'],edit=True)
+            def disabled():
+                browser.action('a.portmap','toggle')
+                browser.denied('a.portmap','disabled')
+                application('b.portmap','node-b',True)
+                browser.action('a.portmap','toggle')
+            case('disabled-node-isolated',disabled)
+            def unavailable_update():
                 browser.options()
-                before = {domain: browser.cards(domain)[0].get_attribute("data-connection-id")
-                          for domain in ("a.portmap", "b.portmap")}
-                name = browser.driver.find_element(By.ID, "name")
-                name.clear()
-                name.send_keys("draft-node")
-                version = browser.driver.find_element(By.ID, "installed-version").text
-                browser.driver.find_element(By.ID, "check-update").click()
-                WebDriverWait(browser.driver, 40).until(lambda current:
-                    current.find_element(By.ID, "update-status").get_attribute("data-state") == "error")
-                require(browser.driver.find_element(By.ID, "check-update").is_enabled(), "Failed check cannot be retried")
-                require(not browser.driver.find_element(By.ID, "download-update").is_displayed(), "Failed check exposed a download link")
-                require(browser.driver.find_element(By.ID, "installed-version").text == version, "Checking changed the reported installed version")
-                require(browser.driver.find_element(By.ID, "name").get_attribute("value") == "draft-node", "Checking discarded an unsaved form")
-                require(all(browser.cards(domain)[0].get_attribute("data-connection-id") == identity
-                            for domain, identity in before.items()), "Checking modified saved connections")
-            case("update-check-network-failure-preserves-connections", unavailable_update_feed)
-            require(browser.driver.get_full_page_screenshot_as_file(str(ARTIFACTS / "options-configured.png")), "Could not capture actual configured extension UI")
-            for domain, node in (("a.portmap", "node-a"), ("b.portmap", "node-b"), ("app.a.portmap", "node-a"), ("app.b.portmap", "node-b")):
-                def routing(domain=domain, node=node):
-                    evidence = browser.page("http://" + domain + "/original/path?keep=one%20two", node)
-                    require(evidence["host"] == domain and evidence["path"] == "/original/path?keep=one%20two", "Original Host/path not retained")
-                    require(driver.execute_script("return window.fixtureAsset") == node, "Wrong static JS asset")
-                    require(driver.execute_script("return getComputedStyle(document.querySelector('#asset-proof')).color") == "rgb(1, 2, 3)", "Static CSS not loaded")
-                    echoed = browser.fetch("/echo?post=original", "POST", "original POST body π")
-                    require(echoed["node"] == node and echoed["host"] == domain and echoed["path"] == "/echo?post=original" and echoed["body"] == "original POST body π" and echoed["method"] == "POST", "POST not preserved")
-                    require(not echoed["authorization"] and not echoed["proxyAuthorization"], "POST leaked credentials")
-                    origin_auth = browser.fetch("/echo?origin-auth=yes", headers={"Authorization": "Bearer fixture-origin-token"})
-                    require(origin_auth["originAuthorizationCorrect"] and not origin_auth["proxyAuthorization"], "Origin Authorization was altered or proxy credentials leaked")
-                    require(browser.websocket("ws", domain)["node"] == node, "WS wrong node")
-                case("routing-assets-post-ws-" + domain, routing)
-            case("trailing-dot-host-routing", lambda: browser.page("http://a.portmap./trailing-dot", "node-a"))
-            def redirects():
-                driver.get("http://a.portmap/redirect")
-                require(driver.current_url == "http://a.portmap/landing?via=redirect", "Redirect changed origin")
-                require(json.loads(driver.find_element(By.ID, "evidence").text)["node"] == "node-a", "Redirect went to wrong node")
-            case("redirect-original-origin", redirects)
-            for domain, node in (("a.portmap", "node-a"), ("b.portmap", "node-b")):
-                def tls(domain=domain, node=node):
-                    evidence = browser.page("https://" + domain + "/verified-tls?original=yes", node)
-                    require(evidence["host"] == domain and evidence["path"] == "/verified-tls?original=yes", "TLS original Host/path lost")
-                    require(browser.fetch("/echo", "POST", "verified TLS body")["body"] == "verified TLS body", "HTTPS POST failed")
-                    require(browser.websocket("wss", domain)["node"] == node, "WSS wrong node")
-                case("verified-https-wss-" + domain, tls)
-            case("ordinary-browsing-with-extension", lambda: browser.page("http://unrelated:8080/unchanged", "unrelated"))
-            def rejection():
-                require(socks_status(methods=b"\x00") == ("method", 255), "Adapter accepted no-auth SOCKS5")
-                require(socks_status(credentials=("user-a", "wrong")) == ("auth", 1), "Adapter accepted bad RFC1929 credentials")
-                require(socks_status("b.portmap") == ("connect", 2), "Adapter accepted another node domain")
-                require(socks_status("a.portmap.evil.test") == ("connect", 2), "Adapter suffix boundary bypass")
-                require(socks_status("b.portmap", port=443) == ("connect", 2), "TLS destination domain bypass")
-                require(socks_status(port=22) == ("connect", 2), "Adapter accepted arbitrary destination port")
-                for command in (2, 3):
-                    require(socks_status(command=command) == ("connect", 7), "Adapter accepted BIND or UDP command")
-                for address_type in (1, 4):
-                    require(socks_status(address_type=address_type) == ("connect", 8), "Adapter accepted client-resolved destination IP")
-                require(socks_status(payload=b"GET /denied-inner-host HTTP/1.1\r\nHost: b.portmap\r\nConnection: close\r\n\r\n") == ("http", 403), "Authorized SOCKS domain escaped through foreign inner Host")
-                for origin in ORIGINS:
-                    require(not any("/denied-" in row["path"] for row in records(origin)), "Rejected request reached origin")
-            case("adapter-socks5-auth-domain-command-address-rejection", rejection)
-            case("unknown-portmap-fails-closed", lambda: browser.denied("unknown.portmap", "unknown"))
-            def persistence():
-                target = "http://a.portmap/restarted-first-request"
-                # Android opens this FIRST request through its real native VIEW
-                # intent; desktop navigates once after full process startup.
-                browser.restart(first_url=target)
-                browser.page(target, "node-a", navigate=False)
-                browser.denied("unknown.portmap", "restart-unknown")
-                browser.options()
-                require(len(browser.cards("a.portmap")) == len(browser.cards("b.portmap")) == 1, "Connections not persisted")
-                browser.page("http://b.portmap/restarted-second-node", "node-b")
-            case("browser-restart-storage-and-initialization", persistence)
-            def disable():
-                browser.action("a.portmap", "toggle")
-                browser.denied("a.portmap", "disabled")
-                browser.page("http://b.portmap/other-node-while-disabled", "node-b")
-                browser.restart()
-                browser.denied("a.portmap", "disabled-after-restart")
-                browser.action("a.portmap", "toggle")
-                browser.page("http://a.portmap/re-enabled", "node-a")
-            case("disable-reenable-and-disabled-persistence", disable)
-            def disconnected():
-                browser.save("a.portmap", "node-a", "user-a", "pass-a", port=18081, edit=True)
-                browser.denied("a.portmap", "endpoint-disconnected")
-                browser.page("http://b.portmap/other-node-while-disconnected", "node-b")
-                browser.save("a.portmap", "node-a", "user-a", "pass-a", edit=True)
-                browser.page("http://a.portmap/reconnected", "node-a")
-            case("unreachable-endpoint-no-other-node-fallback", disconnected)
-            def bad_credentials():
-                browser.save("a.portmap", "node-a", "user-a", "wrong", edit=True)
-                browser.denied("a.portmap", "browser-wrong-auth")
-                browser.save("a.portmap", "node-a", "user-a", "pass-a", edit=True)
-                browser.page("http://a.portmap/auth-restored", "node-a")
-            case("browser-auth-rejection", bad_credentials)
-            def remove():
-                browser.action("a.portmap", "delete")
-                browser.denied("a.portmap", "removed")
-                browser.restart()
-                browser.denied("a.portmap", "removed-after-restart")
-                browser.options()
-                require(not browser.cards("a.portmap") and len(browser.cards("b.portmap")) == 1, "Removal not persisted independently")
-                browser.page("http://b.portmap/retained-after-remove", "node-b")
-            case("remove-and-removal-persistence", remove)
-            case("ordinary-browsing-after-lifecycle", lambda: browser.page("http://unrelated:8080/still-unchanged", "unrelated"))
-            case("no-admission-sentinel-connection-attempts", browser.assert_no_admission_connections)
-            def no_direct_fallback():
-                for row in records("trap"):
-                    host = row["host"].split(":")[0].rstrip(".").lower()
-                    # Android's own unrelated connectivity probes are normal
-                    # browsing traffic, not leakage of a .portmap claim.
-                    require(host != "portmap" and not host.endswith(".portmap"), "Firefox sent .portmap HTTP traffic to the direct-network trap")
-            case("no-direct-http-traffic-fallback", no_direct_fallback)
-            require(all(row["status"] == "passed" for row in proof["cases"]), "Actual browser cases failed: " + ", ".join(row["name"] for row in proof["cases"] if row["status"] == "failed"))
-        except Exception:
-            try:
-                if browser.driver:
-                    browser.driver.save_screenshot(str(ARTIFACTS / "failure.png"))
-            except WebDriverException:
-                pass
-            raise
+                browser.enter('name','unsaved-draft')
+                browser.driver.find_element(By.ID,'check-update').click()
+                WebDriverWait(browser.driver,40).until(lambda d:d.find_element(By.ID,'update-status').get_attribute('data-state')=='error')
+                require(browser.driver.find_element(By.ID,'name').get_attribute('value')=='unsaved-draft','Update failure erased draft')
+                require(len(browser.cards('a.portmap'))==1 and len(browser.cards('b.portmap'))==1,'Update check changed saved nodes')
+            case('update-feed-offline-preserves-state',unavailable_update)
+            before = observe(browser)
+            browser.restart()
+            after = observe(browser)
+            require(before['processID'] != after['processID'],'Native browser did not restart')
+            proof['restart']={'before':before,'after':after,'reinstalled':False}
+            case('restart-direct-config-and-page',lambda: application('a.portmap','node-a',False))
+            case('restart-ssh-key-config-and-page',lambda: application('b.portmap','node-b',True))
+            import qr
+            qr.exercise(browser, case, proof)
+            case('delete-node-revokes-route',lambda:(browser.action('a.portmap','delete'),browser.denied('a.portmap','deleted')))
+            import managed
+            managed.exercise(browser, case, proof, metadata['b'], addresses['b'])
+            proof['origin_requests']={origin:records(origin) for origin in ORIGINS}
+            require(not proof['origin_requests']['trap'],'Claimed traffic reached DNS fallback trap')
+            proof['dns_diagnostics']=records('dns','/queries')
+            save_proof()
+            if case('actual-network-path-evidence', browser.assert_network_paths):
+                proof['network_audit'] = json.loads((ARTIFACTS / 'network-audit.json').read_text())
+            require(all(row['status']=='passed' for row in proof['cases']),'Actual browser cases failed')
+            proof['status']='passed'
         finally:
-            browser.close()
-            for origin in ORIGINS:
-                (ARTIFACTS / (origin + "-requests.json")).write_text(json.dumps(records(origin), indent=2))
-            queries = records("dns", "/queries")
-            (ARTIFACTS / "dns-queries.json").write_text(json.dumps(queries, indent=2))
-            original = [query for query in queries if query["name"] == "portmap" or query["name"].endswith(".portmap")]
-            types = {}
-            for query in original:
-                key = str(query["type"])
-                types[key] = types.get(key, 0) + 1
-            # Incidental Firefox DNS metadata is explicitly accepted by the
-            # user, not suppressed or confused with actual HTTP/WS fallback.
-            proof["dns_diagnostics"] = {
-                "classification": "disclosed-incidental-metadata",
-                "total_query_count": len(queries),
-                "original_portmap_query_count": len(original),
-                "original_portmap_query_types": types,
-                "original_portmap_names": sorted({query["name"] for query in original}),
-                "warning": "Firefox can disclose original .portmap hostnames in incidental DNS queries even when actual traffic uses the selected authenticated node.",
-                "queries_file": "dns-queries.json",
-            }
-            (ARTIFACTS / "dns-diagnostics.json").write_text(json.dumps(proof["dns_diagnostics"], indent=2))
+            if browser:
+                browser.close()
+            save_proof()
 
 
-def main(platform="desktop-firefox", browser_factory=Browser, prepare=None):
-    parser = argparse.ArgumentParser()
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--development", action="store_true", help="Allow unsigned XPI only inside disposable ESR profile")
-    mode.add_argument("--require-signed", action="store_true", help="Enforce Firefox signature verification and permanent installation")
-    parser.add_argument("--xpi", help="Exact XPI bytes under test; omit only in explicit development mode")
-    args = parser.parse_args()
-    proof = {"status": "failed", "platform": platform, "extension_sha256": None,
-             "extension_version": None, "browser_version": None,
-             "source_commit": os.environ.get("BROWSER_SOURCE_COMMIT") or None,
-             "signature_required": False, "cases": []}
+def main(*, platform='desktop-firefox', browser_factory=Browser, prepare=None):
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--development',action='store_true',required=True)
+    parser.add_argument('--xpi')
+    args=parser.parse_args()
+    args.require_signed=False
+    os.umask(0o077)
+    ARTIFACTS.mkdir(exist_ok=True)
+    proof={'status':'failed','platform':platform,'source_commit':os.environ.get('BROWSER_SOURCE_COMMIT',''),
+           'signature_required':False,'experimental':True,'capability_available':False,'cases':[]}
     try:
-        require(not args.require_signed or args.xpi, "--require-signed requires --xpi")
+        provenance = json.loads((ARTIFACTS / 'source-provenance.json').read_text())
+        proof.update(provenance)
+        proof['source_commit'] = provenance['source_provenance']['commit']
+        proof['source_commit_label'] = 'checkout-base-with-uncommitted-changes' if provenance['source_provenance']['dirty'] else 'clean-checkout'
+        import qr
+        qr.prepare(proof)
         if prepare:
-            prepare(args, proof)
-        run(args, proof, browser_factory)
-        proof["status"] = "passed"
-        return 0
+            prepare(args,proof)
+        run(args,proof,browser_factory)
     except Exception:
-        proof["error"] = traceback.format_exc()
-        return 1
+        proof['status']='failed'
+        proof['error']=traceback.format_exc()
     finally:
-        ARTIFACTS.mkdir(exist_ok=True)
-        (ARTIFACTS / ("android-proof.json" if platform == "android-firefox" else "desktop-proof.json")).write_text(json.dumps(proof, indent=2))
-        (ARTIFACTS / "result.json").write_text(json.dumps(proof, indent=2))
-        print(json.dumps(proof, indent=2), flush=True)
+        (ARTIFACTS/'result.json').write_text(json.dumps(proof,indent=2))
+        print(json.dumps({'status':proof['status'],'cases':proof['cases']},indent=2),flush=True)
+    return 0 if proof['status']=='passed' else 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

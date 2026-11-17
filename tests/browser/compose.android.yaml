@@ -16,6 +16,7 @@ services:
       ACCEPT_ANDROID_SDK_LICENSE: ${ACCEPT_ANDROID_SDK_LICENSE:-0}
       HOME: /tmp
       BROWSER_SOURCE_COMMIT: ${BROWSER_SOURCE_COMMIT:-}
+      ANDROID_FIREFOX_CHANNEL: nightly
     depends_on:
       node-a: {condition: service_healthy}
       node-b: {condition: service_healthy}
@@ -24,4 +25,11 @@ services:
       dns: {condition: service_healthy}
     volumes:
       - certificates:/certs:ro
+      - metadata-a:/meta/a:ro
+      - metadata-b:/meta/b:ro
       - ${BROWSER_ARTIFACTS:?Use run.sh}:/artifacts
+      - .:/app/tests/browser:ro
+      - ../../extension/firefox:/app/extension/firefox:ro
+      - ../../tools:/app/tools:ro
+      - ../../src:/app/src:ro
+      - ../../pyproject.toml:/app/pyproject.toml:ro
