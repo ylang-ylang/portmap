@@ -524,7 +524,6 @@ def experimental_attachment_fixture(tmp_path):
         "repository": "ylang-ylang/portmap", "tag": tag, "commit": commit,
     }, "assets": []}
     (assets / "release.json").write_text(json.dumps(release))
-    (assets / "firefox-updates.json").write_bytes(b"existing stable feed")
     evidence = {}
     for platform in ("desktop-firefox", "android-firefox"):
         path = tmp_path / (platform + ".json")
@@ -540,7 +539,14 @@ def test_experimental_attach_generates_distinct_source_bound_feed_and_preserves_
     version = result["version"]
     name = f"portmap-firefox-experimental-{version}.xpi"
     assert (assets / name).read_bytes() == xpi.read_bytes()
-    assert (assets / "firefox-updates.json").read_bytes() == b"existing stable feed"
+    assert (assets / "firefox-updates.json").read_bytes() == packaging.STABLE_UPDATE_FEED
+    assert hashlib.sha256(packaging.STABLE_UPDATE_FEED).hexdigest() == (
+        "f1fe43a61e21ef293d8dc51763136a6d5694cd3f948ae237b65e9a9affba0f6d"
+    )
+    stable_entry, = json.loads(packaging.STABLE_UPDATE_FEED)["addons"][packaging.EXTENSION_ID]["updates"]
+    assert stable_entry["version"] == "0.23.0"
+    assert stable_entry["update_link"].endswith("/v0.23.0/portmap-firefox-0.23.0.xpi")
+    assert stable_entry["update_hash"] == "sha256:d98d92c44b410f6ddb1fa5c55d96d6e4b0ae3da3becbf5f79ab337b8dcd3b889"
     feed = json.loads((assets / "firefox-experimental-updates.json").read_text())
     entry, = feed["addons"][packaging.EXTENSION_ID]["updates"]
     assert entry == {
@@ -552,8 +558,9 @@ def test_experimental_attach_generates_distinct_source_bound_feed_and_preserves_
     }
     release = json.loads((assets / "release.json").read_text())
     assert release["firefox_experimental"] == result["firefox_experimental"]
+    assert release["firefox_stable_updates"] == result["firefox_stable_updates"] == pipeline.stable_firefox_updates(tag)
     assert "firefox" not in release
-    for record in result["firefox_experimental"].values():
+    for record in [*result["firefox_experimental"].values(), result["firefox_stable_updates"]]:
         path = assets / record["filename"]
         assert record["sha256"] == packaging.sha256(path)
         assert record["size"] == path.stat().st_size
@@ -589,6 +596,17 @@ def test_experimental_attach_requires_exact_actual_dual_platform_evidence(change
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
+@pytest.mark.parametrize("filename", ["firefox-updates.json", "firefox-updates.json.sha256"])
+def test_experimental_attach_never_replaces_preexisting_stable_output(filename, tmp_path):
+    root, xpi, assets, tag, commit, evidence = experimental_attachment_fixture(tmp_path)
+    (assets / filename).write_bytes(b"existing stable channel bytes")
+    before = {path.name: path.read_bytes() for path in assets.iterdir()}
+    with pytest.raises(ValueError, match="already exists"):
+        packaging.attach_experimental(root, xpi, assets, tag, commit,
+                                       evidence["desktop-firefox"], evidence["android-firefox"])
+    assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
+
+
 def test_experimental_attach_never_replaces_preexisting_output(tmp_path):
     root, xpi, assets, tag, commit, evidence = experimental_attachment_fixture(tmp_path)
     (assets / "firefox-experimental-updates.json").write_bytes(b"existing experimental feed")
@@ -613,20 +631,62 @@ def experimental_release_fixture(tmp_path):
                              "distribution": "experimental-capability-only",
                              "signature_required": False, "capability_required": True}
     manifest["firefox_experimental"] = experimental
+    del manifest["firefox"]
+    stable = pipeline.stable_firefox_updates("v" + manifest["version"])
+    manifest["firefox_stable_updates"] = stable
+    (tmp_path / stable["filename"]).write_bytes(packaging.STABLE_UPDATE_FEED)
+    (tmp_path / (stable["filename"] + ".sha256")).write_text(f"{stable['sha256']}  {stable['filename']}\n")
     (tmp_path / "release.json").write_text(json.dumps(manifest))
     return manifest
 
 
-def test_experimental_and_historical_signed_assets_have_separate_immutable_identity(tmp_path):
+def test_experimental_and_historical_stable_feed_have_separate_immutable_identity(tmp_path):
     manifest = experimental_release_fixture(tmp_path)
     assert pipeline.validate_manifest(manifest, "0.21.0", tmp_path, tag="v0.21.0") == []
     names = pipeline.release_file_names(manifest)
-    assert {"portmap-firefox-0.21.0.xpi", "portmap-firefox-experimental-0.21.0.xpi",
+    assert {"portmap-firefox-experimental-0.21.0.xpi", "firefox-updates.json.sha256",
             "firefox-updates.json", "firefox-experimental-updates.json",
             "firefox-experimental-updates.json.sha256"} <= set(names)
     (tmp_path / "firefox-experimental-updates.json").write_bytes(b"tampered feed")
     errors = pipeline.validate_manifest(manifest, "0.21.0", tmp_path, tag="v0.21.0")
     assert "firefox asset content mismatch: firefox-experimental-updates.json" in errors
+    (tmp_path / "firefox-updates.json").write_bytes(b"tampered historical feed")
+    errors = pipeline.validate_manifest(manifest, "0.21.0", tmp_path, tag="v0.21.0")
+    assert "historical stable Firefox feed content mismatch" in errors
+
+
+@pytest.mark.parametrize("change", [
+    {"filename": "firefox-experimental-updates.json"}, {"sha256": "a" * 64},
+    {"size": 495}, {"original_version": "0.25.0"}, {"distribution": "experimental-capability-only"},
+    {"source_url": "https://unrelated.invalid/feed.json"},
+    {"original_source_url": pipeline.canonical_source_url("v0.25.0", "firefox-updates.json")},
+    {"unexpected": "record"},
+])
+def test_historical_stable_feed_identity_cannot_be_retargeted(change, tmp_path):
+    manifest = experimental_release_fixture(tmp_path)
+    manifest["firefox_stable_updates"].update(change)
+    assert pipeline.validate_manifest(manifest, "0.21.0", tmp_path, tag="v0.21.0", require_files=False)
+
+
+def test_experimental_manifest_cannot_omit_stable_feed_or_claim_signed_current_assets(tmp_path):
+    manifest = experimental_release_fixture(tmp_path)
+    del manifest["firefox_stable_updates"]
+    assert pipeline.validate_manifest(manifest, "0.21.0", tmp_path, tag="v0.21.0", require_files=False)
+    manifest["firefox_stable_updates"] = pipeline.stable_firefox_updates("v0.21.0")
+    manifest["firefox"] = {"xpi": {}, "updates": {}}
+    assert pipeline.validate_manifest(manifest, "0.21.0", tmp_path, tag="v0.21.0", require_files=False)
+
+
+def test_historical_stable_feed_checksum_and_published_bytes_are_immutable(tmp_path):
+    manifest = experimental_release_fixture(tmp_path)
+    (tmp_path / "firefox-updates.json.sha256").write_text("invalid companion\n")
+    errors = pipeline.validate_manifest(manifest, "0.21.0", tmp_path, tag="v0.21.0")
+    assert "historical stable Firefox feed checksum companion is malformed" in errors
+    with pytest.raises(pipeline.ReleaseError, match="immutable"):
+        pipeline._verify_published(
+            {"firefox-updates.json": {"digest": "sha256:" + "a" * 64}},
+            manifest, json.dumps(manifest), pipeline.release_file_names(manifest),
+        )
 
 
 @pytest.mark.parametrize("change", [

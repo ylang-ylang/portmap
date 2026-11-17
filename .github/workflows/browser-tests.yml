@@ -36,6 +36,7 @@ jobs:
       - name: Compile offline and require exact packaged bytes
         run: |
           docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/repo,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/portmap-ssh-build,dst=/build" \
             --workdir /repo emscripten/emsdk:3.1.74 \

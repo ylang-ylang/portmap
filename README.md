@@ -890,8 +890,12 @@ screenshots are omitted rather than uploaded.
 
 Experimental distribution is separate from the historical signed channel:
 `portmap-firefox-experimental-VERSION.xpi` and
-`firefox-experimental-updates.json`, never replacement bytes in the legacy
-`firefox-updates.json` feed. `attach-experimental` requires a clean exact source
+`firefox-experimental-updates.json`, never experimental replacement bytes in the
+legacy `firefox-updates.json` feed. Each new latest experimental release carries
+the byte-exact historical v0.23.0 stable feed and checksum as separately
+digest-bound compatibility metadata, so existing signed installations keep
+their original version and signed-XPI URL. It does not advertise a signed
+0.25.0 build. `attach-experimental` requires a clean exact source
 commit, matching payload/tooling/harness identities, complete versioned desktop
 and Android receipts for the same XPI, real permanent-install/capability
 observations, and the required network/receiver/restart boundaries before

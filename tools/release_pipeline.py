@@ -195,9 +195,22 @@ def firefox_assets(manifest: dict, field: str = "firefox") -> list[dict]:
     return [firefox[key] for key in ("xpi", "updates") if isinstance(firefox.get(key), dict)]
 
 
+def stable_firefox_updates(tag: str) -> dict:
+    """Allow only the byte-exact signed-channel feed published with v0.23.0."""
+    return {
+        "filename": "firefox-updates.json",
+        "sha256": "f1fe43a61e21ef293d8dc51763136a6d5694cd3f948ae237b65e9a9affba0f6d",
+        "size": 494, "source_url": canonical_source_url(tag, "firefox-updates.json"),
+        "distribution": "stable-compatibility-feed", "original_version": "0.23.0",
+        "original_source_url": canonical_source_url("v0.23.0", "firefox-updates.json"),
+    }
+
+
 def release_assets(manifest: dict) -> list[dict]:
+    stable = manifest.get("firefox_stable_updates")
     return [*manifest.get("assets", []), *firefox_assets(manifest),
-            *firefox_assets(manifest, "firefox_experimental")]
+            *firefox_assets(manifest, "firefox_experimental"),
+            *([stable] if isinstance(stable, dict) else [])]
 
 
 def validate_manifest(
@@ -297,6 +310,29 @@ def validate_manifest(
                     errors.append(error)
                 elif companion.read_text(encoding="utf-8") != f"{sha}  {expected_name}\n":
                     errors.append(f"firefox checksum companion is malformed: {expected_name}")
+    stable = manifest.get("firefox_stable_updates")
+    if "firefox_experimental" in manifest:
+        if "firefox" in manifest:
+            errors.append("experimental releases must not advertise current signed Firefox assets")
+        if stable is None:
+            errors.append("experimental release must preserve the historical stable Firefox feed")
+    if "firefox_stable_updates" in manifest:
+        expected = stable_firefox_updates(tag)
+        if "firefox_experimental" not in manifest or "firefox" in manifest:
+            errors.append("historical stable Firefox feed is only valid for experimental releases")
+        if stable != expected:
+            errors.append("historical stable Firefox feed metadata differs from the published v0.23.0 identity")
+        if require_files:
+            member, error = _safe_member(assets_dir, expected["filename"])
+            if error:
+                errors.append(error)
+            elif digest(member) != expected["sha256"] or member.stat().st_size != expected["size"]:
+                errors.append("historical stable Firefox feed content mismatch")
+            companion, error = _safe_member(assets_dir, checksum_companion_name(expected["filename"]))
+            if error:
+                errors.append(error)
+            elif companion.read_text(encoding="utf-8") != f"{expected['sha256']}  {expected['filename']}\n":
+                errors.append("historical stable Firefox feed checksum companion is malformed")
     if require_files:
         manifest_path, manifest_error = _safe_member(assets_dir, MANIFEST_NAME)
         if manifest_error:

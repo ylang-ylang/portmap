@@ -24,6 +24,9 @@ _spec = importlib.util.spec_from_file_location("release_pipeline", SCRIPT_PATH)
 release_pipeline = importlib.util.module_from_spec(_spec)
 sys.modules.setdefault("release_pipeline", release_pipeline)
 _spec.loader.exec_module(release_pipeline)
+_packaging_spec = importlib.util.spec_from_file_location("firefox_packaging_pipeline_test", ROOT / "tools/build_firefox_extension.py")
+firefox_packaging = importlib.util.module_from_spec(_packaging_spec)
+_packaging_spec.loader.exec_module(firefox_packaging)
 
 
 def _git_env() -> dict[str, str]:
@@ -859,9 +862,16 @@ def test_publish_firefox_assets_and_recover_original_distribution_bytes(tmp_path
             firefox[key].update(distribution="experimental-capability-only",
                                 signature_required=False, capability_required=True)
     manifest["firefox_experimental" if experimental else "firefox"] = firefox
+    if experimental:
+        stable = release_pipeline.stable_firefox_updates(tag)
+        manifest["firefox_stable_updates"] = stable
+        (assets / stable["filename"]).write_bytes(firefox_packaging.STABLE_UPDATE_FEED)
+        (assets / (stable["filename"] + ".sha256")).write_text(f"{stable['sha256']}  {stable['filename']}\n")
     anchor_text = json.dumps(manifest, indent=2) + "\n"
     (assets / "release.json").write_text(anchor_text)
     missing = {record["filename"] for record in firefox.values()}
+    if experimental:
+        missing.update({"firefox-updates.json", "firefox-updates.json.sha256"})
     initial = rest_response(
         anchor_text, draft=True, skip=missing,
         body="Portmap-Build-Run: 901\nPortmap-Build-Attempt: 1\n",

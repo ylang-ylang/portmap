@@ -18,6 +18,28 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTENSION_ID = "firefox@portmap.ylang-ylang.github.io"
 UPDATE_URL = "https://github.com/ylang-ylang/portmap/releases/latest/download/firefox-updates.json"
 EXPERIMENTAL_UPDATE_URL = "https://github.com/ylang-ylang/portmap/releases/latest/download/firefox-experimental-updates.json"
+# Exact published v0.23.0 stable feed. Carry it unchanged when an experimental
+# release becomes latest; its signed XPI remains at the original release URL.
+STABLE_UPDATE_SHA256 = "f1fe43a61e21ef293d8dc51763136a6d5694cd3f948ae237b65e9a9affba0f6d"
+STABLE_UPDATE_FEED = b'''{
+  "addons": {
+    "firefox@portmap.ylang-ylang.github.io": {
+      "updates": [
+        {
+          "version": "0.23.0",
+          "update_link": "https://github.com/ylang-ylang/portmap/releases/download/v0.23.0/portmap-firefox-0.23.0.xpi",
+          "update_hash": "sha256:d98d92c44b410f6ddb1fa5c55d96d6e4b0ae3da3becbf5f79ab337b8dcd3b889",
+          "applications": {
+            "gecko": {
+              "strict_min_version": "140.0"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+'''
 RUNTIME_FILES = (
     "manifest.json", "core.js", "controller.js", "background.js",
     "proxy.js", "transports.js", "transport/api.js", "transport/schema.json",
@@ -523,7 +545,7 @@ def attach(root: Path, signed_xpi: Path, assets: Path, tag: str, commit: str,
 
 def attach_experimental(root: Path, xpi: Path, assets: Path, tag: str, commit: str,
                         desktop_evidence: Path, android_evidence: Path) -> dict:
-    """Attach explicitly experimental bytes, never modifying the stable Firefox feed."""
+    """Attach experimental bytes and carry forward the exact historical stable feed."""
     manifest = check_payload(root, xpi)
     if not is_experimental(manifest):
         raise ValueError("attach-experimental requires an experimental manifest")
@@ -546,8 +568,8 @@ def attach_experimental(root: Path, xpi: Path, assets: Path, tag: str, commit: s
         "repository": "ylang-ylang/portmap", "tag": tag, "commit": commit,
     }:
         raise ValueError("runtime release manifest has different source identity")
-    if "firefox_experimental" in release:
-        raise ValueError("experimental Firefox assets already attached; never replace release bytes")
+    if any(field in release for field in ("firefox", "firefox_experimental", "firefox_stable_updates")):
+        raise ValueError("Firefox assets already attached; never replace release bytes")
     filename = f"portmap-firefox-experimental-{version}.xpi"
     feedname = "firefox-experimental-updates.json"
     base_url = f"https://github.com/ylang-ylang/portmap/releases/download/{tag}/"
@@ -557,7 +579,19 @@ def attach_experimental(root: Path, xpi: Path, assets: Path, tag: str, commit: s
         "version": version, "update_link": base_url + filename,
         "update_hash": "sha256:" + digest, **label,
     }]}}}
-    payloads = {filename: xpi.read_bytes(), feedname: (json.dumps(updates, indent=2) + "\n").encode()}
+    if hashlib.sha256(STABLE_UPDATE_FEED).hexdigest() != STABLE_UPDATE_SHA256:
+        raise ValueError("historical stable Firefox feed differs from its published digest")
+    stable = {
+        "filename": "firefox-updates.json", "sha256": STABLE_UPDATE_SHA256,
+        "size": len(STABLE_UPDATE_FEED), "source_url": base_url + "firefox-updates.json",
+        "distribution": "stable-compatibility-feed", "original_version": "0.23.0",
+        "original_source_url": "https://github.com/ylang-ylang/portmap/releases/download/v0.23.0/firefox-updates.json",
+    }
+    payloads = {
+        filename: xpi.read_bytes(), feedname: (json.dumps(updates, indent=2) + "\n").encode(),
+        "firefox-updates.json": STABLE_UPDATE_FEED,
+        "firefox-updates.json.sha256": f"{STABLE_UPDATE_SHA256}  firefox-updates.json\n".encode(),
+    }
     records = {}
     for key, name in (("xpi", filename), ("updates", feedname)):
         content = payloads[name]
@@ -573,8 +607,10 @@ def attach_experimental(root: Path, xpi: Path, assets: Path, tag: str, commit: s
         with (assets / name).open("xb") as output:
             output.write(content)
     release["firefox_experimental"] = records
+    release["firefox_stable_updates"] = stable
     release_path.write_text(json.dumps(release, indent=2) + "\n", encoding="utf-8")
-    return {"version": version, "source_commit": commit, "firefox_experimental": records, **label}
+    return {"version": version, "source_commit": commit, "firefox_experimental": records,
+            "firefox_stable_updates": stable, **label}
 
 
 def main() -> int:
