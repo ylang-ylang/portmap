@@ -354,3 +354,9 @@
   immutable assets and checked Brew distribution remain required. The user
   reviewed final settings screenshots and cleared publication of v0.26.0 only;
   no v0.25.0 tag is authorized.
+- Integrate release/v0.26.0 before main: preserve the reviewed managed SSH/QR
+  source and four matching version declarations. Require fresh clean exact-tag
+  dual-platform 72-case receipts with original network sidecars, pinned offline
+  compiler reproduction, immutable experimental/stable-compatibility assets
+  and the checked formula-only Brew merge. Local dirty development receipts
+  and supplemental screenshot captures are not publication inputs.
