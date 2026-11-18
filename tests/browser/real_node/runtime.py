@@ -5,8 +5,10 @@ Docker engine/socket. No host engine socket, host network, or privileged wrapper
 is exposed. Tested CLI bytes and current app source are injected into fresh
 per-run overlays; neither Portmap state nor browser results enter the cache.
 """
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
+import hmac
 import importlib.util
 import ipaddress
 import json
@@ -95,6 +97,7 @@ class Runtime(base.DependencyBase):
         self.started = None
         self.start_phase = 'not-started'
         self.baseline = None
+        self._network_diagnostic_key = os.urandom(32)
         self.stopped = None
         self.docker = DOCKER
         self._checkpoint()
@@ -554,6 +557,135 @@ class Runtime(base.DependencyBase):
                 'publicManifest': 'public-manifest.json', 'nodes': nodes, 'artifacts': artifacts,
                 'timings': self.timings}
 
+    def _network_diff(self, before, after):
+        """Bounded structural diagnostics; never change the baseline comparison."""
+        limit, field_limit, address_limit = 16, 24, 8
+        fields = {'family', 'dst', 'src', 'prefsrc', 'gateway', 'via', 'dev', 'iif', 'oif',
+                  'table', 'protocol', 'scope', 'type', 'metric', 'flags', 'pref', 'tos',
+                  'uid', 'nhid', 'multipath', 'nexthops', 'encap', 'mtu', 'hoplimit'}
+        enums = {
+            'family': {'-4', '-6', 'inet', 'inet6'},
+            'table': {'main', 'local', 'default', 'unspec'},
+            'protocol': {'kernel', 'boot', 'static', 'ra', 'dhcp', 'redirect', 'bird', 'babel',
+                         'zebra', 'bgp', 'ospf', 'rip', 'eigrp', 'isis', 'pim', 'bpf'},
+            'scope': {'global', 'link', 'host', 'site', 'nowhere'},
+            'type': {'unicast', 'local', 'broadcast', 'multicast', 'throw', 'unreachable',
+                     'blackhole', 'prohibit', 'nat', 'anycast'},
+            'pref': {'high', 'medium', 'low'},
+        }
+        flags = {'onlink', 'linkdown', 'pervasive', 'dead', 'offload', 'trap', 'notify',
+                 'cloned', 'rt_offload', 'rt_trap', 'rt_offload_failed'}
+        numbers = {'table', 'protocol', 'metric', 'tos', 'uid', 'nhid', 'mtu', 'hoplimit', 'prefixlen'}
+
+        def encoded(value):
+            return json.dumps(value, sort_keys=True, separators=(',', ':'))
+
+        def digest(value):
+            return hmac.new(self._network_diagnostic_key, encoded(value).encode(), 'sha256').hexdigest()
+
+        def public_name(name):
+            return name if name in fields else 'field-hmac:' + digest(name)
+
+        def public_value(field, value):
+            if value is None or type(value) is bool:
+                return value
+            if field in {'name', 'dev', 'iif', 'oif'} and isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.:@-]{1,32}', value):
+                return value
+            if field in enums and isinstance(value, str) and value in enums[field]:
+                return value
+            if field in numbers and type(value) is int and 0 <= value <= 2 ** 32:
+                return value
+            if field == 'flags' and isinstance(value, list):
+                return bounded(value, lambda flag: flag if isinstance(flag, str) and flag in flags else {'hmacSha256': digest(flag)})
+            if field == 'dst' and value == 'default':
+                return value
+            result = {'hmacSha256': digest(value)}
+            if field == 'dst' and isinstance(value, str):
+                try:
+                    network = ipaddress.ip_network(value, strict=False)
+                    result.update(version=network.version, prefixLength=network.prefixlen)
+                except ValueError:
+                    pass
+            return result
+
+        def bounded(rows, render, maximum=limit):
+            return {'count': len(rows), 'items': [render(row) for row in rows[:maximum]],
+                    'omitted': max(0, len(rows) - maximum)}
+
+        def delta(old, new):
+            old_counts, new_counts = Counter(map(encoded, old)), Counter(map(encoded, new))
+            values = {encoded(row): row for row in [*old, *new]}
+            removed = [values[key] for key, count in sorted((old_counts - new_counts).items()) for _ in range(count)]
+            added = [values[key] for key, count in sorted((new_counts - old_counts).items()) for _ in range(count)]
+            return removed, added
+
+        def public_address(row):
+            return {'family': public_value('family', row[0]), 'local': public_value('local', row[1]),
+                    'prefixlen': public_value('prefixlen', row[2])}
+
+        def public_interface(row):
+            return {'name': public_value('name', row['name']), 'address': public_value('address', row.get('address')),
+                    'addresses': bounded(row.get('addresses', []), public_address, address_limit)}
+
+        def changed_interface(pair):
+            old, new = pair
+            result = {'name': public_value('name', old['name']),
+                      'changedFields': [key for key in ('address', 'addresses') if old.get(key) != new.get(key)]}
+            if old.get('address') != new.get('address'):
+                result['address'] = {'before': public_value('address', old.get('address')),
+                                     'after': public_value('address', new.get('address'))}
+            if old.get('addresses') != new.get('addresses'):
+                removed, added = delta(old.get('addresses', []), new.get('addresses', []))
+                result['addresses'] = {'added': bounded(added, public_address, address_limit),
+                                       'removed': bounded(removed, public_address, address_limit)}
+            return result
+
+        def public_route(row):
+            keys = sorted(row, key=lambda key: (key not in fields, key))
+            return {'fields': {public_name(key): public_value(key, row[key]) for key in keys[:field_limit]},
+                    'omittedFields': max(0, len(keys) - field_limit)}
+
+        def changed_route(pair):
+            old, new = pair
+            changed = [key for key in sorted(old.keys() | new.keys(), key=lambda key: (key not in fields, key))
+                       if (key in old) != (key in new) or old.get(key) != new.get(key)]
+            return {'changedFields': [public_name(key) for key in changed[:field_limit]],
+                    'omittedChangedFields': max(0, len(changed) - field_limit),
+                    'before': public_route(old), 'after': public_route(new)}
+
+        old_interfaces = {row['name']: row for row in before['interfaces']}
+        new_interfaces = {row['name']: row for row in after['interfaces']}
+        removed_routes, added_routes = delta(before['routes'], after['routes'])
+        groups = {}
+        for side, rows in (('before', removed_routes), ('after', added_routes)):
+            for row in rows:
+                identity = encoded({key: row.get(key) for key in ('family', 'table', 'dst', 'type', 'tos')})
+                groups.setdefault(identity, {'before': [], 'after': []})[side].append(row)
+        changed_routes, removed_routes, added_routes = [], [], []
+        for _, group in sorted(groups.items()):
+            if len(group['before']) == len(group['after']) == 1:
+                changed_routes.append((group['before'][0], group['after'][0]))
+            else:
+                removed_routes.extend(group['before'])
+                added_routes.extend(group['after'])
+        return {
+            'schemaVersion': 1,
+            'valueEncoding': 'Sensitive values and unknown field names use per-run HMAC-SHA256; the key is not exported.',
+            'limits': {'recordsPerCategory': limit, 'fieldsPerRoute': field_limit, 'addressesPerInterface': address_limit},
+            'routeMatching': 'Only unambiguous family/table/destination/type/tos pairs are changed; other differences remain added/removed.',
+            'interfaces': {
+                'beforeCount': len(old_interfaces), 'afterCount': len(new_interfaces),
+                'added': bounded([new_interfaces[name] for name in sorted(new_interfaces.keys() - old_interfaces.keys())], public_interface),
+                'removed': bounded([old_interfaces[name] for name in sorted(old_interfaces.keys() - new_interfaces.keys())], public_interface),
+                'changed': bounded([(old_interfaces[name], new_interfaces[name]) for name in sorted(old_interfaces.keys() & new_interfaces.keys())
+                                    if old_interfaces[name] != new_interfaces[name]], changed_interface),
+            },
+            'routes': {'beforeCount': len(before['routes']), 'afterCount': len(after['routes']),
+                       'added': bounded(added_routes, public_route), 'removed': bounded(removed_routes, public_route),
+                       'changed': bounded(changed_routes, changed_route)},
+        }
+
+
     def stop(self) -> dict:
         if self.stopped is not None:
             return self.stopped
@@ -595,6 +727,11 @@ class Runtime(base.DependencyBase):
                 baseline = {'unchanged': all(checks.values()), 'checks': checks}
                 if not baseline['unchanged']:
                     errors.append('Host baseline changed: ' + ', '.join(key for key, unchanged in checks.items() if not unchanged))
+                    if not checks.get('routes', True) or not checks.get('interfaces', True):
+                        try:
+                            baseline['networkDiff'] = self._network_diff(self.baseline, after)
+                        except Exception as diagnostic_error:
+                            baseline['networkDiffErrorType'] = type(diagnostic_error).__name__
             except (base.RuntimeFailure, OSError, ValueError) as error:
                 baseline = {'unchanged': False, 'checks': {}}
                 errors.append(str(error))

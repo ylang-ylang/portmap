@@ -1,4 +1,5 @@
 """Real-node command boundaries; network/Docker are replaceable external edges."""
+import copy
 import hashlib
 import importlib.util
 import json
@@ -530,3 +531,164 @@ def test_real_node_declares_real_frontend_after_actual_empty_init_scaffold(tmp_p
     declaration.write_text(existing)
     node_bootstrap.declare_project_endpoint(project)
     assert declaration.read_text() == existing
+
+
+def network_baseline_fixture():
+    return {
+        'files': {'/private/config': {'sha256': 'a' * 64}},
+        'routes': [
+            {'family': '-4', 'dst': '10.61.0.0/16', 'dev': 'eth0', 'protocol': 'kernel',
+             'scope': 'link', 'prefsrc': '10.61.0.10', 'flags': []},
+            {'family': '-6', 'dst': 'fd7a:115c:a1e0::/64', 'dev': 'tailscale0',
+             'protocol': 'static', 'gateway': 'fd7a:115c:a1e0::1', 'flags': []},
+        ],
+        'interfaces': [
+            {'name': 'eth0', 'address': '02:42:aa:bb:cc:01', 'addresses': [('inet', '10.61.0.10', 16)]},
+            {'name': 'tailscale0', 'address': '00:00:aa:bb:cc:02',
+             'addresses': [('inet6', 'fd7a:115c:a1e0::2', 128)]},
+        ],
+        'containers': {'production-id': {'image': 'sha256:production', 'running': True}},
+        'resolver': 'private-resolver.example.test',
+        'sysctl': {'net.ipv4.ip_forward': '1'},
+        'tailscale': {'Self': {'ID': 'private-tailnet-peer-id'}, 'CurrentTailnet': 'private-tailnet.example.test'},
+    }
+
+
+def runtime_with_network_baseline(tmp_path, monkeypatch, before, after):
+    instance = runtime_module.Runtime(cache_dir=tmp_path / 'cache', state_dir=tmp_path / 'private',
+        out_dir=tmp_path / 'public', cli_archive=tmp_path / 'unused-runtime.tar.gz',
+        cli_sha256='a' * 64, version='0.26.1', source_commit='b' * 40, addon_sha256='c' * 64)
+    instance.baseline = copy.deepcopy(before)
+    runtime_module.base._atomic_json(instance.state / 'host-baseline-private.json', instance.baseline, private=True)
+    def discovery(arguments, **kwargs):
+        assert arguments[0] == 'ps' or arguments[:2] == ['network', 'ls']
+        assert 'label=' + runtime_module.base.LABEL + '=' + instance.run_id in arguments
+        return SimpleNamespace(stdout='', stderr='', returncode=0)
+    monkeypatch.setattr(instance, '_docker', discovery)
+    monkeypatch.setattr(instance, '_host_snapshot', lambda: copy.deepcopy(after))
+    return instance
+
+
+def test_runtime_stop_unchanged_preserves_all_seven_baseline_checks(tmp_path, monkeypatch):
+    before = network_baseline_fixture()
+    instance = runtime_with_network_baseline(tmp_path, monkeypatch, before, before)
+    private_state = instance.state
+    receipt = instance.stop()
+    assert receipt['status'] == 'passed' and receipt['errors'] == []
+    assert receipt['hostBaseline'] == {'unchanged': True, 'checks': dict.fromkeys(before, True)}
+    assert instance.baseline == before
+    assert receipt['privateStateRemoved'] is True and not private_state.exists()
+    assert json.loads((instance.out_dir / 'cleanup.json').read_text()) == receipt
+    assert instance.stop() == receipt
+
+
+def test_runtime_stop_network_drift_fails_with_safe_structural_diff(tmp_path, monkeypatch):
+    before = network_baseline_fixture()
+    after = copy.deepcopy(before)
+    after['interfaces'] = [
+        {'name': 'eth0', 'address': '02:42:aa:bb:cc:99', 'addresses': [('inet', '10.61.0.99', 16)]},
+        {'name': 'br-diagnostic', 'address': '02:42:dd:ee:ff:01', 'addresses': [('inet', '10.88.0.1', 24)]},
+    ]
+    after['routes'][0].update(dev='eth1', protocol='static', gateway='10.61.0.254', flags=['linkdown'])
+    after['routes'][1] = {'family': '-4', 'dst': '10.88.0.0/24', 'dev': 'br-diagnostic',
+                          'protocol': 'kernel', 'private-peer@example.test': 'private-peer-value'}
+    instance = runtime_with_network_baseline(tmp_path, monkeypatch, before, after)
+    receipt = instance.stop()
+    assert receipt['status'] == 'failed'
+    assert receipt['errors'] == ['Host baseline changed: routes, interfaces']
+    checks = receipt['hostBaseline']['checks']
+    assert set(checks) == set(before)
+    assert {key for key, value in checks.items() if not value} == {'routes', 'interfaces'}
+    assert instance.baseline == before and receipt['privateStateRemoved'] is True
+    diff = receipt['hostBaseline']['networkDiff']
+    assert {key: diff['interfaces'][key]['count'] for key in ('added', 'removed', 'changed')} == dict.fromkeys(('added', 'removed', 'changed'), 1)
+    assert diff['interfaces']['added']['items'][0]['name'] == 'br-diagnostic'
+    assert diff['interfaces']['removed']['items'][0]['name'] == 'tailscale0'
+    changed_interface = diff['interfaces']['changed']['items'][0]
+    assert changed_interface['name'] == 'eth0' and changed_interface['changedFields'] == ['address', 'addresses']
+    assert {key: diff['routes'][key]['count'] for key in ('added', 'removed', 'changed')} == dict.fromkeys(('added', 'removed', 'changed'), 1)
+    changed_route = diff['routes']['changed']['items'][0]
+    assert {'dev', 'protocol', 'gateway', 'flags'} <= set(changed_route['changedFields'])
+    assert changed_route['after']['fields']['dev'] == 'eth1'
+    assert changed_route['after']['fields']['protocol'] == 'static'
+    assert changed_route['after']['fields']['flags']['items'] == ['linkdown']
+    assert len(changed_route['after']['fields']['gateway']['hmacSha256']) == 64
+    public = json.dumps(receipt)
+    for private in ('10.61.0.0/16', '10.61.0.10', '10.61.0.99', '10.61.0.254', '10.88.0.1', '10.88.0.0/24',
+                    'fd7a:115c:a1e0::/64', 'fd7a:115c:a1e0::1', 'fd7a:115c:a1e0::2',
+                    '02:42:aa:bb:cc:01', '02:42:aa:bb:cc:99', '02:42:dd:ee:ff:01', '00:00:aa:bb:cc:02',
+                    'private-peer@example.test', 'private-peer-value', 'private-tailnet-peer-id',
+                    'private-tailnet.example.test', 'private-resolver.example.test',
+                    instance._network_diagnostic_key.hex()):
+        assert private not in public
+    assert json.loads((instance.out_dir / 'cleanup.json').read_text()) == receipt
+
+
+@pytest.mark.parametrize('component', ['files', 'containers', 'resolver', 'sysctl', 'tailscale'])
+def test_runtime_stop_other_baseline_drift_still_fails_without_network_diff(tmp_path, monkeypatch, component):
+    before = network_baseline_fixture()
+    after = copy.deepcopy(before)
+    after[component] = {'changed': True}
+    instance = runtime_with_network_baseline(tmp_path, monkeypatch, before, after)
+    receipt = instance.stop()
+    assert receipt['status'] == 'failed' and receipt['hostBaseline']['unchanged'] is False
+    assert set(receipt['hostBaseline']['checks']) == set(before)
+    assert {key for key, value in receipt['hostBaseline']['checks'].items() if not value} == {component}
+    assert 'networkDiff' not in receipt['hostBaseline']
+    assert instance.baseline == before and receipt['privateStateRemoved'] is True
+
+
+def test_runtime_stop_network_diff_bounds_records_addresses_and_route_fields(tmp_path, monkeypatch):
+    before = network_baseline_fixture()
+    before.update(interfaces=[], routes=[])
+    after = copy.deepcopy(before)
+    for index in range(64):
+        after['interfaces'].append({'name': 'veth' + str(index), 'address': '02:42:aa:bb:cc:01',
+            'addresses': [('inet', f'10.{index}.0.{host}', 24) for host in range(1, 33)]})
+        after['routes'].append({'family': '-4', 'dst': f'10.{index}.0.0/16', 'dev': 'veth' + str(index),
+            'protocol': 'kernel', **{'extension-' + str(field): 'private-value' for field in range(32)}})
+    instance = runtime_with_network_baseline(tmp_path, monkeypatch, before, after)
+    receipt = instance.stop()
+    diff = receipt['hostBaseline']['networkDiff']
+    assert receipt['status'] == 'failed' and receipt['privateStateRemoved'] is True
+    for component in ('interfaces', 'routes'):
+        assert diff[component]['added']['count'] == 64
+        assert len(diff[component]['added']['items']) == diff['limits']['recordsPerCategory'] == 16
+        assert diff[component]['added']['omitted'] == 48
+    interface = diff['interfaces']['added']['items'][0]
+    assert interface['addresses']['count'] == 32 and len(interface['addresses']['items']) == 8
+    route = diff['routes']['added']['items'][0]
+    assert len(route['fields']) == diff['limits']['fieldsPerRoute'] == 24 and route['omittedFields'] > 0
+    assert route['fields']['family'] == '-4' and route['fields']['protocol'] == 'kernel'
+    assert len(json.dumps(diff)) < 100000
+
+
+def test_runtime_stop_network_diff_keeps_ambiguous_routes_added_removed_and_hashes_unlinkable(tmp_path, monkeypatch):
+    before = network_baseline_fixture()
+    before['routes'] = [{'family': '-4', 'dst': '10.61.0.0/16', 'table': 'main', 'dev': device, 'gateway': gateway}
+                        for device, gateway in (('eth0', '10.61.0.1'), ('eth1', '10.61.0.2'))]
+    after = copy.deepcopy(before)
+    after['routes'] = [{'family': '-4', 'dst': '10.61.0.0/16', 'table': 'main', 'dev': device, 'gateway': gateway}
+                       for device, gateway in (('eth2', '10.61.0.3'), ('eth3', '10.61.0.4'))]
+    receipts = [runtime_with_network_baseline(tmp_path / name, monkeypatch, before, after).stop() for name in ('first', 'second')]
+    route_diffs = [receipt['hostBaseline']['networkDiff']['routes'] for receipt in receipts]
+    for receipt, diff in zip(receipts, route_diffs):
+        assert receipt['status'] == 'failed' and receipt['privateStateRemoved'] is True
+        assert diff['changed']['count'] == 0 and diff['added']['count'] == diff['removed']['count'] == 2
+        assert diff['added']['items'][0]['fields']['dev'] == 'eth2'
+    assert route_diffs[0]['added']['items'][0]['fields']['gateway'] != route_diffs[1]['added']['items'][0]['fields']['gateway']
+
+
+def test_runtime_stop_network_diagnostic_error_does_not_mask_drift_or_private_cleanup(tmp_path, monkeypatch):
+    before = network_baseline_fixture()
+    after = copy.deepcopy(before)
+    after['routes'] = []
+    instance = runtime_with_network_baseline(tmp_path, monkeypatch, before, after)
+    def failed_diagnostic(*args):
+        raise ValueError('private-diagnostic-error-value')
+    monkeypatch.setattr(instance, '_network_diff', failed_diagnostic)
+    receipt = instance.stop()
+    assert receipt['status'] == 'failed' and receipt['errors'] == ['Host baseline changed: routes']
+    assert receipt['hostBaseline']['networkDiffErrorType'] == 'ValueError'
+    assert receipt['privateStateRemoved'] is True and instance.baseline == before
+    assert 'private-diagnostic-error-value' not in json.dumps(receipt)

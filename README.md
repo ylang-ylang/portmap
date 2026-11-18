@@ -996,6 +996,9 @@ Cache reuse never skips assertions. Public `result.json` records per-stage
 CLI archive, XPI, native logs/packets, screenshots and cleanup receipt support
 independent checking. The original failure is retained even if collection or
 cleanup also fails; passwords, private disks and profiles are excluded.
+Failed network-baseline checks retain bounded structural differences, with
+addresses and MACs redacted using a fresh non-exported per-run HMAC key.
+Diagnostics never waive unchanged-host checks or preserve private runtime state.
 
 Three consecutive local full runs against published `v0.26.1` passed:
 

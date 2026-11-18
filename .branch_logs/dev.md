@@ -376,3 +376,9 @@
   reuse private state or successful results. Three complete local published
   0.26.1 runs passed in 184.7955s, 181.8061s and 202.7614s; affected contract
   suites passed 839 tests. The addon and release version remain unchanged.
+- Integrate cold-run cleanup diagnostics from feat/real-node-browser-gate:
+  preserve all seven unchanged-host checks and private-state deletion, while
+  retaining bounded redacted route/interface differences on failure. The first
+  real CI run passed all four browser scenarios but failed network-baseline
+  cleanup; its exact delta was not retained, so no cause is claimed. Ten targeted
+  regressions verify fail-closed cleanup, useful diagnostics and privacy.
