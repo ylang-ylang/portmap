@@ -668,11 +668,43 @@ def test_runtime_stop_unchanged_preserves_all_seven_baseline_checks(tmp_path, mo
     private_state = instance.state
     receipt = instance.stop()
     assert receipt['status'] == 'passed' and receipt['errors'] == []
-    assert receipt['hostBaseline'] == {'unchanged': True, 'checks': dict.fromkeys(before, True)}
+    assert receipt['hostBaseline']['unchanged'] is True
+    assert receipt['hostBaseline']['checks'] == dict.fromkeys(before, True)
     assert instance.baseline == before
     assert receipt['privateStateRemoved'] is True and not private_state.exists()
     assert json.loads((instance.out_dir / 'cleanup.json').read_text()) == receipt
     assert instance.stop() == receipt
+
+
+@pytest.mark.parametrize('initial,final,status', [
+    (None, None, 'passed'), (0, 0, 'passed'), (2, 2, 'passed'),
+    (0, 1, 'failed'), (1, None, 'failed'),
+])
+def test_runtime_stop_retains_private_safe_default_bridge_facts(tmp_path, monkeypatch, initial, final, status):
+    snapshots = []
+    for count in (initial, final):
+        snapshot = network_baseline_fixture()
+        if count is not None:
+            snapshot['interfaces'].append({
+                'name': 'docker0', 'address': '02:42:ac:11:00:01',
+                'addresses': [('inet', '172.17.0.1', 16)] +
+                             [('inet6', address, 64) for address in ('fe80::abcd', 'fd00::1234')[:count]],
+            })
+        snapshots.append(snapshot)
+    instance = runtime_with_network_baseline(tmp_path, monkeypatch, *snapshots)
+    receipt = instance.stop()
+    assert receipt['status'] == status
+    assert receipt['hostBaseline']['checks']['interfaces'] is (initial == final)
+    assert receipt['hostBaseline']['defaultBridge'] == {
+        phase: {'present': count is not None, 'ipv6AddressCount': count or 0}
+        for phase, count in (('before', initial), ('after', final))
+    }
+    assert instance.baseline == snapshots[0] and receipt['privateStateRemoved'] is True
+    persisted = (instance.out_dir / 'cleanup.json').read_text()
+    assert json.loads(persisted) == receipt
+    for private in ('172.17.0.1', 'fe80::abcd', 'fd00::1234', '02:42:ac:11:00:01',
+                    'fd7a:115c:a1e0::2', 'private-tailnet-peer-id'):
+        assert private not in persisted
 
 
 def test_runtime_stop_network_drift_fails_with_safe_structural_diff(tmp_path, monkeypatch):

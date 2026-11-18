@@ -391,3 +391,7 @@
   Android waits/disposal now retain primary failures and avoid unbounded ADB
   waits; 19 real-import/native-process regressions passed. Generated frontend
   freshness is an explicit nonmutating CI preflight, not source-copy unit tests.
+- Integrate feat/real-node-network-facts: retain only original/final docker0
+  presence and IPv6 address counts in cleanup proof, including successful runs.
+  Do not infer an initially IPv6-free runner from seven PASS booleans, expose
+  addresses, require a zero starting count, or weaken/rebaseline host checks.

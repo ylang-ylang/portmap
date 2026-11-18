@@ -695,6 +695,14 @@ class Runtime(base.DependencyBase):
                 after = self._host_snapshot()
                 checks = {key: self.baseline[key] == after[key] for key in self.baseline}
                 baseline = {'unchanged': all(checks.values()), 'checks': checks}
+                baseline['defaultBridge'] = {}
+                for phase, snapshot in (('before', self.baseline), ('after', after)):
+                    bridge = next((item for item in snapshot['interfaces'] if item['name'] == 'docker0'), None)
+                    baseline['defaultBridge'][phase] = {
+                        'present': bridge is not None,
+                        'ipv6AddressCount': sum(address[0] == 'inet6' for address in bridge['addresses'])
+                        if bridge is not None else 0,
+                    }
                 if not baseline['unchanged']:
                     errors.append('Host baseline changed: ' + ', '.join(key for key, unchanged in checks.items() if not unchanged))
                     if not checks.get('routes', True) or not checks.get('interfaces', True):
