@@ -10,6 +10,7 @@ mode=
 android=0
 cleanup_only=0
 android_prebuilt=${BROWSER_ANDROID_IMAGE:-}
+desktop_prebuilt=${BROWSER_DESKTOP_IMAGE:-}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --development) [ -z "$mode" ] || { echo 'Choose one explicit install mode' >&2; exit 2; }; mode=$1; shift ;;
@@ -28,7 +29,7 @@ if [ -z "$artifacts" ]; then artifacts=$(mktemp -d /tmp/portmap-browser-artifact
 mkdir -p "$artifacts"
 artifacts=$(CDPATH= cd -- "$artifacts" && pwd)
 export BROWSER_ARTIFACTS="$artifacts"
-export BROWSER_IMAGE="$project-browser:fixture"
+export BROWSER_IMAGE="${desktop_prebuilt:-$project-browser:fixture}"
 export BROWSER_ANDROID_IMAGE="${android_prebuilt:-$project-android:fixture}"
 export BROWSER_UID="$(id -u)" BROWSER_GID="$(id -g)"
 export BROWSER_KVM_GID=0
@@ -70,7 +71,11 @@ if [ -n "$xpi" ]; then
   cp -- "$xpi" "$artifacts/input.xpi"
   set -- "$@" --xpi /artifacts/input.xpi
 fi
-compose build browser node-a node-b unrelated trap dns
+if [ -n "$desktop_prebuilt" ]; then
+  compose build node-a node-b unrelated trap dns
+else
+  compose build browser node-a node-b unrelated trap dns
+fi
 docker image inspect --format '{{.Id}}' "$BROWSER_IMAGE" > "$artifacts/browser-image-id.txt"
 if [ "$android" = 1 ]; then
   if [ -z "$android_prebuilt" ]; then

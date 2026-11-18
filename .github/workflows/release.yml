@@ -343,7 +343,7 @@ jobs:
     needs: [plan, build]
     if: needs.plan.outputs.mode == 'build' && needs.plan.outputs.firefox == 'True'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 180
     permissions:
       contents: read
     steps:
@@ -380,6 +380,48 @@ jobs:
         run: |
           python3 trusted/tools/build_firefox_extension.py --repo-root source build --output "$RUNNER_TEMP/firefox-experimental.xpi"
           python3 trusted/tools/build_firefox_extension.py --repo-root source validate --xpi "$RUNNER_TEMP/firefox-experimental.xpi"
+      - name: Resolve the immutable real-node toolchain cache identity
+        id: real-node-cache
+        working-directory: source
+        run: |
+          key="$(python3 tools/test_real_portmap.py cache-key)"
+          [[ "$key" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Invalid immutable cache identity"; exit 1; }
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Reuse only verified immutable real-node toolchains
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/portmap-real-node-cache
+          key: portmap-real-node-${{ runner.os }}-${{ runner.arch }}-${{ steps.real-node-cache.outputs.key }}
+      - name: Prepare cached browser toolchains once for all existing and real-node checks
+        working-directory: source
+        env:
+          ACCEPT_ANDROID_SDK_LICENSE: ${{ vars.ACCEPT_ANDROID_SDK_LICENSE }}
+          REAL_NODE_CACHE_KEY: ${{ steps.real-node-cache.outputs.key }}
+        run: |
+          python3 tools/test_real_portmap.py prepare-browsers \
+            --cache-dir "$RUNNER_TEMP/portmap-real-node-cache" \
+            --artifacts "$RUNNER_TEMP/firefox-browser-prepare"
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          receipt = json.loads((Path(os.environ["RUNNER_TEMP"]) / "firefox-browser-prepare/images.json").read_text())
+          if (receipt.get("schemaVersion") != 1 or receipt.get("status") != "ready" or
+              receipt.get("cache_key") != os.environ["REAL_NODE_CACHE_KEY"] or
+              not isinstance(receipt.get("browser_cache_key"), str) or
+              not re.fullmatch(r"[0-9a-f]{64}", receipt["browser_cache_key"])):
+              raise SystemExit("browser preparation cache identity mismatch")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              for platform in ("desktop", "android"):
+                  image = receipt["images"][platform]
+                  identity = image.get("image_id")
+                  if (image.get("platform") != platform or image.get("cache_key") != receipt["browser_cache_key"] or
+                      not isinstance(identity, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", identity) or
+                      not isinstance(image.get("archive_sha256"), str) or
+                      not re.fullmatch(r"[0-9a-f]{64}", image["archive_sha256"]) or
+                      type(image.get("cache_hit")) is not bool):
+                      raise SystemExit("invalid prepared browser image identity")
+                  output.write(f"BROWSER_{platform.upper()}_IMAGE={identity}\n")
+          PY
       - name: Exercise actual capability-enabled desktop Firefox
         working-directory: source
         env:
@@ -397,6 +439,19 @@ jobs:
           sh tests/browser/run.sh --android --development --xpi "$RUNNER_TEMP/firefox-experimental.xpi" \
             --project "portmap-browser-release-android-${GITHUB_RUN_ID}" \
             --artifacts "$RUNNER_TEMP/firefox-android"
+      - name: Gate the exact candidate CLI and XPI on real Portmap nodes
+        working-directory: source
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
+          ACCEPT_ANDROID_SDK_LICENSE: ${{ vars.ACCEPT_ANDROID_SDK_LICENSE }}
+        run: |
+          python3 tools/test_real_portmap.py run \
+            --xpi "$RUNNER_TEMP/firefox-experimental.xpi" \
+            --runtime-archive "dist/portmap-$VERSION-linux-amd64.tar.gz" \
+            --runtime-manifest dist/release.json --source-commit "$COMMIT" \
+            --cache-dir "$RUNNER_TEMP/portmap-real-node-cache" \
+            --artifacts "$RUNNER_TEMP/firefox-real-node"
       - name: Attach only exact source-bound experimental dual-platform verified bytes
         env:
           TAG: ${{ needs.plan.outputs.tag }}
@@ -406,7 +461,8 @@ jobs:
             --xpi "$RUNNER_TEMP/firefox-experimental.xpi" --assets-dir source/dist \
             --tag "$TAG" --commit "$COMMIT" \
             --desktop-evidence "$RUNNER_TEMP/firefox-desktop/result.json" \
-            --android-evidence "$RUNNER_TEMP/firefox-android/result.json"
+            --android-evidence "$RUNNER_TEMP/firefox-android/result.json" \
+            --real-node-evidence "$RUNNER_TEMP/firefox-real-node/result.json"
           python3 "$PIPELINE" --repo-root source check-build \
             --tag "$TAG" --commit "$COMMIT" --assets-dir source/dist
       - name: Retain complete immutable release assets
@@ -430,6 +486,8 @@ jobs:
           path: |
             ${{ runner.temp }}/firefox-desktop
             ${{ runner.temp }}/firefox-android
+            ${{ runner.temp }}/firefox-real-node
+            ${{ runner.temp }}/firefox-browser-prepare
             ${{ runner.temp }}/ssh-compiler-image.json
           if-no-files-found: warn
           retention-days: 90

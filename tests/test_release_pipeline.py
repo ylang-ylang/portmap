@@ -1454,3 +1454,28 @@ def test_check_build_rejects_hotfix_identity_drift(tmp_path: Path, mutation: str
     (assets / "release.json").write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(release_pipeline.ReleaseError):
         release_pipeline.check_build(assets, tag="v0.20.1", commit=peeled)
+
+
+def test_real_node_verified_attachment_preserves_runtime_identity_through_final_build_gate(tmp_path: Path) -> None:
+    from tests.test_firefox_release import experimental_attachment_fixture
+    from tests.browser.real_node.evidence import validate_aggregate
+
+    root, xpi, assets, tag, commit, receipts = experimental_attachment_fixture(tmp_path)
+    before = json.loads((assets / "release.json").read_text())
+    attached = firefox_packaging.attach_experimental(
+        root, xpi, assets, tag, commit, receipts["desktop-firefox"],
+        receipts["android-firefox"], receipts["real-node"])
+    final = json.loads((assets / "release.json").read_text())
+    assert final["assets"] == before["assets"]
+    assert final["source"] == before["source"]
+    assert release_pipeline.check_build(assets, tag=tag, commit=commit)["assets"] == before["assets"]
+    assert final["firefox_experimental"] == attached["firefox_experimental"]
+    assert final["firefox_stable_updates"] == release_pipeline.stable_firefox_updates(tag)
+    assert validate_aggregate(
+        receipts["real-node"], release=final, xpi_sha256=firefox_packaging.sha256(xpi),
+        version=tag[1:], commit=commit, source=firefox_packaging.source_provenance(root),
+        require_candidate=True)["status"] == "passed"
+    runtime = assets / before["assets"][0]["filename"]
+    runtime.write_bytes(runtime.read_bytes() + b"changed after real-node acceptance")
+    with pytest.raises(release_pipeline.ReleaseError, match="validation"):
+        release_pipeline.check_build(assets, tag=tag, commit=commit)

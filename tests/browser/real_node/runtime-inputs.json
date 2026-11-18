@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "platform": "linux/amd64",
+  "os": {
+    "url": "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img",
+    "sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
+  },
+  "ubuntuSnapshot": "20261118T000000Z",
+  "guestPackages": ["docker.io=29.1.3-0ubuntu3~24.04.2", "docker-compose-v2", "docker-buildx", "python3", "git", "curl", "openssh-server", "tcpdump"],
+  "dockerVersion": "29.1.3",
+  "nodeVersion": "22.22.3",
+  "viteVersion": "8.0.16",
+  "images": [
+    {"name":"gateway","tag":"traefik:v3.6","ref":"mirror.gcr.io/library/traefik@sha256:996b026a32b1bb6c85c200e5cf25276c1caa84ddea6b1e3a33e78cdc5cbe8d0c"},
+    {"name":"dns","tag":"coredns/coredns:1.12.1","ref":"mirror.gcr.io/coredns/coredns@sha256:4f7a57135719628cf2070c5e3cbde64b013e90d4c560c5ecbf14004181f91998"},
+    {"name":"catalog","tag":"python:3.12-slim-bookworm","ref":"mirror.gcr.io/library/python@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4"},
+    {"name":"ingress","tag":"haproxy:3.2-alpine","ref":"mirror.gcr.io/library/haproxy@sha256:5378234d19457d645ed6d5a0ac994ef196614f9a2cabda8f6ccd6ac8815f9098"},
+    {"name":"demo","tag":"traefik/whoami:latest","ref":"mirror.gcr.io/traefik/whoami@sha256:c4717a8d1f0134a7444e24f881160e033991f23027c6c5a9a3f8fd22e70d1d44"},
+    {"name":"node","tag":"node:22.22.3-alpine","ref":"mirror.gcr.io/library/node@sha256:e58326d0d441090181ac150dc2078d3e2cf6a0d42e809aebba3ef5880935ffdd"}
+  ]
+}

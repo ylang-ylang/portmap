@@ -6,20 +6,31 @@ on:
       - 'extension/firefox/**'
       - 'tests/browser/**'
       - 'tests/test_firefox_release.py'
+      - 'tests/test_real_node_evidence.py'
+      - 'tests/test_real_node_cli.py'
+      - 'tests/test_release_pipeline.py'
       - 'tools/build_firefox_extension.py'
       - 'tools/build_firefox_ssh.py'
       - 'tools/release_pipeline.py'
+      - 'tools/test_real_portmap.py'
       - '.github/workflows/browser-tests.yml'
       - '.github/workflows/release.yml'
   push:
     branches: ['feat/firefox-capability-transports']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Test a published vX.Y.Z CLI/XPI with the cached real-node gate, without publishing"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   ssh-reproducibility:
+    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
     name: Reproduce packaged SSH JS and WASM
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -52,6 +63,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
   desktop:
+    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
     name: Two-node Docker and actual Firefox
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -68,7 +80,7 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/browser-python"
           "$RUNNER_TEMP/browser-python/bin/pip" install -e '.[test]'
-          "$RUNNER_TEMP/browser-python/bin/python" -m pytest tests/test_firefox_release.py tests/test_release_pipeline.py
+          "$RUNNER_TEMP/browser-python/bin/python" -m pytest tests/test_firefox_release.py tests/test_release_pipeline.py tests/test_real_node_evidence.py tests/test_real_node_cli.py
       - name: Build and validate the experimental developer payload
         run: |
           python3 tools/build_firefox_extension.py build --output "$RUNNER_TEMP/portmap-firefox-experimental.xpi"
@@ -86,3 +98,68 @@ jobs:
           path: ${{ runner.temp }}/browser-proof
           if-no-files-found: warn
           retention-days: 30
+
+  real-node:
+    name: Published CLI and XPI against fresh full Portmap nodes
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Resolve protected automation revision before executing repository code
+        id: trust
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          automation_sha="$(python3 - <<'PY'
+          import json, os, re, urllib.request
+          request = urllib.request.Request(
+              "https://api.github.com/repos/ylang-ylang/portmap/git/ref/heads/dev",
+              headers={"Accept": "application/vnd.github+json", "User-Agent": "portmap-real-node",
+                       "X-GitHub-Api-Version": "2022-11-28",
+                       "Authorization": "Bearer " + os.environ["GITHUB_TOKEN"]},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              commit = json.load(response).get("object", {}).get("sha")
+          if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit("protected automation revision is not a full commit SHA")
+          print(commit)
+          PY
+          )"
+          echo "automation_sha=$automation_sha" >> "$GITHUB_OUTPUT"
+      - name: Check out immutable trusted harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ylang-ylang/portmap
+          ref: ${{ steps.trust.outputs.automation_sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Resolve the immutable toolchain cache identity
+        id: cache
+        working-directory: trusted
+        run: |
+          key="$(python3 tools/test_real_portmap.py cache-key)"
+          [[ "$key" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Invalid immutable cache identity"; exit 1; }
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Reuse only verified immutable toolchain bytes
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/portmap-real-node-cache
+          key: portmap-real-node-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache.outputs.key }}
+      - name: Run the standard four-scenario full-node gate
+        working-directory: trusted
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ACCEPT_ANDROID_SDK_LICENSE: ${{ vars.ACCEPT_ANDROID_SDK_LICENSE }}
+        run: |
+          python3 tools/test_real_portmap.py run --release "$RELEASE_TAG" \
+            --cache-dir "$RUNNER_TEMP/portmap-real-node-cache" \
+            --artifacts "$RUNNER_TEMP/real-node-evidence"
+      - name: Retain complete public evidence even when the gate fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-node-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/real-node-evidence
+          if-no-files-found: warn
+          retention-days: 90

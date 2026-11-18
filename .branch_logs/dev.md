@@ -368,3 +368,11 @@
   source/XPI audit matched all 30 runtime members. Await actual Android PASS
   before main/tag publication, then require fresh clean exact-main dual-72 CI
   proofs, original network sidecars, immutable full assets and checked Brew.
+- Integrate feat/real-node-browser-gate: standardize actual published/candidate
+  CLI and XPI acceptance on two fresh complete Portmap nodes and a real Vite
+  project, with desktop and Android direct/SSH scenarios. Preserve the existing
+  transport/security gates and require source-bound full-node candidate proof
+  before experimental attachment/publication. Immutable dependency caches never
+  reuse private state or successful results. Three complete local published
+  0.26.1 runs passed in 184.7955s, 181.8061s and 202.7614s; affected contract
+  suites passed 839 tests. The addon and release version remain unchanged.
