@@ -360,3 +360,11 @@
   compiler reproduction, immutable experimental/stable-compatibility assets
   and the checked formula-only Brew merge. Local dirty development receipts
   and supplemental screenshot captures are not publication inputs.
+- Integrate hotfix/firefox-remove-enable-checkbox for 0.26.1: remove only the
+  editor checkbox and obsolete form/harness consumers; new and QR entries
+  default enabled, existing saved disabled state and card toggles remain intact.
+  Four source versions and README match the patch. Frozen-source full pretag
+  gate passed 2135 tests (4 integration cases deselected), and independent
+  source/XPI audit matched all 30 runtime members. Await actual Android PASS
+  before main/tag publication, then require fresh clean exact-main dual-72 CI
+  proofs, original network sidecars, immutable full assets and checked Brew.

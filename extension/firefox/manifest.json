@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Portmap Connections",
-  "version": "0.26.0",
+  "version": "0.26.1",
   "description": "Route independent .portmap connections through direct TCP or pinned browser-side SSH using experimental networking capabilities.",
   "browser_specific_settings": {
     "gecko": {

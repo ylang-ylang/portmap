@@ -169,7 +169,6 @@ function editConnection(entry) {
   }
   byId("http-port").value = entry.httpPort;
   byId("https-port").value = entry.httpsPort ?? "";
-  byId("enabled").checked = entry.enabled;
   if (entry.mode === "ssh") {
     byId("ssh-username").value = entry.ssh.username;
     byId("ssh-port").value = entry.ssh.port;
@@ -309,7 +308,7 @@ function editorConnection() {
     id: byId("connection-id").value,
     name: byId("name").value,
     domain: byId("domain").value,
-    enabled: byId("enabled").checked,
+    enabled: editingConnection?.enabled ?? true,
     mode: byId("mode").value,
     host: byId("host").value,
     httpPort: Number(byId("http-port").value),
@@ -374,7 +373,6 @@ async function confirmQrConnection(draft, isCurrent) {
   byId("ssh-port").value = draft.ssh.port;
   byId("ssh-target-host").value = draft.ssh.targetHost;
   byId("ssh-host-key").value = draft.ssh.hostKeySha256Hex;
-  byId("enabled").checked = true;
   byId("editor-heading").textContent = "Complete scanned SSH connection";
   byId("cancel-edit").hidden = false;
   updateModeFields();
@@ -386,7 +384,7 @@ async function confirmQrConnection(draft, isCurrent) {
 byId("connection-form").addEventListener("input", event => {
   if (!["ssh-onetime-password", "host-ack", "managed-public-key"].includes(event.target.id)) invalidateSetup();
 });
-for (const id of ["mode", "ssh-auth-type", "replace-credentials", "enabled"]) {
+for (const id of ["mode", "ssh-auth-type", "replace-credentials"]) {
   byId(id).addEventListener("change", invalidateSetup);
 }
 byId("host-ack").addEventListener("change", updateManagedFields);

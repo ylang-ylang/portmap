@@ -170,3 +170,41 @@
   improvements. Real-browser folding/refresh and mobile popup checks passed.
   Deploy only mj's portal for this UI correction; remote backend upgrades are
   unnecessary and are not part of publication.
+- Release v0.21.0: independent Firefox Android/desktop connections, scoped
+  authenticated SOCKS5 ingress, preserved original URLs and fixed startup
+  storage initialization. Development browser suites each passed25 cases;
+  original-domain speculative DNS queries are disclosed and user-accepted.
+  Require built-in consent on Firefox140 desktop/142 Android. Catalog rebuild
+  matches committed assets and self-hosted lint is clean. Tag-only CI signs,
+  tests the signed desktop/Android packages and publishes immutable artifacts
+  with verified Brew distribution. Publication never upgrades user machines.
+- Release v0.22.0: automatically discover the owned local public node and
+  Tailscale endpoint, generate/persist credentials and import a connection code
+  through explicit Firefox preview/confirmation. Preserve local connection
+  identity/disabled state, advanced manual setup and existing mesh routing.
+  Independent Python1692/JS27, real CLI readiness/auth/restart and actual desktop/
+  Android development suites each30 cases passed; release identity/build and
+  self-hosted lint preflight passed. Tag CI gates exact signed bytes on stable
+  desktop/Android and completes immutable assets/Brew distribution. No existing
+  node, Coder workspace, VPN or DNS configuration is changed by publication.
+- Release v0.23.0: replace the unrequested pairing workflow with ordinary name-
+  based domain/host completion, preserving manual overrides and existing saved
+  endpoints. Remove pairing CLI/import/runtime/tests; preserve historical records.
+  Add user-approved official-feed Check and Download controls, explicitly
+  requiring Android's manual file-install step and never confusing download with
+  installation. Source regressions, actual dual-platform UI/network smokes and
+  release-version/lint preflight passed. Exact-tag CI signs, verifies stable
+  desktop/Android, publishes source-bound assets and completes checked Brew
+  distribution; no installed node, workspace, VPN or host DNS change occurs.
+- Release v0.26.0: explicitly experimental browser-local direct TCP and pinned
+  SSH, managed browser key identity with user-requested one-time-password key
+  installation and fresh key-auth verification, QR onboarding and collapsed
+  Advanced HTTP/HTTPS controls defaulting to 80/443. Source/extension versions
+  match; v0.25.0 remains an unpublished preview, not a release tag.
+  Final integrated pretag Python gate passed 2135 tests (4 integration cases
+  deselected); hosted feature CI passed offline exact SSH reproduction,
+  JavaScript/packaging checks and actual desktop browser verification. Tag CI
+  must regenerate clean exact-main dual-platform 72-case receipts and matching
+  raw network evidence before publishing immutable experimental assets plus
+  byte-exact signed v0.23.0 feed compatibility metadata and completing checked
+  Brew distribution. Publication never upgrades machines or restarts workloads.

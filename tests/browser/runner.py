@@ -227,9 +227,6 @@ class Browser:
                 self.enter('ssh-private-key', metadata['privateKey'])
                 self.enter('ssh-public-key', metadata['publicKey'])
                 self.enter('ssh-passphrase', metadata.get('passphrase', ''))
-        enabled = self.driver.find_element(By.ID, 'enabled')
-        if not enabled.is_selected():
-            enabled.click()
         self.driver.find_element(By.ID, 'save').click()
         WebDriverWait(self.driver, 15).until(lambda d:
             d.find_element(By.ID, 'name').get_attribute('value') == '' and len(self.cards(domain)) == 1)
