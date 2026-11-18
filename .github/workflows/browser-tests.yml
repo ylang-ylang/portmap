@@ -6,8 +6,8 @@ on:
       - 'extension/firefox/**'
       - 'tests/browser/**'
       - 'tests/test_firefox_release.py'
-      - 'tests/test_real_node_evidence.py'
-      - 'tests/test_real_node_cli.py'
+      - 'tests/test_browser_*.py'
+      - 'tests/test_real_node_*.py'
       - 'tests/test_release_pipeline.py'
       - 'tools/build_firefox_extension.py'
       - 'tools/build_firefox_ssh.py'
@@ -78,9 +78,10 @@ jobs:
         run: node --test extension/firefox/tests/*.test.cjs
       - name: Exercise packaging and immutable release boundaries
         run: |
+          python3 tests/browser/image_recipes.py --check
           python3 -m venv "$RUNNER_TEMP/browser-python"
           "$RUNNER_TEMP/browser-python/bin/pip" install -e '.[test]'
-          "$RUNNER_TEMP/browser-python/bin/python" -m pytest tests/test_firefox_release.py tests/test_release_pipeline.py tests/test_real_node_evidence.py tests/test_real_node_cli.py
+          "$RUNNER_TEMP/browser-python/bin/python" -m pytest tests/test_firefox_release.py tests/test_release_pipeline.py tests/test_browser_*.py tests/test_real_node_*.py
       - name: Build and validate the experimental developer payload
         run: |
           python3 tools/build_firefox_extension.py build --output "$RUNNER_TEMP/portmap-firefox-experimental.xpi"
@@ -138,6 +139,7 @@ jobs:
         id: cache
         working-directory: trusted
         run: |
+          python3 tests/browser/image_recipes.py --check
           key="$(python3 tools/test_real_portmap.py cache-key)"
           [[ "$key" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Invalid immutable cache identity"; exit 1; }
           echo "key=$key" >> "$GITHUB_OUTPUT"

@@ -14,7 +14,7 @@ import struct
 import tarfile
 import zipfile
 
-from urllib.parse import parse_qs, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 BROWSER_SOURCE_INPUTS = (
     'tests/browser/real_node/browser.py', 'tests/browser/real_node/android_runtime.py',
@@ -24,6 +24,7 @@ BROWSER_SOURCE_INPUTS = (
 
 CONSTRUCTION_SOURCE_INPUTS = tuple('tests/browser/real_node/' + name for name in (
     'base_cache.py', 'runtime-inputs.json', 'Runtime.Dockerfile', 'base_bootstrap.py',
+    'image_builder.py', 'runtime-image.json', 'runtime-setup.sh',
     'deps/Dockerfile', 'deps/package.json', 'deps/package-lock.json',
 ))
 
@@ -611,6 +612,96 @@ def _gateway_requests(rows):
     return [row for flow, row in requests if flow not in invalid]
 
 
+def _package_component(value):
+    _require(isinstance(value, str) and
+             re.fullmatch(r'(?:[A-Za-z0-9+._:~-]|%[0-9A-Fa-f]{2})+', value),
+             'package transport has an unsafe encoded path component')
+    try:
+        decoded = unquote(value, errors='strict')
+    except UnicodeError as error:
+        raise ValueError('real-node evidence: package transport has invalid path encoding') from error
+    _require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9+._:~-]*', decoded),
+             'package transport has an unsafe decoded path component')
+    return decoded
+
+
+def _package_filename(value):
+    filename = _package_component(value)
+    identity = re.fullmatch(
+        r'([a-z0-9][a-z0-9+.-]+)_((?:[0-9]+:)?[0-9][A-Za-z0-9.+~:-]*)_(amd64|all)\.deb',
+        filename)
+    _require(identity is not None, 'package transport has an invalid Debian filename')
+    return filename, identity.groups()
+
+
+def _package_uri(value, provider, prefix):
+    _require(isinstance(value, str) and value and all(33 <= ord(char) <= 126 for char in value),
+             'package transport has an invalid public HTTPS URL')
+    try:
+        parsed = urlsplit(value)
+    except ValueError as error:
+        raise ValueError('real-node evidence: package transport has an invalid HTTPS URL') from error
+    _require(parsed.scheme == 'https' and parsed.netloc == provider and
+             not parsed.query and not parsed.fragment and
+             value == 'https://' + provider + parsed.path and parsed.path.startswith(prefix),
+             'package transport has an unapproved provider or pool URL')
+    components = [_package_component(part) for part in parsed.path[len(prefix):].split('/')]
+    _require(len(components) == 4 and components[0] in ('main', 'restricted', 'universe', 'multiverse') and
+             components[-1].endswith('.deb'), 'package transport URL is not an exact Debian pool blob')
+    return '/'.join(components)
+
+
+def _package_transports(golden, snapshot):
+    """Independently bind each fetched blob to the pinned source and installed identity."""
+    rows = golden.get('packageTransports')
+    _require(isinstance(rows, list) and rows, 'golden seal lacks package transport provenance')
+    _require(isinstance(snapshot, str) and re.fullmatch(r'[0-9]{8}T[0-9]{6}Z', snapshot),
+             'package transport lacks an exact pinned Ubuntu snapshot')
+    packages = golden.get('packages')
+    _require(isinstance(packages, list) and packages and all(_text(entry) for entry in packages),
+             'package transport lacks actual installed package identities')
+    fields = {'package', 'version', 'architecture', 'filename', 'primary', 'sha256', 'bytes',
+              'provider', 'url', 'primaryHttpStatus', 'alternateAttempts'}
+    identities, filenames = set(), set()
+    primary_prefix = '/ubuntu/' + snapshot + '/pool/'
+    for row in rows:
+        row = _object(row, 'package transport')
+        _require(set(row) == fields, 'package transport lacks exact public provenance fields')
+        filename, identity = _package_filename(row['filename'])
+        package, version, architecture = identity
+        _require((row['package'], row['version'], row['architecture']) == identity,
+                 'package transport identity differs from its destination filename')
+        _require(package not in identities and filename not in filenames,
+                 'package transport repeats or conflicts with a package identity or destination filename')
+        identities.add(package)
+        filenames.add(filename)
+        binary_names = (package, package + ':' + architecture)
+        installed = [entry for entry in packages if entry.partition('=')[0] in binary_names]
+        _require(len(installed) == 1 and installed[0] in
+                 (package + '=' + version, package + ':' + architecture + '=' + version),
+                 'package transport differs from the actual installed package/version/architecture')
+        _require(_digest(row['sha256']) and type(row['bytes']) is int and row['bytes'] > 0,
+                 'package transport lacks signed-index SHA256 and positive byte size')
+        pool = _package_uri(row['primary'], 'snapshot.ubuntu.com', primary_prefix)
+        _, remote = _package_filename(pool.rsplit('/', 1)[-1])
+        _require(remote[0] == package and remote[2] == architecture and
+                 remote[1] in (version, version.split(':', 1)[-1]),
+                 'package transport pool filename differs from the pinned package identity')
+        status, attempts = row['primaryHttpStatus'], row['alternateAttempts']
+        _require(type(status) is int and type(attempts) is int,
+                 'package transport has invalid HTTP status or alternate attempt count')
+        if row['provider'] == 'snapshot.ubuntu.com':
+            resolved = _package_uri(row['url'], 'snapshot.ubuntu.com', primary_prefix)
+            _require(row['url'] == row['primary'] and resolved == pool and status == 200 and attempts == 0,
+                     'package transport has inconsistent snapshot provenance')
+        else:
+            _require(row['provider'] == 'archive.ubuntu.com', 'package transport has an unapproved provider')
+            resolved = _package_uri(row['url'], 'archive.ubuntu.com', '/ubuntu/pool/')
+            _require(resolved == pool and (status in (404, 410) or 500 <= status <= 599) and attempts == 1,
+                     'package transport has inconsistent archive availability fallback provenance')
+    return rows
+
+
 def _runtime(root, hashes, runtime, inputs, browser_results, platforms, harness, executable_sha256):
     runtime = _object(runtime, 'real runtime')
     cache = _object(runtime.get('cache'), 'immutable runtime cache')
@@ -650,6 +741,7 @@ def _runtime(root, hashes, runtime, inputs, browser_results, platforms, harness,
                  ('dependencyImage', 'dependencyImageId', 'freeBlockSanitization',
                   'sshKeyGenerationPrevented', 'diskSanitization')),
              'cache is not a sealed dependency-only base without Portmap/apps/state/credentials')
+    _package_transports(golden, sources['ubuntuSnapshot'])
     start = _object(runtime.get('start'), 'real runtime start')
     _require(_text(start.get('network')) and start['network'] not in ('host', 'bridge', 'none') and
              'private_manifest' not in start and type(start.get('cache_hit')) is bool and

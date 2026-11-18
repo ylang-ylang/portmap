@@ -382,3 +382,12 @@
   real CI run passed all four browser scenarios but failed network-baseline
   cleanup; its exact delta was not retained, so no cause is claimed. Ten targeted
   regressions verify fail-closed cleanup, useful diagnostics and privacy.
+- Integrate isolated cold tool construction and bounded Android lifecycle:
+  use owned non-overlapping egress networks, no host default-bridge build,
+  canonical recipes/shared setup, cleared proxy values and verified image
+  metadata. Preserve signed snapshot package identity across exact-byte
+  transport recovery; do not upgrade dependencies or waive host baselines.
+  Persistent cold preparation passed all seven host checks and cleanup.
+  Android waits/disposal now retain primary failures and avoid unbounded ADB
+  waits; 19 real-import/native-process regressions passed. Generated frontend
+  freshness is an explicit nonmutating CI preflight, not source-copy unit tests.

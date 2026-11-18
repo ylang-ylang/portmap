@@ -23,6 +23,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tests.browser.real_node.runtime import Runtime, cache_key as runtime_cache_key
+from tests.browser.real_node.image_builder import ImageBuilder
 
 REPOSITORY = "ylang-ylang/portmap"
 RELEASES = "https://github.com/" + REPOSITORY + "/releases/download/"
@@ -31,7 +32,9 @@ HEX = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 TAG = re.compile(r"v(\d+\.\d+\.\d+)\Z")
 BROWSER_INPUTS = ("tests/browser/Dockerfile", "tests/browser/Android.Dockerfile",
-                  "tests/browser/requirements.txt")
+                  "tests/browser/requirements.txt", "tests/browser/real_node/image_builder.py",
+                  "tests/browser/desktop-image.json", "tests/browser/android-image.json",
+                  "tests/browser/browser-setup.sh", "tests/browser/android-setup.sh")
 
 
 def sha256(path: Path) -> str:
@@ -130,7 +133,7 @@ def prepare_directories(args) -> tuple[Path, Path]:
     return cache, out
 
 
-def require_local_docker() -> None:
+def require_local_docker() -> tuple[str, str, str]:
     context = os.environ.get("DOCKER_CONTEXT")
     endpoint = (execute(["docker", "context", "inspect", context, "--format", "{{.Endpoints.docker.Host}}"])
                 if context else os.environ.get("DOCKER_HOST") or
@@ -138,6 +141,7 @@ def require_local_docker() -> None:
     require(endpoint.startswith("unix:///"), "Use a local Unix-socket Docker engine, not a remote context")
     require(execute(["docker", "info", "--format", "{{.OSType}}"], timeout=30) == "linux",
             "Real-node tools require a Linux Docker engine")
+    return ("docker", "--host", endpoint)
 
 
 def selected_platforms(args) -> tuple[str, ...]:
@@ -309,23 +313,24 @@ def browser_image(cache: Path, key: str, platform: str, out: Path, desktop: dict
         tag = f"portmap-real-node-browser:{key[:20]}-{platform}"
         with tempfile.TemporaryDirectory(prefix=platform + "-", dir=directory.parent) as temporary:
             stage = Path(temporary)
-            if platform == "desktop":
-                command = ["docker", "build", "--target", "browser-tools", "--file",
-                           str(ROOT / "tests/browser/Dockerfile"), "--tag", tag, str(ROOT)]
-            else:
-                require(desktop is not None, "Android requires the prepared desktop toolchain base")
-                base_tag = f"portmap-real-node-browser:{key[:20]}-desktop"
-                execute(["docker", "tag", desktop["image_id"], base_tag])
-                command = ["docker", "build", "--file", str(ROOT / "tests/browser/Android.Dockerfile"),
-                           "--build-arg", "BROWSER_BASE=" + base_tag, "--build-arg", "ACCEPT_ANDROID_SDK_LICENSE=1",
-                           "--build-arg", "FIREFOX_ANDROID_CHANNEL=nightly", "--tag", tag, str(ROOT)]
-            execute(command, log=out, timeout=3600)
-            identity = execute(["docker", "image", "inspect", "--format", "{{.Id}}", tag])
-            require(re.fullmatch(r"sha256:[0-9a-f]{64}", identity) is not None,
-                    "Docker returned an invalid browser image identity")
-            execute(["docker", "image", "save", "--output", str(stage / "image.tar"), identity], log=out)
+            base_image = None
+            if platform == "android":
+                require(desktop is not None and desktop.get("platform") == "desktop" and
+                        desktop.get("cache_key") == key,
+                        "Android requires the matching prepared desktop toolchain base")
+                base_image = desktop["image_id"]
+            docker = require_local_docker()
+            with tempfile.TemporaryDirectory(prefix="portmap-real-node-tools-private-") as private:
+                with ImageBuilder(state_dir=Path(private) / "owner", docker=docker,
+                                  cleanup_path=out.with_name(out.stem + "-" + platform + "-cleanup.json")) as builder:
+                    network = builder._new_network(platform + "-egress", internal=False)
+                    construction = builder._build_image(ROOT / "tests/browser" / (platform + "-image.json"),
+                                                        root=ROOT, tag=tag, network=network,
+                                                        work=builder.state / "inputs", log=out, base_image=base_image)
+            identity = construction["image_id"]
+            execute([*docker, "image", "save", "--output", str(stage / "image.tar"), identity], log=out)
             record = {"cache_key": key, "platform": platform, "image_id": identity,
-                      "archive_sha256": sha256(stage / "image.tar")}
+                      "archive_sha256": sha256(stage / "image.tar"), "construction": construction}
             dump(stage / "manifest.json", record)
             stage.rename(directory)
         return {**record, "cache_hit": False}

@@ -1,9 +1,9 @@
 """Two real Portmap nodes in disposable KVM guests, with dependency-only immutable caching.
 
-The host engine only runs unprivileged QEMU wrappers. Each guest owns its own
-Docker engine/socket. No host engine socket, host network, or privileged wrapper
-is exposed. Tested CLI bytes and current app source are injected into fresh
-per-run overlays; neither Portmap state nor browser results enter the cache.
+Test nodes run in unprivileged QEMU wrappers and own their guest Docker engines.
+Cold toolchain preparation uses temporary capability-limited ordinary containers
+on owned egress networks, never a host-network/privileged builder or socket mount.
+Tested CLI/app source enters fresh overlays; Portmap state/results never enter cache.
 """
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +31,7 @@ base = importlib.util.module_from_spec(_base_spec)
 _base_spec.loader.exec_module(base)
 SOURCE_FILES = (
     'runtime.py', 'base_cache.py', 'runtime-inputs.json', 'Runtime.Dockerfile', 'base_bootstrap.py',
+    'image_builder.py', 'runtime-image.json', 'runtime-setup.sh',
     'node_bootstrap.py', 'guest_evidence.py', 'native_gateway_markers.py',
     'deps/Dockerfile', 'deps/package.json', 'deps/package-lock.json',
     'app/Dockerfile', 'app/compose.yaml', 'app/package.json', 'app/vite.config.js',
@@ -206,26 +207,6 @@ class Runtime(base.DependencyBase):
                 'resolver': resolver, 'sysctl': sysctl, 'tailscale': tailscale}
 
 
-    def _remove_container(self, resource):
-        result = self._docker(['inspect', resource['id']], check=False)
-        if result.returncode:
-            raise base.RuntimeFailure('Owned container disappeared before verified cleanup: ' + resource['name'])
-        actual = json.loads(result.stdout)[0]
-        if actual['Id'] != resource['id'] or actual.get('Config', {}).get('Labels', {}).get(base.LABEL) != self.run_id:
-            raise base.RuntimeFailure('Refusing to remove a container with a different ownership label')
-        self._docker(['rm', '--force', resource['id']])
-        self.removed['containers'].append(resource['id'])
-        self.resources['containers'].remove(resource)
-        self._checkpoint()
-
-    def _remove_network(self, resource):
-        actual = json.loads(self._docker(['network', 'inspect', resource['id']]).stdout)[0]
-        if actual['Id'] != resource['id'] or actual.get('Labels', {}).get(base.LABEL) != self.run_id:
-            raise base.RuntimeFailure('Refusing to remove a network with a different ownership label')
-        self._docker(['network', 'rm', resource['id']])
-        self.removed['networks'].append(resource['name'])
-        self.resources['networks'].remove(resource)
-        self._checkpoint()
 
 
     def _validate_entry(self):
@@ -695,18 +676,7 @@ class Runtime(base.DependencyBase):
         # accepted it. Discovery is restricted to our unpredictable ownership label.
         if self.baseline is not None:
             try:
-                ids = self._docker(['ps', '-aq', '--no-trunc', '--filter', 'label=' + base.LABEL + '=' + self.run_id]).stdout.split()
-                known = {resource['id'] for resource in self.resources['containers']}
-                if ids:
-                    for item in json.loads(self._docker(['inspect', *ids]).stdout):
-                        if item['Id'] not in known:
-                            self.resources['containers'].append({'id': item['Id'], 'name': item['Name'].lstrip('/')})
-                ids = self._docker(['network', 'ls', '-q', '--filter', 'label=' + base.LABEL + '=' + self.run_id]).stdout.split()
-                known = {resource['id'] for resource in self.resources['networks']}
-                if ids:
-                    for item in json.loads(self._docker(['network', 'inspect', *ids]).stdout):
-                        if item['Id'] not in known:
-                            self.resources['networks'].append({'id': item['Id'], 'name': item['Name']})
+                self._discover_owned()
             except (base.RuntimeFailure, OSError, ValueError) as error:
                 errors.append(str(error))
         for resource in list(self.resources['containers']):

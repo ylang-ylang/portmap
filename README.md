@@ -948,6 +948,8 @@ ACCEPT_ANDROID_SDK_LICENSE=1 python3 tools/test_real_portmap.py run --release v0
 This requires an unprivileged Linux amd64 operator, a local Unix-socket Docker
 engine and `/dev/kvm`; it never relaxes host permissions or uses a privileged
 container. Read the Android SDK terms before setting the acceptance variable.
+Existing workloads may stay running, but avoid concurrent container/network
+changes: the unchanged-host guard also detects unrelated changes during a run.
 Use `--platform desktop` or `--platform android` for local diagnosis only:
 publication always requires both. The command prints its unique public
 evidence directory and exits nonzero on any failed stage or cleanup.
@@ -987,6 +989,20 @@ Symlinks, foreign ownership and unsafe writable cache paths are rejected,
 not silently adopted or chmodded. Keep cache, evidence and private state trees
 separate; `/tmp` evidence paths avoid shared writable workspace ancestry.
 
+Full-node cold preparation constructs tool images in short-lived, capability-scoped
+containers on explicitly owned, non-overlapping egress networks—not host BuildKit
+or the default bridge. All proxy environment variants are cleared before image
+commit. Canonical JSON recipes and shared setup scripts under `tests/browser/`
+also generate the legacy Dockerfile frontends: run
+`python3 tests/browser/image_recipes.py` after changing recipes;
+`python3 tests/browser/image_recipes.py --check` checks freshness without writes
+and is required by CI.
+
+Guest packages retain signed, pinned Ubuntu snapshot metadata. An unavailable
+blob may use one official archive alternative only with the same SHA256, size
+and Debian package/version/architecture; there is no newer-package fallback.
+Verified blobs are installed through normal APT with downloads disabled.
+
 For CI prewarming, `prepare-browsers --cache-dir CACHE_DIR --artifacts EVIDENCE_DIR`
 loads/builds only browser tools and writes `images.json`. The release workflow supplies
 its verified image IDs through `BROWSER_DESKTOP_IMAGE` and
@@ -999,6 +1015,8 @@ cleanup also fails; passwords, private disks and profiles are excluded.
 Failed network-baseline checks retain bounded structural differences, with
 addresses and MACs redacted using a fresh non-exported per-run HMAC key.
 Diagnostics never waive unchanged-host checks or preserve private runtime state.
+Android ADB waits are bounded, lifecycle failure records omit command payloads,
+and repeated final cleanup neither rediscovers profiles nor replaces the first error.
 
 Three consecutive local full runs against published `v0.26.1` passed:
 

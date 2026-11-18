@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "base": "debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc",
+  "inputs": {
+    "tests/browser/real_node/runtime-setup.sh": "runtime-setup.sh"
+  },
+  "steps": [
+    {
+      "script": "runtime-setup.sh",
+      "arguments": []
+    }
+  ],
+  "buildArguments": {},
+  "standardArguments": {},
+  "environment": {},
+  "user": "1000:1000",
+  "workdir": "/work",
+  "entrypoint": ["qemu-system-x86_64"],
+  "command": []
+}

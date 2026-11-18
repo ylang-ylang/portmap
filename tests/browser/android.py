@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import socket
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 
@@ -22,20 +23,50 @@ SERIAL = "emulator-5554"
 CHANNEL = os.environ.get("ANDROID_FIREFOX_CHANNEL", "release")
 PACKAGE = "org.mozilla.fenix" if CHANNEL == "nightly" else "org.mozilla.firefox"
 PROCESSES = []
+ADB_TIMEOUT_SECONDS = 30
+EMULATOR_STOP_TIMEOUT_SECONDS = 10
+
+
+def lifecycle_failure(operation, error):
+    record = {
+        "time": time.time(), "operation": operation,
+        "errorType": type(error).__name__,
+        "emulatorReturnCodes": [process.poll() for process in PROCESSES],
+    }
+    for attribute in ("returncode", "timeout"):
+        if hasattr(error, attribute):
+            record[attribute] = getattr(error, attribute)
+    try:
+        with (runner.ARTIFACTS / "android-lifecycle-failures.jsonl").open("a") as output:
+            output.write(json.dumps(record) + "\n")
+    except OSError as diagnostic_error:
+        error.add_note("Android lifecycle evidence could not be written: " + type(diagnostic_error).__name__)
 
 
 def adb(*args, **kwargs):
     kwargs.setdefault("check", True)
-    return subprocess.run(["adb", "-s", SERIAL, *args], **kwargs)
+    if kwargs.get("timeout") is None:
+        kwargs["timeout"] = ADB_TIMEOUT_SECONDS
+    try:
+        if any(process.poll() is not None for process in PROCESSES):
+            raise RuntimeError("Actual Android emulator exited; see android-emulator.log")
+        return subprocess.run(["adb", "-s", SERIAL, *args], **kwargs)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        # Record no command arguments, shell payloads, logcat contents or secrets.
+        lifecycle_failure("adb:" + str(args[0]), error)
+        raise
 
 
 def cleanup():
     for process in reversed(PROCESSES):
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=EMULATOR_STOP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=EMULATOR_STOP_TIMEOUT_SECONDS)
+    PROCESSES.clear()
 
 
 atexit.register(cleanup)
@@ -61,7 +92,10 @@ def prepare(args, proof):
     PROCESSES.append(process)
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
-        runner.require(process.poll() is None, "Actual Android emulator exited; see android-emulator.log")
+        if process.poll() is not None:
+            error = RuntimeError("Actual Android emulator exited; see android-emulator.log")
+            lifecycle_failure("emulator-boot", error)
+            raise error
         boot = subprocess.run(["adb", "-s", SERIAL, "shell", "getprop", "sys.boot_completed"], capture_output=True, text=True, timeout=10)
         if boot.returncode == 0 and boot.stdout.strip() == "1":
             break
@@ -117,7 +151,11 @@ class AndroidBrowser(runner.Browser):
                 "--ez", "automationtest", "true",
             ]
             options.mobile_options["env"] = {"MOZ_REMOTE_ALLOW_SYSTEM_ACCESS": "1"}
-        self.driver = webdriver.Firefox(options=options, service=Service("/usr/local/bin/geckodriver", service_args=arguments, log_output=str(runner.ARTIFACTS / "geckodriver.log")))
+        try:
+            self.driver = webdriver.Firefox(options=options, service=Service("/usr/local/bin/geckodriver", service_args=arguments, log_output=str(runner.ARTIFACTS / "geckodriver.log")))
+        except Exception as error:
+            lifecycle_failure("webdriver-start", error)
+            raise
         self.driver.set_page_load_timeout(20)
         self.driver.set_script_timeout(40)
         runner.require(self.driver.capabilities.get("platformName", "").lower() == "android", "Driver did not connect to real Android Firefox")
@@ -251,31 +289,49 @@ class AndroidBrowser(runner.Browser):
                 adb("exec-out", "screencap", "-p", stdout=image, timeout=10)
 
     def locate_native_profile(self):
-        # Keep all profile bytes inside this disposable guest; they contain SSH
-        # credentials. Only locate the existing state, never export or reseed it.
-        adb("shell", "am", "force-stop", PACKAGE)
+        # Only restart retains profile bytes, inside the disposable guest.
         reported = self.driver.capabilities.get("moz:profile", "")
-        exists = adb("shell", "test", "-d", reported, check=False, capture_output=True).returncode if reported.startswith(("/data/", "/sdcard/")) else 1
-        if exists == 0:
-            remote = reported
-        else:
-            found = adb("shell", "find", "/data/local/tmp", "/sdcard/Android/data/" + PACKAGE + "/files", "-name", "prefs.js", check=False, capture_output=True, text=True)
-            candidates = [str(Path(line).parent) for line in found.stdout.splitlines() if line.endswith("/prefs.js")]
-            runner.require(len(candidates) == 1, "Cannot uniquely locate native Android profile for restart; no storage reseeding fallback")
-            remote = candidates[0]
-        self.native_profile = remote
-        return remote
+        runner.require(isinstance(reported, str) and reported.startswith(("/data/", "/sdcard/", "/storage/")),
+                       "Driver did not report an actual native Android profile")
+        exists = adb("shell", "test", "-d", reported, check=False, capture_output=True)
+        runner.require(exists.returncode == 0, "Reported native Android profile does not exist; no storage reseeding fallback")
+        adb("shell", "am", "force-stop", PACKAGE)
+        self.native_profile = reported
+        return reported
 
     def close(self):
-        if self.driver:
-            with (runner.ARTIFACTS / "android-logcat.txt").open("wb") as output:
-                adb("logcat", "-d", "-v", "threadtime", stdout=output)
-            self.screenshot("android-final-screen")
-            self.locate_native_profile()
+        driver = self.driver
+        if driver is None:
+            return
+        primary = sys.exc_info()[1]
+        failure = None
+        try:
+            if primary is None:
+                with (runner.ARTIFACTS / "android-logcat.txt").open("ab") as output:
+                    adb("logcat", "-d", "-v", "threadtime", stdout=output)
+                self.screenshot("android-final-screen")
+            else:
+                lifecycle_failure("close-after-primary-failure", primary)
+        except Exception as error:
+            failure = error
+            lifecycle_failure("close-capture", error)
+        finally:
+            # No profile discovery or force-stop is needed for final disposal.
+            # Detach first so an outer finally cannot re-enter a failed close.
+            self.driver = None
             try:
-                super().close()
-            except WebDriverException:
-                self.driver = None  # The native process was explicitly stopped.
+                driver.quit()
+            except Exception as error:
+                lifecycle_failure("webdriver-quit", error)
+                if failure is None:
+                    failure = error
+                else:
+                    failure.add_note("WebDriver disposal also failed: " + type(error).__name__)
+        if failure is not None:
+            if primary is not None:
+                primary.add_note("Android disposal also failed: " + type(failure).__name__)
+            else:
+                raise failure
 
     def restart(self, first_url=None):
         first_restart = not getattr(self, "retained_native_session", False)

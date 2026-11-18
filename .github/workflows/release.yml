@@ -265,6 +265,7 @@ jobs:
         run: |
           # Ubuntu 24.04 supplies Python 3.12 and Git; run tests as the runner,
           # not root in the legacy-glibc packaging container.
+          python3 tests/browser/image_recipes.py --check
           python3 -m venv "$RUNNER_TEMP/portmap-tests"
           "$RUNNER_TEMP/portmap-tests/bin/pip" install --no-cache-dir -e ".[test]"
           "$RUNNER_TEMP/portmap-tests/bin/python" -m pytest -m "not integration"

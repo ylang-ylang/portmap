@@ -4,6 +4,7 @@ Runtime, app and tested Portmap binaries are per-run inputs, never golden-base
 contents. This module also owns the shared unprivileged QEMU launch primitives.
 """
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -15,12 +16,19 @@ import tempfile
 import urllib.request
 import uuid
 
+_image_spec = importlib.util.spec_from_file_location(__name__ + '.image_builder', Path(__file__).resolve().parent / 'image_builder.py')
+if _image_spec is None or _image_spec.loader is None:
+    raise RuntimeError('Cannot load the explicit dependency image construction module')
+images = importlib.util.module_from_spec(_image_spec)
+_image_spec.loader.exec_module(images)
+
 SOURCE_DIR = Path(__file__).resolve().parent
 CONSTRUCTION_FILES = (
     'base_cache.py', 'runtime-inputs.json', 'Runtime.Dockerfile', 'base_bootstrap.py',
     'deps/Dockerfile', 'deps/package.json', 'deps/package-lock.json',
+    'image_builder.py', 'runtime-image.json', 'runtime-setup.sh',
 )
-LABEL = 'portmap.real-node.run'
+LABEL = images.LABEL
 WRAPPER_TAG_PREFIX = 'portmap-real-node-runtime:cache-'
 
 
@@ -84,40 +92,7 @@ def _copy_source(relative, destination):
     shutil.copyfile(source, destination)
 
 
-class DependencyBase:
-    def _new_network(self, suffix, internal):
-        # Reject overlap BEFORE creating a bridge, including policy-routing tables
-        # used by Tailscale. Docker's default pool selection alone is insufficient.
-        occupied = []
-        for route in json.loads(self._run(['ip', '-j', 'route', 'show', 'table', 'all']).stdout):
-            destination = route.get('dst')
-            if destination and destination != 'default':
-                network = ipaddress.ip_network(destination, strict=False)
-                if network.version == 4 and network.prefixlen:
-                    occupied.append(network)
-        ids = self._docker(['network', 'ls', '-q']).stdout.split()
-        if ids:
-            for network in json.loads(self._docker(['network', 'inspect', *ids]).stdout):
-                for configuration in network.get('IPAM', {}).get('Config') or []:
-                    subnet = configuration.get('Subnet')
-                    if subnet and ':' not in subnet:
-                        occupied.append(ipaddress.ip_network(subnet))
-        candidates = [ipaddress.ip_network(prefix + str(index) + '.0/24')
-                      for prefix in ('10.247.', '172.30.', '192.168.', '198.18.')
-                      for index in range(32, 240)]
-        subnet = next((candidate for candidate in candidates if not any(candidate.overlaps(other) for other in occupied)), None)
-        if subnet is None:
-            raise RuntimeFailure('No non-overlapping disposable IPv4 subnet; do not change host or Tailscale routes')
-        name = self.prefix + '-' + suffix
-        arguments = ['network', 'create', '--label', LABEL + '=' + self.run_id,
-                     '--subnet', str(subnet)]
-        if internal:
-            arguments.append('--internal')
-        identifier = self._docker([*arguments, name]).stdout.strip()
-        resource = {'id': identifier, 'name': name, 'subnet': str(subnet)}
-        self.resources['networks'].append(resource)
-        self._checkpoint()
-        return resource
+class DependencyBase(images.Resources):
 
     def _tool(self, executable, arguments, mounts):
         command = ['run', '--rm', '--network', 'none', '--user', f'{os.getuid()}:{os.getgid()}',
@@ -192,10 +167,11 @@ class DependencyBase:
     def _cache_build(self, temporary):
         work = self.state / 'dependency-builder'
         work.mkdir(mode=0o700)
-        wrapper = work / 'wrapper'
-        wrapper.mkdir()
-        _copy_source('Runtime.Dockerfile', wrapper / 'Dockerfile')
-        self._docker(['build', '--pull=false', '--tag', self.wrapper_tag, str(wrapper)], timeout=1800)
+        network = self._new_network('dependency-egress', internal=False)
+        construction = self._build_image(SOURCE_DIR / 'runtime-image.json',
+                                         root=SOURCE_DIR.parents[2], tag=self.wrapper_tag,
+                                         network=network, work=work / 'wrapper',
+                                         log=self.out_dir / 'wrapper-build.log')
         wrapper_identity = json.loads(self._docker(['image', 'inspect', self.wrapper_tag]).stdout)[0]
         self._docker(['save', '--output', str(temporary / 'wrapper-image.tar'), self.wrapper_tag], timeout=600)
         self._download_os(temporary / 'os.qcow2')
@@ -228,7 +204,6 @@ class DependencyBase:
                             ['mount', '-t', '9p', '-o', 'trans=virtio,version=9p2000.L,ro', 'portmapinputs', '/mnt/inputs'],
                             ['python3', '/mnt/inputs/base_bootstrap.py', '/mnt/inputs']]}
         self._seed(work / 'seed', cloud, 'pm-dependency-base')
-        network = self._new_network('dependency-egress', internal=False)
         address = str(ipaddress.ip_network(network['subnet']).network_address + 11)
         resource = self._launch(self.prefix + '-dependency-builder', network, address, work, inputs, temporary, expose_services=False)
         try:
@@ -251,4 +226,4 @@ class DependencyBase:
         if information.get('backing-filename'):
             raise RuntimeFailure('Sealed dependency disk must not have a backing file')
         shutil.rmtree(work)
-        return seal, {'rootfsLayers': wrapper_identity['RootFS']['Layers']}
+        return seal, {'rootfsLayers': wrapper_identity['RootFS']['Layers'], 'construction': construction}

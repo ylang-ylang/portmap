@@ -22,11 +22,30 @@ from tests.browser.real_node import native_gateway_markers as native_gateway
 from tests.browser.real_node.runtime import SOURCE_FILES
 
 ROOT = Path(__file__).resolve().parents[1]
+UBUNTU_SNAPSHOT = '20261118T000000Z'
 PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=')
 
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def package_transport_fixture(*, package='docker.io', version='29.1.3', architecture='amd64'):
+    filename = package + '_' + version.replace(':', '%3a') + '_' + architecture + '.deb'
+    remote = package + '_' + version.split(':', 1)[-1] + '_' + architecture + '.deb'
+    primary = ('https://snapshot.ubuntu.com/ubuntu/' + UBUNTU_SNAPSHOT + '/pool/main/' +
+               package[0] + '/' + package + '/' + remote)
+    return {'package': package, 'version': version, 'architecture': architecture, 'filename': filename,
+            'primary': primary, 'sha256': 'a' * 64, 'bytes': 1024, 'provider': 'snapshot.ubuntu.com',
+            'url': primary, 'primaryHttpStatus': 200, 'alternateAttempts': 0}
+
+
+def archive_package_transport(row, status=502):
+    row.update(provider='archive.ubuntu.com',
+               url=row['primary'].replace('snapshot.ubuntu.com/ubuntu/' + UBUNTU_SNAPSHOT,
+                                          'archive.ubuntu.com/ubuntu'),
+               primaryHttpStatus=status, alternateAttempts=1)
+    return row
 
 
 def public_host_key(mode):
@@ -309,14 +328,15 @@ def aggregate_fixture(directory, *, release, xpi, source, executable_sha256, run
                                           'image_id': 'sha256:' + 'b' * 64, 'archive_sha256': 'd' * 64} for platform in platforms},
              'runtime': {'cache': {'cache_key': construction_key, 'cache_hit': True, 'elapsed_seconds': 1,
                                   'manifest_sha256': 'd' * 64, 'artifacts': [{'name': 'base.qcow2', 'sha256': 'e' * 64, 'bytes': 100}],
-                                  'sources': {'os': {'sha256': 'e' * 64}, 'images': ['sha256:' + 'f' * 64], 'ubuntuSnapshot': '20261118T000000Z',
+                                  'sources': {'os': {'sha256': 'e' * 64}, 'images': ['sha256:' + 'f' * 64], 'ubuntuSnapshot': UBUNTU_SNAPSHOT,
                                               'dockerVersion': '29.1.3', 'nodeVersion': '22.22.3', 'viteVersion': '8.0.16',
                                               'constructionFiles': construction_sources, 'sourceFiles': runtime_sources},
                                   'golden': {'construction': 'dependencies-only-no-portmap-no-app-no-consumer-credentials',
                                       'dockerVersion': '29.1.3', 'nodeVersion': '22.22.3', 'viteVersion': '8.0.16',
                                       'consumerAccounts': 0, 'containers': 0, 'sshHostKeys': 0,
                                       'portmapInstalled': False, 'appInstalled': False, 'packagesSha256': 'a' * 64,
-                                      'packages': ['docker=29.1.3'], 'images': [{'id': 'sha256:' + 'b' * 64}],
+                                      'packages': ['docker.io=29.1.3'], 'packageTransports': [package_transport_fixture()],
+                                      'images': [{'id': 'sha256:' + 'b' * 64}],
                                       'dependencyImage': 'deps:unit-test', 'dependencyImageId': 'sha256:' + 'c' * 64,
                                       'freeBlockSanitization': '/: unit-test fstrim receipt',
                                       'sshKeyGenerationPrevented': 'no build-time host keys',
@@ -354,11 +374,316 @@ def real_proof(tmp_path):
                           'commit': commit, 'source': source, 'require_candidate': True}
 
 
+@pytest.fixture
+def golden_packages():
+    return {'packages': ['docker.io=29.1.3'], 'packageTransports': [package_transport_fixture()]}
+
+
 def test_complete_candidate_binds_four_cases_two_full_nodes_and_native_raw_records(real_proof):
     path, proof, required = real_proof
     assert evidence.validate_aggregate(path, **required) == proof
     assert len(proof['runtime']['evidence']['nodes']) == 2
     assert sum(len(receipt['scenarios']) for receipt in proof['platforms'].values()) == 4
+    sources = proof['runtime']['cache']['sources']
+    assert len(sources['sourceFiles']) == len(SOURCE_FILES) == 23
+    assert sources['sourceFiles'] == {'tests/browser/real_node/' + name:
+                                      evidence.file_sha256(ROOT / 'tests/browser/real_node' / name) for name in SOURCE_FILES}
+    assert len(sources['constructionFiles']) == len(evidence.CONSTRUCTION_SOURCE_INPUTS) == 10
+    assert sources['constructionFiles'] == {name: sources['sourceFiles'][name]
+                                             for name in evidence.CONSTRUCTION_SOURCE_INPUTS}
+
+
+def test_aggregate_accepts_exact_archive_fallback_without_replacing_snapshot_provenance(real_proof):
+    path, proof, required = real_proof
+    row = archive_package_transport(proof['runtime']['cache']['golden']['packageTransports'][0])
+    persist_fixture(path, proof)
+    assert evidence.validate_aggregate(path, **required) == proof
+    assert row['primaryHttpStatus'] == 502 and row['alternateAttempts'] == 1
+    assert row['provider'] == 'archive.ubuntu.com'
+
+
+@pytest.mark.parametrize('field', ['primary', 'url'])
+@pytest.mark.parametrize('value', [None, '', 123, ['https://snapshot.ubuntu.com/']])
+def test_package_transports_reject_non_url_provenance(golden_packages, field, value):
+    golden_packages['packageTransports'][0][field] = value
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('archive', [False, True], ids=['snapshot-labelled-archive', 'archive-labelled-snapshot'])
+def test_package_transports_cannot_swap_provider_labels(golden_packages, archive):
+    row = golden_packages['packageTransports'][0]
+    if archive:
+        archive_package_transport(row)
+        row['provider'] = 'snapshot.ubuntu.com'
+    else:
+        row['provider'] = 'archive.ubuntu.com'
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('missing', [True, False], ids=['missing', 'empty'])
+def test_aggregate_requires_new_golden_package_transport_provenance(real_proof, missing):
+    path, proof, required = real_proof
+    golden = proof['runtime']['cache']['golden']
+    if missing:
+        del golden['packageTransports']
+    else:
+        golden['packageTransports'] = []
+    persist_fixture(path, proof)
+    with pytest.raises(ValueError, match='package transport provenance'):
+        evidence.validate_aggregate(path, **required)
+
+
+@pytest.mark.parametrize('architecture,suffix', [('amd64', ''), ('amd64', ':amd64'), ('all', ''), ('all', ':all')])
+def test_package_transports_bind_actual_binary_package_architecture(architecture, suffix):
+    row = package_transport_fixture(architecture=architecture)
+    golden = {'packages': ['base-files=13ubuntu10.3', row['package'] + suffix + '=' + row['version']],
+              'packageTransports': [row]}
+    assert evidence._package_transports(golden, UBUNTU_SNAPSHOT) == [row]
+
+
+@pytest.mark.parametrize('encoding', [':', '%3a', '%3A'])
+@pytest.mark.parametrize('remote_epoch', [False, True], ids=['epoch-omitted-in-pool', 'epoch-retained-in-pool'])
+def test_package_transports_accept_exact_epoch_version_without_equating_newer_packages(encoding, remote_epoch):
+    row = package_transport_fixture(version='2:29.1.3-0ubuntu1~24.04.1+test')
+    row['filename'] = row['filename'].replace('%3a', encoding)
+    if remote_epoch:
+        row['primary'] = row['primary'].replace('docker.io_29', 'docker.io_2%3a29')
+        row['url'] = row['primary']
+    golden = {'packages': ['docker.io:amd64=' + row['version']], 'packageTransports': [row]}
+    assert evidence._package_transports(golden, UBUNTU_SNAPSHOT) == [row]
+
+
+@pytest.mark.parametrize('status', [404, 410, 500, 502, 599])
+def test_package_transports_accept_exactly_one_approved_availability_alternate(golden_packages, status):
+    row = archive_package_transport(golden_packages['packageTransports'][0], status)
+    assert evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT) == [row]
+    assert row['primary'].startswith('https://snapshot.ubuntu.com/ubuntu/' + UBUNTU_SNAPSHOT + '/pool/')
+    assert row['url'].startswith('https://archive.ubuntu.com/ubuntu/pool/')
+    assert row['primaryHttpStatus'] == status and row['alternateAttempts'] == 1
+
+
+def test_package_transports_accept_multiple_distinct_pinned_packages(golden_packages):
+    row = package_transport_fixture(package='runc', version='1.2.8-0ubuntu1~24.04.1')
+    golden_packages['packages'].append(row['package'] + '=' + row['version'])
+    golden_packages['packageTransports'].append(row)
+    assert evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT) == golden_packages['packageTransports']
+
+
+@pytest.mark.parametrize('rows', [None, {}, 'receipt', [], [None], ['receipt'], [{}]])
+def test_package_transports_reject_missing_or_malformed_rows(golden_packages, rows):
+    golden_packages['packageTransports'] = rows
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('field', tuple(package_transport_fixture()))
+def test_package_transports_require_every_public_provenance_field(golden_packages, field):
+    del golden_packages['packageTransports'][0][field]
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+def test_package_transports_reject_extra_private_or_unapproved_provenance(golden_packages):
+    golden_packages['packageTransports'][0]['cachePath'] = '/var/cache/private-package-cache'
+    with pytest.raises(ValueError, match='exact public provenance fields'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('package', 'docker'), ('package', 'docker.io:amd64'), ('package', None),
+    ('version', '29.1.4'), ('version', '29.1.3\n'), ('version', None),
+    ('architecture', 'arm64'), ('architecture', 'i386'), ('architecture', 'all'), ('architecture', True),
+    ('sha256', 'a' * 32), ('sha256', 'a' * 63), ('sha256', 'g' * 64), ('sha256', 'A' * 64),
+    ('sha256', 'SHA256:' + 'a' * 64), ('sha256', None),
+    ('bytes', 0), ('bytes', -1), ('bytes', True), ('bytes', 1024.0), ('bytes', '1024'),
+    ('provider', 'snapshot'), ('provider', 'archive'), ('provider', 'evil.example'), ('provider', None),
+])
+def test_package_transports_reject_unbound_identity_hash_size_or_provider(golden_packages, field, value):
+    golden_packages['packageTransports'][0][field] = value
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('filename', [
+    '../docker.io_29.1.3_amd64.deb', '/docker.io_29.1.3_amd64.deb',
+    'dir/docker.io_29.1.3_amd64.deb', 'dir\\docker.io_29.1.3_amd64.deb',
+    '%2e%2e%2fdocker.io_29.1.3_amd64.deb', 'docker.io_29%2f1.3_amd64.deb',
+    'docker.io_29%5c1.3_amd64.deb', 'docker.io_29%001.3_amd64.deb',
+    'docker.io_29%ff1.3_amd64.deb', 'docker.io_29%zz1.3_amd64.deb',
+    'docker.io_2%253a29.1.3_amd64.deb', 'docker.io_29.1.3_amd64.deb\n',
+    'docker.io_29.1.3_arm64.deb', 'docker.io_29.1.3_amd64.rpm',
+    'docker.io_29.1.4_amd64.deb', 'other_29.1.3_amd64.deb', 'Docker.io_29.1.3_amd64.deb',
+])
+def test_package_transports_reject_unsafe_or_conflicting_destination_filenames(golden_packages, filename):
+    golden_packages['packageTransports'][0]['filename'] = filename
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('packages', [
+    None, [], {}, 'docker.io=29.1.3', [None], ['docker=29.1.3'], ['docker.io=29.1.4'],
+    ['docker.io:arm64=29.1.3'], ['docker.io:all=29.1.3'], ['docker.io:amd64junk=29.1.3'],
+    ['docker.io:amd64:extra=29.1.3'], ['docker.io=29.1.3=extra'], ['docker.io=29.1.3\n'],
+    ['docker.io=29.1.3', 'docker.io=29.1.3'], ['docker.io=29.1.3', 'docker.io:amd64=29.1.3'],
+    ['docker.io=29.1.3', 'docker.io=29.1.2'],
+])
+def test_package_transports_require_one_exact_actual_installed_identity(golden_packages, packages):
+    golden_packages['packages'] = packages
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('version', ['29.1.4', '1:29.1.3'])
+def test_package_transports_cannot_relabel_installed_version_with_self_consistent_blob_identity(golden_packages, version):
+    golden_packages['packageTransports'] = [package_transport_fixture(version=version)]
+    with pytest.raises(ValueError, match='actual installed package'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('collision', ['identical', 'encoded-filename-alias', 'newer-version', 'other-architecture',
+                                       'conflicting-destination'])
+def test_package_transports_reject_duplicate_or_conflicting_identities_and_filenames(golden_packages, collision):
+    duplicate = copy.deepcopy(golden_packages['packageTransports'][0])
+    if collision == 'encoded-filename-alias':
+        duplicate['filename'] = duplicate['filename'].replace('docker.io', 'docker%2eio')
+    elif collision == 'newer-version':
+        duplicate = package_transport_fixture(version='29.1.4')
+    elif collision == 'other-architecture':
+        duplicate = package_transport_fixture(architecture='all')
+    elif collision == 'conflicting-destination':
+        duplicate['package'] = 'runc'
+    golden_packages['packageTransports'].append(duplicate)
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('snapshot', [None, 20261118, '20261118', '2026-11-18T00:00:00Z',
+                                      '20261118T000000Z/..', '20261118T000000Z?'])
+def test_package_transports_require_exact_pinned_snapshot_identity(golden_packages, snapshot):
+    with pytest.raises(ValueError, match='exact pinned Ubuntu snapshot'):
+        evidence._package_transports(golden_packages, snapshot)
+
+
+@pytest.mark.parametrize('old,new', [
+    ('https://', 'http://'), ('https://', 'HTTPS://'),
+    ('snapshot.ubuntu.com', 'archive.ubuntu.com'), ('snapshot.ubuntu.com', 'snapshot.ubuntu.com.evil'),
+    ('snapshot.ubuntu.com', 'user@snapshot.ubuntu.com'), ('snapshot.ubuntu.com', 'user:password@snapshot.ubuntu.com'),
+    ('snapshot.ubuntu.com', 'snapshot.ubuntu.com:443'), ('snapshot.ubuntu.com', '[snapshot.ubuntu.com'),
+    ('/ubuntu/', '/debian/'), (UBUNTU_SNAPSHOT, '20261117T000000Z'), ('/pool/', '/dists/'),
+    ('/main/', '/../'), ('/main/', '/./'), ('/main/', '/%2e%2e/'), ('/main/', '//'),
+    ('/main/', '/ma%2fin/'), ('/main/', '/ma%5cin/'), ('/main/', '/ma%252fin/'),
+    ('/main/', '/ma%zzin/'), ('/main/', '/ma%ffin/'), ('/main/', '/ma%00in/'), ('/main/', '/ma\tin/'),
+    ('/main/', '/ma\\in/'), ('docker.io_29.1.3', 'runc_29.1.3'), ('29.1.3', '29.1.4'),
+    ('_amd64.deb', '_all.deb'), ('.deb', '.rpm'),
+])
+def test_package_transports_reject_unapproved_primary_provider_or_exact_pool_path(golden_packages, old, new):
+    row = golden_packages['packageTransports'][0]
+    row['primary'] = row['primary'].replace(old, new)
+    row['url'] = row['primary']
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('suffix', ['?token=secret', '#fragment', '?', '#'])
+def test_package_transports_reject_even_empty_query_or_fragment_delimiters(golden_packages, suffix):
+    row = golden_packages['packageTransports'][0]
+    row['primary'] += suffix
+    row['url'] = row['primary']
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('prefix', [' ', '\t', '\n'])
+def test_package_transports_reject_url_parser_whitespace_normalization(golden_packages, prefix):
+    row = golden_packages['packageTransports'][0]
+    row['primary'] = prefix + row['primary']
+    row['url'] = row['primary']
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+def test_package_transports_reject_different_remote_epoch_even_with_matching_destination(golden_packages):
+    row = package_transport_fixture(version='2:29.1.3')
+    row['primary'] = row['primary'].replace('docker.io_29', 'docker.io_3%3a29')
+    row['url'] = row['primary']
+    golden_packages.update(packages=['docker.io=2:29.1.3'], packageTransports=[row])
+    with pytest.raises(ValueError, match='pool filename differs'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('old,new', [
+    ('https://', 'http://'), ('archive.ubuntu.com', 'snapshot.ubuntu.com'),
+    ('archive.ubuntu.com', 'archive.ubuntu.com.evil'), ('archive.ubuntu.com', 'user@archive.ubuntu.com'),
+    ('archive.ubuntu.com', 'archive.ubuntu.com:443'), ('/ubuntu/pool/', '/ubuntu/' + UBUNTU_SNAPSHOT + '/pool/'),
+    ('/main/', '/universe/'), ('/main/', '/../'), ('29.1.3', '29.1.4'), ('.deb', '.deb?'),
+])
+def test_package_transports_reject_alternate_provider_or_path_changes(golden_packages, old, new):
+    row = archive_package_transport(golden_packages['packageTransports'][0])
+    row['url'] = row['url'].replace(old, new)
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+def test_package_transports_reject_relabelled_snapshot_url(golden_packages):
+    row = golden_packages['packageTransports'][0]
+    row['url'] = row['url'].replace('/main/', '/universe/')
+    with pytest.raises(ValueError, match='snapshot provenance'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('provider,status,attempts', [
+    ('snapshot.ubuntu.com', 404, 0), ('snapshot.ubuntu.com', 410, 0), ('snapshot.ubuntu.com', 502, 0),
+    ('snapshot.ubuntu.com', 200, 1), ('snapshot.ubuntu.com', '200', 0), ('snapshot.ubuntu.com', True, 0),
+    ('snapshot.ubuntu.com', 200.0, 0), ('snapshot.ubuntu.com', 200, False),
+    ('snapshot.ubuntu.com', 200, '0'), ('snapshot.ubuntu.com', 200, 0.0),
+    ('archive.ubuntu.com', 200, 1), ('archive.ubuntu.com', 301, 1), ('archive.ubuntu.com', 400, 1),
+    ('archive.ubuntu.com', 401, 1), ('archive.ubuntu.com', 403, 1), ('archive.ubuntu.com', 409, 1),
+    ('archive.ubuntu.com', 411, 1), ('archive.ubuntu.com', 429, 1), ('archive.ubuntu.com', 499, 1),
+    ('archive.ubuntu.com', 600, 1), ('archive.ubuntu.com', -1, 1), ('archive.ubuntu.com', '502', 1),
+    ('archive.ubuntu.com', 502.0, 1), ('archive.ubuntu.com', 502, 0), ('archive.ubuntu.com', 502, 2),
+    ('archive.ubuntu.com', 502, True), ('archive.ubuntu.com', 502, 1.0), ('archive.ubuntu.com', 502, '1'),
+])
+def test_package_transports_reject_other_statuses_and_any_extra_or_unproved_attempt(golden_packages, provider, status, attempts):
+    row = golden_packages['packageTransports'][0]
+    if provider == 'archive.ubuntu.com':
+        archive_package_transport(row)
+    row.update(primaryHttpStatus=status, alternateAttempts=attempts)
+    with pytest.raises(ValueError, match='package transport'):
+        evidence._package_transports(golden_packages, UBUNTU_SNAPSHOT)
+
+
+@pytest.mark.parametrize('name', evidence.CONSTRUCTION_SOURCE_INPUTS)
+@pytest.mark.parametrize('component', ['sourceFiles', 'constructionFiles'])
+def test_aggregate_rejects_each_missing_cold_construction_source(real_proof, name, component):
+    path, proof, required = real_proof
+    del proof['runtime']['cache']['sources'][component][name]
+    persist_fixture(path, proof)
+    message = 'incomplete current harness/app source inputs' if component == 'sourceFiles' else 'construction inputs differ'
+    with pytest.raises(ValueError, match=message):
+        evidence.validate_aggregate(path, **required)
+
+
+@pytest.mark.parametrize('identity', ['old-key', 'old-construction', 'relabelled-old-construction'])
+def test_aggregate_rejects_old_or_relabelled_schema2_construction_identity(real_proof, identity):
+    path, proof, required = real_proof
+    cache = proof['runtime']['cache']
+    current = cache['sources']['constructionFiles']
+    new_inputs = {'tests/browser/real_node/' + name for name in
+                  ('image_builder.py', 'runtime-image.json', 'runtime-setup.sh')}
+    legacy = {name: value for name, value in current.items() if name not in new_inputs}
+    old_key = hashlib.sha256(json.dumps({'schema': 2, 'constructionFiles': legacy},
+                                      sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    assert len(legacy) == 7 and len(current) == 10 and old_key != cache['cache_key']
+    if identity != 'old-key':
+        cache['sources']['constructionFiles'] = legacy
+    if identity != 'relabelled-old-construction':
+        cache['cache_key'] = old_key
+    persist_fixture(path, proof)
+    message = 'schema-2 construction inputs' if identity == 'old-key' else 'construction inputs differ'
+    with pytest.raises(ValueError, match=message):
+        evidence.validate_aggregate(path, **required)
 
 
 @pytest.mark.parametrize('components,value', [

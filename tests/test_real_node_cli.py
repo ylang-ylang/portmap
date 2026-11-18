@@ -19,6 +19,16 @@ ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location('real_node_cli_contract', ROOT / 'tools/test_real_portmap.py')
 gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gate)
+_packaging_spec = importlib.util.spec_from_file_location('real_node_source_contract', ROOT / 'tools/build_firefox_extension.py')
+packaging = importlib.util.module_from_spec(_packaging_spec)
+_packaging_spec.loader.exec_module(packaging)
+RUNTIME_SOURCE_PREFIX = 'tests/browser/real_node/'
+LEGACY_CONSTRUCTION_FILES = (
+    'base_cache.py', 'runtime-inputs.json', 'Runtime.Dockerfile', 'base_bootstrap.py',
+    'deps/Dockerfile', 'deps/package.json', 'deps/package-lock.json',
+)
+RUNTIME_IMAGE_FILES = ('image_builder.py', 'runtime-image.json', 'runtime-setup.sh')
+SHARED_IMAGE_BUILDER = RUNTIME_SOURCE_PREFIX + 'image_builder.py'
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +39,23 @@ def private_cache_creation():
         yield
     finally:
         os.umask(previous)
+
+
+@pytest.fixture
+def cache_source_tree(tmp_path, monkeypatch):
+    """Give both cache implementations one offline, synthetic repository."""
+    inputs = {*gate.BROWSER_INPUTS, *(RUNTIME_SOURCE_PREFIX + name for name in runtime_module.SOURCE_FILES),
+              'tests/browser/image_recipes.py'}
+    for name in inputs:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('unit source: ' + name)
+    source_dir = tmp_path / 'tests/browser/real_node'
+    (source_dir / 'runtime-inputs.json').write_text(json.dumps({'os': {'sha256': 'e' * 64}, 'images': []}))
+    monkeypatch.setattr(gate, 'ROOT', tmp_path)
+    monkeypatch.setattr(runtime_module, 'SOURCE_DIR', source_dir)
+    monkeypatch.setattr(runtime_module.base, 'SOURCE_DIR', source_dir)
+    return tmp_path
 
 
 def write_addon(path, version):
@@ -88,20 +115,44 @@ def test_candidate_identity_failure_occurs_before_any_runtime_or_browser(candida
     assert proof['inputs'] == {} and proof['runtime'] == {} and proof['platforms'] == {}
 
 
-def test_cache_key_tracks_toolchain_inputs_but_not_release_results_or_payload(tmp_path, monkeypatch):
-    for name in gate.BROWSER_INPUTS:
-        path = tmp_path / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(name)
-    monkeypatch.setattr(gate, 'ROOT', tmp_path)
+def test_cold_construction_source_allowlists_match_current_harness_provenance():
+    construction_names = {*LEGACY_CONSTRUCTION_FILES, *RUNTIME_IMAGE_FILES}
+    runtime_names = {*construction_names, 'runtime.py', 'node_bootstrap.py', 'guest_evidence.py',
+                     'native_gateway_markers.py', 'app/Dockerfile', 'app/compose.yaml', 'app/package.json',
+                     'app/vite.config.js', 'app/index.html', 'app/src/main.js', 'app/src/style.css',
+                     'app/public/badge.svg', 'app/public/proof.txt'}
+    runtime_sources = {RUNTIME_SOURCE_PREFIX + name for name in runtime_names}
+    construction_sources = {RUNTIME_SOURCE_PREFIX + name for name in construction_names}
+    browser_sources = {'tests/browser/' + name for name in (
+        'Dockerfile', 'Android.Dockerfile', 'requirements.txt', 'desktop-image.json',
+        'android-image.json', 'browser-setup.sh', 'android-setup.sh',
+    )} | {SHARED_IMAGE_BUILDER}
+    assert len(runtime_module.SOURCE_FILES) == len(runtime_names) == 23
+    assert set(runtime_module.SOURCE_FILES) == runtime_names
+    assert len(runtime_module.base.CONSTRUCTION_FILES) == len(construction_names) == 10
+    assert set(runtime_module.base.CONSTRUCTION_FILES) == construction_names
+    assert len(evidence.CONSTRUCTION_SOURCE_INPUTS) == len(construction_sources) == 10
+    assert set(evidence.CONSTRUCTION_SOURCE_INPUTS) == construction_sources
+    assert len(gate.BROWSER_INPUTS) == len(browser_sources) == 8
+    assert set(gate.BROWSER_INPUTS) == browser_sources
+    assert runtime_sources & browser_sources == {SHARED_IMAGE_BUILDER}
+    harness_sources = set(packaging.HARNESS_FILES)
+    assert len(packaging.HARNESS_FILES) == len(harness_sources)
+    assert runtime_sources | browser_sources | {'tests/browser/image_recipes.py'} <= harness_sources
+    recorded_runtime = {name for name in harness_sources if name.startswith(RUNTIME_SOURCE_PREFIX) and
+                        name not in evidence.BROWSER_SOURCE_INPUTS and name != RUNTIME_SOURCE_PREFIX + '__init__.py'}
+    assert recorded_runtime == runtime_sources
+
+
+def test_cache_key_tracks_toolchain_inputs_but_not_release_results_or_payload(cache_source_tree, monkeypatch):
     monkeypatch.setattr(gate, 'runtime_cache_key', lambda: 'a' * 64)
     first = gate.cache_key()
     browser_first = gate.browser_cache_key()
-    (tmp_path / 'result.json').write_text('{"status":"passed"}')
-    (tmp_path / 'addon.xpi').write_bytes(b'unrelated new version')
+    (cache_source_tree / 'result.json').write_text('{"status":"passed"}')
+    (cache_source_tree / 'addon.xpi').write_bytes(b'unrelated new version')
     assert gate.cache_key() == first
     assert gate.browser_cache_key() == browser_first
-    (tmp_path / gate.BROWSER_INPUTS[0]).write_text('new pinned browser toolchain')
+    (cache_source_tree / gate.BROWSER_INPUTS[0]).write_text('new pinned browser toolchain')
     assert gate.cache_key() != first
     browser_second = gate.browser_cache_key()
     assert browser_second != browser_first
@@ -111,42 +162,84 @@ def test_cache_key_tracks_toolchain_inputs_but_not_release_results_or_payload(tm
     assert gate.browser_cache_key() == browser_second
 
 
-@pytest.mark.parametrize('name', gate.BROWSER_INPUTS)
-def test_browser_toolchain_changes_do_not_invalidate_the_runtime_base(tmp_path, monkeypatch, name):
-    for filename in gate.BROWSER_INPUTS:
-        path = tmp_path / filename
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('unit browser toolchain: ' + filename)
-    monkeypatch.setattr(gate, 'ROOT', tmp_path)
+@pytest.mark.parametrize('name', [name for name in gate.BROWSER_INPUTS if name != SHARED_IMAGE_BUILDER])
+def test_browser_toolchain_changes_do_not_invalidate_the_runtime_base(cache_source_tree, name):
+    sources_before = runtime_module._source_identities()
     runtime_before = gate.runtime_cache_key()
     browser_before = gate.browser_cache_key()
     overall_before = gate.cache_key()
-    (tmp_path / name).write_text('changed browser toolchain: ' + name)
+    (cache_source_tree / name).write_text('changed browser toolchain: ' + name)
+    assert runtime_module._source_identities() == sources_before
     assert gate.runtime_cache_key() == runtime_before
     assert gate.browser_cache_key() != browser_before
     assert gate.cache_key() != overall_before
 
 
 @pytest.mark.parametrize('name', runtime_module.SOURCE_FILES)
-def test_runtime_source_changes_invalidate_only_the_dependency_construction_component(tmp_path, monkeypatch, name):
-    for filename in runtime_module.SOURCE_FILES:
-        path = tmp_path / filename
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('unit source: ' + filename)
-    monkeypatch.setattr(runtime_module, 'SOURCE_DIR', tmp_path)
-    monkeypatch.setattr(runtime_module.base, 'SOURCE_DIR', tmp_path)
+def test_runtime_source_changes_invalidate_only_the_caches_that_consume_them(cache_source_tree, name):
     source_before = runtime_module._source_identities()
     runtime_before = runtime_module.cache_key()
     browser_before = gate.browser_cache_key()
     overall_before = gate.cache_key()
-    (tmp_path / name).write_text('changed unit source: ' + name)
+    source_name = RUNTIME_SOURCE_PREFIX + name
+    (cache_source_tree / source_name).write_text('changed unit source: ' + name)
     source_after = runtime_module._source_identities()
-    source_name = 'tests/browser/real_node/' + name
     construction_input = source_name in evidence.CONSTRUCTION_SOURCE_INPUTS
     assert source_after[source_name] != source_before[source_name]
+    assert {key for key in source_after if source_after[key] != source_before[key]} == {source_name}
     assert (runtime_module.cache_key() != runtime_before) is construction_input
-    assert gate.browser_cache_key() == browser_before
+    assert (gate.browser_cache_key() != browser_before) is (source_name == SHARED_IMAGE_BUILDER)
     assert (gate.cache_key() != overall_before) is construction_input
+
+
+def test_recipe_generator_is_provenance_only_not_a_cold_construction_input(cache_source_tree):
+    before = (runtime_module._source_identities(), runtime_module.cache_key(), gate.browser_cache_key(), gate.cache_key())
+    (cache_source_tree / 'tests/browser/image_recipes.py').write_text('changed legacy Dockerfile renderer')
+    assert (runtime_module._source_identities(), runtime_module.cache_key(), gate.browser_cache_key(), gate.cache_key()) == before
+
+
+def test_new_construction_inputs_produce_new_keys_without_changing_schema2(cache_source_tree):
+    current = runtime_module.base.construction_files()
+    legacy = {RUNTIME_SOURCE_PREFIX + name: current[RUNTIME_SOURCE_PREFIX + name] for name in LEGACY_CONSTRUCTION_FILES}
+    def schema2_key(sources):
+        return hashlib.sha256(json.dumps({'schema': 2, 'constructionFiles': sources},
+                                         sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    assert runtime_module.cache_key() == schema2_key(current)
+    assert runtime_module.cache_key() != schema2_key(legacy)
+    old_browser_inputs = {name: gate.sha256(cache_source_tree / name) for name in
+                          ('tests/browser/Dockerfile', 'tests/browser/Android.Dockerfile', 'tests/browser/requirements.txt')}
+    assert gate.browser_cache_key() != hashlib.sha256(json.dumps(old_browser_inputs, sort_keys=True).encode()).hexdigest()
+
+
+@pytest.mark.parametrize('relabelled', [False, True])
+def test_legacy_schema2_cache_entries_are_neither_selected_nor_relabelled(cache_source_tree, tmp_path, monkeypatch, relabelled):
+    current = runtime_module.base.construction_files()
+    legacy = {RUNTIME_SOURCE_PREFIX + name: current[RUNTIME_SOURCE_PREFIX + name] for name in LEGACY_CONSTRUCTION_FILES}
+    old_key = hashlib.sha256(json.dumps({'schema': 2, 'constructionFiles': legacy},
+                                      sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    monkeypatch.setattr(runtime_module.subprocess, 'run', lambda *a, **k: pytest.fail('cache identity checks must stay offline'))
+    old_entry = tmp_path / 'cache' / old_key
+    old_entry.mkdir(parents=True, mode=0o700)
+    manifest = {'schemaVersion': 2, 'cacheKey': old_key, 'constructionFiles': legacy, 'artifacts': []}
+    old_manifest = old_entry / 'manifest.json'
+    old_manifest.write_text(json.dumps(manifest))
+    old_bytes = old_manifest.read_bytes()
+    old_manifest.chmod(0o444)
+    instance = runtime_module.Runtime(cache_dir=tmp_path / 'cache', state_dir=tmp_path / 'private',
+        out_dir=tmp_path / 'public', cli_archive=tmp_path / 'unused-runtime.tar.gz',
+        cli_sha256='a' * 64, version='0.26.1', source_commit='b' * 40, addon_sha256='c' * 64)
+    assert instance.key == runtime_module.cache_key() != old_key
+    assert instance.entry == instance.cache_dir / instance.key
+    assert not instance.entry.exists()
+    instance.entry.mkdir(mode=0o700)
+    if relabelled:
+        manifest['cacheKey'] = instance.key
+    candidate = instance.entry / 'manifest.json'
+    candidate.write_text(json.dumps(manifest))
+    candidate.chmod(0o444)
+    with pytest.raises(runtime_module.base.RuntimeFailure, match='source identity mismatch'):
+        instance._validate_entry()
+    assert old_manifest.read_bytes() == old_bytes
 
 
 def asset_record(payload=b'unit-test immutable download'):

@@ -60,6 +60,7 @@ HARNESS_FILES = tuple("tests/browser/" + name for name in (
     "runner.py", "android.py", "autofill.py", "network_evidence.py", "run.sh",
     "traced-geckodriver.sh", "control.py", "compose.yaml", "compose.android.yaml",
     "Dockerfile", "Android.Dockerfile", "fixture.py", "target.py", "dns.py", "requirements.txt",
+    "desktop-image.json", "android-image.json", "browser-setup.sh", "android-setup.sh", "image_recipes.py",
     "qr.py", "camera_scene.py", "camera_probe.py", "CameraProbe.Dockerfile",
     "managed.py", "managed_fixture.py",
 )) + (
@@ -72,6 +73,8 @@ HARNESS_FILES = tuple("tests/browser/" + name for name in (
     "tests/__init__.py",
     "tests/browser/real_node/__init__.py", "tests/browser/real_node/runtime.py",
     "tests/browser/real_node/base_cache.py",
+    "tests/browser/real_node/image_builder.py", "tests/browser/real_node/runtime-image.json",
+    "tests/browser/real_node/runtime-setup.sh",
     "tests/browser/real_node/runtime-inputs.json", "tests/browser/real_node/Runtime.Dockerfile",
     "tests/browser/real_node/base_bootstrap.py", "tests/browser/real_node/node_bootstrap.py",
     "tests/browser/real_node/guest_evidence.py", "tests/browser/real_node/native_gateway_markers.py",
