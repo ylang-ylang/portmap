@@ -742,6 +742,9 @@ The short host must actually resolve; otherwise replace it with the real IP or
 hostname. This is local completion, not node discovery. Each address follows
 name changes only until manually edited. Renaming a saved label never rewrites
 its saved endpoints.
+New connections are enabled when saved; there is no separate enable checkbox
+in the form. Editing preserves the connection's enabled/disabled state.
+Use **Enable** or **Disable** on its saved connection card to change that state.
 
 For Direct, supply the reachable host. New connections default to HTTP **80**
 and HTTPS **443**; open the collapsed **Advanced** section to change ports or

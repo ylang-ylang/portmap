@@ -270,9 +270,6 @@ def exercise(browser, case, proof):
         Select(driver.find_element(By.ID, 'ssh-auth-type')).select_by_value('password')
         browser.sensitive_input = True
         browser.enter('ssh-password', metadata['password'])
-        enabled = driver.find_element(By.ID, 'enabled')
-        if not enabled.is_selected():
-            enabled.click()
         driver.find_element(By.ID, 'save').click()
         WebDriverWait(driver, 15).until(lambda _: len(browser.cards(SSH_DOMAIN)) == 1)
         browser.sensitive_input = False
