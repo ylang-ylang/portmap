@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssh-server 
 COPY tests/browser/fixture.py tests/browser/target.py tests/browser/managed_fixture.py /app/tests/browser/
 CMD ["python", "/app/tests/browser/target.py"]
 
-FROM base AS browser
+FROM base AS browser-tools
 # Toolchain layers do not change when adapter/extension/test source changes.
 RUN apt-get update && apt-get install -y --no-install-recommends curl xz-utils libgtk-3-0 libdbus-glib-1-2 libasound2 libx11-xcb1 libxt6 libnss3-tools fonts-liberation && rm -rf /var/lib/apt/lists/*
 RUN curl --fail --location --retry 3 https://archive.mozilla.org/pub/firefox/nightly/2026/11/2026-11-13-21-17-35-mozilla-central/firefox-162.0a1.en-US.linux-x86_64.tar.xz -o /tmp/firefox.tar.xz && echo 'c03496c48a44f2bd49022387e86b228cffae2b555c5dfa2b0dd275050aafb9d4  /tmp/firefox.tar.xz' | sha256sum -c - && tar -xJf /tmp/firefox.tar.xz -C /opt && rm /tmp/firefox.tar.xz
@@ -24,10 +24,12 @@ RUN --mount=type=cache,id=portmap-browser-geckodriver,target=/var/cache/portmap-
 COPY tests/browser/requirements.txt /tmp/browser-requirements.txt
 RUN pip install --no-cache-dir -r /tmp/browser-requirements.txt && pip freeze > /app/browser-installed.txt
 RUN apt-get update && apt-get install -y --no-install-recommends strace && rm -rf /var/lib/apt/lists/* && dpkg-query -W > /app/browser-system-packages.txt
+ENV MOZ_HEADLESS=1
+
+FROM browser-tools AS browser
 COPY src /app/src
 COPY extension/firefox /app/extension/firefox
 COPY tools/build_firefox_extension.py /app/tools/build_firefox_extension.py
 COPY pyproject.toml /app/pyproject.toml
 COPY tests/browser /app/tests/browser
-ENV MOZ_HEADLESS=1
 CMD ["python", "/app/tests/browser/runner.py"]

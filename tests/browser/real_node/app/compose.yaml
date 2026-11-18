@@ -1,0 +1,10 @@
+services:
+  frontend:
+    build:
+      context: .
+      args:
+        VITE_DEPS_IMAGE: ${VITE_DEPS_IMAGE}
+    environment:
+      PORTMAP_PROOF_NODE: ${PORTMAP_PROOF_NODE}
+    expose:
+      - "5173"

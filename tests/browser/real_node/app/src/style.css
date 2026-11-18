@@ -1,0 +1,7 @@
+/* portmap-real-vite-css-8.0.16 */
+:root { font-family: system-ui, sans-serif; background: #eef4f8; color: #173b50; }
+body { margin: 0; padding: 2rem; }
+main { max-width: 48rem; margin: auto; padding: 2rem; background: white; border-radius: 1rem; box-shadow: 0 1rem 3rem #1233; }
+#asset-proof { color: rgb(1, 2, 3); border-left: 4px solid #287eac; padding: 0.7rem; }
+#counter { font: inherit; padding: 0.8rem 1.4rem; background: #173b50; color: white; border: 0; border-radius: 0.4rem; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }

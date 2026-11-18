@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_real_node_evidence import aggregate_fixture, persist_fixture, runtime_archive_fixture
+
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("firefox_packaging", ROOT / "tools/build_firefox_extension.py")
 packaging = importlib.util.module_from_spec(_spec)
@@ -653,22 +655,22 @@ def experimental_attachment_fixture(tmp_path):
     commit, tag = source["commit"], f"v{version}"
     assets = tmp_path / "assets"
     assets.mkdir()
-    release = {"version": version, "source": {
-        "repository": "ylang-ylang/portmap", "tag": tag, "commit": commit,
-    }, "assets": []}
+    release, executable_sha256 = runtime_archive_fixture(assets, version, commit)
     (assets / "release.json").write_text(json.dumps(release))
     evidence = {}
     for platform in ("desktop-firefox", "android-firefox"):
         path = tmp_path / (platform + ".json")
         path.write_text(json.dumps(complete_receipt_fixture(platform, built, source)))
         evidence[platform] = path
+    evidence["real-node"], _ = aggregate_fixture(
+        tmp_path / "real-node", release=release, xpi=xpi, source=source,
+        executable_sha256=executable_sha256, runtime_archive=assets / release["assets"][0]["filename"])
     return root, xpi, assets, tag, commit, evidence
 
 
 def test_experimental_attach_generates_distinct_source_bound_feed_and_preserves_stable(tmp_path):
     root, xpi, assets, tag, commit, evidence = experimental_attachment_fixture(tmp_path)
-    result = packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                           evidence["desktop-firefox"], evidence["android-firefox"])
+    result = packaging.attach_experimental(root, xpi, assets, tag, commit, evidence["desktop-firefox"], evidence["android-firefox"], evidence["real-node"])
     version = result["version"]
     name = f"portmap-firefox-experimental-{version}.xpi"
     assert (assets / name).read_bytes() == xpi.read_bytes()
@@ -700,8 +702,7 @@ def test_experimental_attach_generates_distinct_source_bound_feed_and_preserves_
         assert (assets / (path.name + ".sha256")).read_text() == f"{record['sha256']}  {path.name}\n"
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
     with pytest.raises(ValueError, match="already attached"):
-        packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                       evidence["desktop-firefox"], evidence["android-firefox"])
+        packaging.attach_experimental(root, xpi, assets, tag, commit, evidence["desktop-firefox"], evidence["android-firefox"], evidence["real-node"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
@@ -724,8 +725,7 @@ def test_experimental_attach_requires_exact_actual_dual_platform_evidence(change
     android.write_text(json.dumps(proof))
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
     with pytest.raises(ValueError):
-        packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                       evidence["desktop-firefox"], android)
+        packaging.attach_experimental(root, xpi, assets, tag, commit, evidence["desktop-firefox"], android, evidence["real-node"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
@@ -735,8 +735,7 @@ def test_experimental_attach_never_replaces_preexisting_stable_output(filename, 
     (assets / filename).write_bytes(b"existing stable channel bytes")
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
     with pytest.raises(ValueError, match="already exists"):
-        packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                       evidence["desktop-firefox"], evidence["android-firefox"])
+        packaging.attach_experimental(root, xpi, assets, tag, commit, evidence["desktop-firefox"], evidence["android-firefox"], evidence["real-node"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
@@ -745,8 +744,7 @@ def test_experimental_attach_never_replaces_preexisting_output(tmp_path):
     (assets / "firefox-experimental-updates.json").write_bytes(b"existing experimental feed")
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
     with pytest.raises(ValueError, match="already exists"):
-        packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                       evidence["desktop-firefox"], evidence["android-firefox"])
+        packaging.attach_experimental(root, xpi, assets, tag, commit, evidence["desktop-firefox"], evidence["android-firefox"], evidence["real-node"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
@@ -844,8 +842,7 @@ def test_experimental_receipt_cannot_omit_any_required_boundary(missing_case, tm
     android.write_text(json.dumps(proof))
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
     with pytest.raises(ValueError, match="required exercised cases"):
-        packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                       evidence["desktop-firefox"], android)
+        packaging.attach_experimental(root, xpi, assets, tag, commit, evidence["desktop-firefox"], android, evidence["real-node"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
@@ -906,8 +903,7 @@ def test_experimental_receipt_rejects_truncated_inconsistent_or_unbound_observat
     android.write_text(json.dumps(proof))
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
     with pytest.raises(ValueError):
-        packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                       evidence["desktop-firefox"], android)
+        packaging.attach_experimental(root, xpi, assets, tag, commit, evidence["desktop-firefox"], android, evidence["real-node"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
@@ -922,8 +918,7 @@ def test_experimental_publication_requires_actual_clean_exact_commit(change, tmp
         commit = "f" * 40
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
     with pytest.raises(ValueError, match="clean checkout at the exact source commit"):
-        packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                       evidence["desktop-firefox"], evidence["android-firefox"])
+        packaging.attach_experimental(root, xpi, assets, tag, commit, evidence["desktop-firefox"], evidence["android-firefox"], evidence["real-node"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
@@ -940,8 +935,7 @@ def test_desktop_receipt_requires_actual_loopback_admission_syscall_audit(field,
     desktop.write_text(json.dumps(proof))
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
     with pytest.raises(ValueError):
-        packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                       desktop, evidence["android-firefox"])
+        packaging.attach_experimental(root, xpi, assets, tag, commit, desktop, evidence["android-firefox"], evidence["real-node"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
@@ -954,8 +948,7 @@ def test_publication_binds_git_blobs_even_when_index_hides_a_local_edit(name, tm
     path.write_text(path.read_text() + "\n# uncommitted source input hidden from ordinary status\n")
     before = {path.name: path.read_bytes() for path in assets.iterdir()}
     with pytest.raises(ValueError):
-        packaging.attach_experimental(root, xpi, assets, tag, commit,
-                                       evidence["desktop-firefox"], evidence["android-firefox"])
+        packaging.attach_experimental(root, xpi, assets, tag, commit, evidence["desktop-firefox"], evidence["android-firefox"], evidence["real-node"])
     assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
 
 
@@ -968,3 +961,49 @@ def test_developer_package_identity_does_not_depend_on_zlib(tmp_path, monkeypatc
     packaging.build(ROOT, second)
     assert first.read_bytes() == second.read_bytes()
     assert packaging.check_payload(ROOT, second)["version"] == packaging.check_payload(ROOT, first)["version"]
+
+
+@pytest.mark.parametrize("failure", [
+    "missing-real-nodes", "bad-cli-hash", "partial-case", "stale-proof",
+    "incomplete-artifacts", "cleanup-failed", "different-guest-executable", "missing-cli-archive",
+])
+def test_experimental_attach_requires_complete_candidate_real_node_gate_before_any_write(tmp_path, failure):
+    root, xpi, assets, tag, commit, evidence = experimental_attachment_fixture(tmp_path)
+    path = evidence["real-node"]
+    proof = json.loads(path.read_text())
+    if failure == "missing-real-nodes":
+        proof["runtime"]["evidence"]["nodes"] = []
+    elif failure == "bad-cli-hash":
+        proof["inputs"]["runtime_archive_sha256"] = "f" * 64
+    elif failure == "partial-case":
+        proof["platforms"]["android"]["scenarios"].pop()
+    elif failure == "stale-proof":
+        proof["harness"]["commit"] = "f" * 40
+    elif failure == "incomplete-artifacts":
+        (path.parent / "desktop/captures/direct-js.bin").unlink()
+    elif failure == "cleanup-failed":
+        proof["runtime"]["cleanup"]["status"] = "failed"
+    elif failure == "different-guest-executable":
+        proof["runtime"]["evidence"]["nodes"][0]["guest"]["cli"]["executableSha256"] = "f" * 64
+        proof["runtime"]["evidence"]["nodes"][0]["statusCheck"]["agentExecutableSha256"] = "f" * 64
+    else:
+        (assets / f"portmap-{tag[1:]}-linux-amd64.tar.gz").unlink()
+    if failure != "incomplete-artifacts":
+        persist_fixture(path, proof)
+    before = {path.name: path.read_bytes() for path in assets.iterdir()}
+    with pytest.raises(ValueError, match="real-node evidence"):
+        packaging.attach_experimental(
+            root, xpi, assets, tag, commit, evidence["desktop-firefox"],
+            evidence["android-firefox"], path)
+    assert {path.name: path.read_bytes() for path in assets.iterdir()} == before
+
+
+def test_experimental_attach_cli_requires_separate_real_node_evidence_argument(tmp_path):
+    result = subprocess.run([
+        sys.executable, str(ROOT / "tools/build_firefox_extension.py"), "attach-experimental",
+        "--xpi", str(tmp_path / "candidate.xpi"), "--assets-dir", str(tmp_path / "assets"),
+        "--tag", "v0.26.1", "--commit", "1" * 40, "--desktop-evidence", "desktop.json",
+        "--android-evidence", "android.json",
+    ], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "--real-node-evidence" in result.stderr

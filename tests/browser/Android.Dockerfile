@@ -17,7 +17,7 @@ RUN case "$FIREFOX_ANDROID_CHANNEL" in \
       *) exit 2 ;; \
     esac && curl --fail --location --retry 3 "$url" -o /opt/android/firefox.apk && echo "$sha256  /opt/android/firefox.apk" | sha256sum -c - && printf '%s  /opt/android/firefox.apk\n' "$sha256" > /opt/android/firefox-apk.sha256
 
-# Reuse exactly the desktop Selenium/geckodriver pins and current test source.
+# Reuse the exact desktop Selenium/geckodriver pins; current source is mounted at runtime.
 FROM ${BROWSER_BASE}
 ARG FIREFOX_ANDROID_CHANNEL=release
 ENV ANDROID_FIREFOX_CHANNEL=${FIREFOX_ANDROID_CHANNEL} ANDROID_HOME=/opt/android ANDROID_SDK_ROOT=/opt/android ANDROID_AVD_HOME=/tmp/android-avd

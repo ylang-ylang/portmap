@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import re
@@ -65,6 +66,21 @@ HARNESS_FILES = tuple("tests/browser/" + name for name in (
     "tools/build_firefox_extension.py", "tools/build_firefox_ssh.py", "pyproject.toml",
     "src/portmap/cli.py", "src/portmap/connection_qr.py",
     "src/portmap/_qr_encoder.py", "src/portmap/_qr_encoder.LICENSE", "packaging/portmap.spec",
+    "tools/test_real_portmap.py", "tests/browser/real_node/evidence.py",
+    "tests/browser/real_node/browser.py", "tests/browser/real_node/android_runtime.py",
+    "tests/browser/real_node/traced-geckodriver.sh",
+    "tests/__init__.py",
+    "tests/browser/real_node/__init__.py", "tests/browser/real_node/runtime.py",
+    "tests/browser/real_node/base_cache.py",
+    "tests/browser/real_node/runtime-inputs.json", "tests/browser/real_node/Runtime.Dockerfile",
+    "tests/browser/real_node/base_bootstrap.py", "tests/browser/real_node/node_bootstrap.py",
+    "tests/browser/real_node/guest_evidence.py", "tests/browser/real_node/native_gateway_markers.py",
+    "tests/browser/real_node/deps/Dockerfile", "tests/browser/real_node/deps/package.json",
+    "tests/browser/real_node/deps/package-lock.json", "tests/browser/real_node/app/Dockerfile",
+    "tests/browser/real_node/app/compose.yaml", "tests/browser/real_node/app/package.json",
+    "tests/browser/real_node/app/vite.config.js", "tests/browser/real_node/app/index.html",
+    "tests/browser/real_node/app/src/main.js", "tests/browser/real_node/app/src/style.css",
+    "tests/browser/real_node/app/public/badge.svg", "tests/browser/real_node/app/public/proof.txt",
 )
 REQUIRED_EXPERIMENTAL_CASES = frozenset((
     "actual-missing-capability-blocks-both-modes",
@@ -675,8 +691,27 @@ def attach(root: Path, signed_xpi: Path, assets: Path, tag: str, commit: str,
     return {"version": version, "source_commit": commit, "firefox": records}
 
 
+def check_real_node_evidence(path: Path, *, archive: Path, release: dict, digest: str,
+                             version: str, commit: str, source: dict) -> dict:
+    """Run the trusted full-node validator, never code from supplied evidence."""
+    specification = importlib.util.spec_from_file_location(
+        "portmap_real_node_evidence", ROOT / "tests/browser/real_node/evidence.py")
+    validator = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(validator)
+    proof = validator.validate_aggregate(
+        path, release=release, xpi_sha256=digest, version=version, commit=commit,
+        source=source, require_candidate=True, required_platforms=("desktop", "android"))
+    record = next(record for record in release["assets"]
+                  if record["os"] == "linux" and record["arch"] == "amd64")
+    if (archive.is_symlink() or not archive.is_file() or
+            sha256(archive) != record["sha256"] or archive.stat().st_size != record["size"]):
+        raise ValueError("real-node evidence: candidate CLI archive differs from tested bytes")
+    return proof
+
+
 def attach_experimental(root: Path, xpi: Path, assets: Path, tag: str, commit: str,
-                        desktop_evidence: Path, android_evidence: Path) -> dict:
+                        desktop_evidence: Path, android_evidence: Path,
+                        real_node_evidence: Path) -> dict:
     """Attach experimental bytes and carry forward the exact historical stable feed."""
     manifest = check_payload(root, xpi)
     if not is_experimental(manifest):
@@ -702,6 +737,8 @@ def attach_experimental(root: Path, xpi: Path, assets: Path, tag: str, commit: s
         raise ValueError("runtime release manifest has different source identity")
     if any(field in release for field in ("firefox", "firefox_experimental", "firefox_stable_updates")):
         raise ValueError("Firefox assets already attached; never replace release bytes")
+    check_real_node_evidence(real_node_evidence, archive=assets / f"portmap-{version}-linux-amd64.tar.gz",
+                             release=release, digest=digest, version=version, commit=commit, source=source)
     filename = f"portmap-firefox-experimental-{version}.xpi"
     feedname = "firefox-experimental-updates.json"
     base_url = f"https://github.com/ylang-ylang/portmap/releases/download/{tag}/"
@@ -767,6 +804,7 @@ def main() -> int:
     experimental.add_argument("--commit", required=True)
     experimental.add_argument("--desktop-evidence", type=Path, required=True)
     experimental.add_argument("--android-evidence", type=Path, required=True)
+    experimental.add_argument("--real-node-evidence", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "build":
@@ -778,7 +816,8 @@ def main() -> int:
                       "signed": False, "publication_allowed": False, "payload_matches_source": True}
         elif args.command == "attach-experimental":
             result = attach_experimental(args.repo_root, args.xpi, args.assets_dir, args.tag,
-                                         args.commit, args.desktop_evidence, args.android_evidence)
+                                         args.commit, args.desktop_evidence, args.android_evidence,
+                                         args.real_node_evidence)
         else:
             result = attach(args.repo_root, args.signed_xpi, args.assets_dir, args.tag,
                             args.commit, args.desktop_evidence, args.android_evidence)

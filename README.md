@@ -909,8 +909,9 @@ The crypto provenance, reviewed callback/teardown patch, licenses and
 path using Emscripten 3.1.74, libssh2 1.11.1 and mbedTLS 3.6.5; `build --check`
 compares the generated JavaScript/WASM with the shipped bytes.
 
-The Docker harness uses two independent ordinary SSH/HTTP targets and real
-Firefox installations. It exercises missing-API guidance in a fresh permitted
+The transport/security Docker harness uses two independent ordinary SSH/HTTP
+targets and real Firefox installations. These targets are **not full Portmap
+nodes**. It exercises missing-API guidance in a fresh permitted
 installation, enabled native self-check, actual options controls, Direct/SSH
 pages, resources, POST, TLS, WebSockets, binary/concurrent requests, failed
 authentication/pins, isolated outages and saved configuration across a real
@@ -924,9 +925,108 @@ CLI-generated QR through the emulator's imagefile camera and real
 `getUserMedia`; desktop uses Firefox's native fake camera for lifecycle checks
 and real PNG import for decoding. These are not physical-camera tests.
 
+##### Full Portmap node acceptance
+
+Transport fixtures alone do not satisfy the release gate. The standard full-node
+workflow creates two independent, disposable KVM guests with their own Docker
+engines, runs the actual Portmap CLI/agent/gateway/catalog, and publishes a real
+Vite development project through the normal project configuration.
+Desktop Firefox and an official Android Firefox APK each exercise both
+Direct and SSH: catalog navigation, rendered JavaScript/CSS/image resources,
+HTTP POST and genuine Vite HMR WebSocket nonce roundtrips. Gateway evidence
+reconstructs complete HTTP POST requests from a SYN-anchored, bounded in-memory
+packet stream, retaining only sanitized connection/request metadata and the
+probe nonce—not payloads, authorization headers or query strings. Independent
+Vite application records corroborate both POST and WebSocket roundtrips.
+
+From the repository root, verify an existing published version with one command:
+
+```bash
+ACCEPT_ANDROID_SDK_LICENSE=1 python3 tools/test_real_portmap.py run --release v0.26.1
+```
+
+This requires an unprivileged Linux amd64 operator, a local Unix-socket Docker
+engine and `/dev/kvm`; it never relaxes host permissions or uses a privileged
+container. Read the Android SDK terms before setting the acceptance variable.
+Use `--platform desktop` or `--platform android` for local diagnosis only:
+publication always requires both. The command prints its unique public
+evidence directory and exits nonzero on any failed stage or cleanup.
+`--artifacts /tmp/unique-run-name` selects a new directory; existing evidence
+directories are never overwritten.
+
+For a candidate, test the **same CLI archive and XPI** that will be released,
+not a previous published version. Use the version/commit embedded in the
+build-generated runtime manifest:
+
+```bash
+ACCEPT_ANDROID_SDK_LICENSE=1 python3 tools/test_real_portmap.py run \
+  --xpi /tmp/portmap-experimental.xpi \
+  --runtime-archive "dist/portmap-${VERSION}-linux-amd64.tar.gz" \
+  --runtime-manifest dist/release.json --source-commit "$COMMIT" \
+  --artifacts /tmp/portmap-real-node-candidate
+```
+
+Run this before tagging a candidate. The release workflow independently repeats
+the check on the exact validated tag, in addition to the existing transport/
+security suites. `attach-experimental` requires their `--desktop-evidence` and
+`--android-evidence` receipts **and**
+`--real-node-evidence /tmp/portmap-real-node-candidate/result.json`.
+Missing, partial, dirty-source or mismatched candidate evidence blocks publication.
+Published-version diagnosis is explicitly labelled and cannot authorize a new
+candidate.
+
+The default cache is `~/.cache/portmap-real-node`; `--cache-dir` selects another
+operator-owned location. Only immutable dependencies are reused: SHA-verified
+downloads, source-free browser tools, OCI layers and a sealed dependency-only
+guest disk. Browser tools and guest construction have separate content keys.
+Changing app/test/runtime logic does not rebuild an unchanged dependency base;
+changes to its construction inputs do. Every run creates fresh overlays,
+accounts, SSH host keys, browser profiles and browser-managed keys. Passed
+results, private state and running Portmap instances are never cached.
+Symlinks, foreign ownership and unsafe writable cache paths are rejected,
+not silently adopted or chmodded. Keep cache, evidence and private state trees
+separate; `/tmp` evidence paths avoid shared writable workspace ancestry.
+
+For CI prewarming, `prepare-browsers --cache-dir CACHE_DIR --artifacts EVIDENCE_DIR`
+loads/builds only browser tools and writes `images.json`. The release workflow supplies
+its verified image IDs through `BROWSER_DESKTOP_IMAGE` and
+`BROWSER_ANDROID_IMAGE`; the old suites still mount and execute current source.
+Cache reuse never skips assertions. Public `result.json` records per-stage
+`timings_seconds`, cache hits, fresh identities and artifact digests. Its retained
+CLI archive, XPI, native logs/packets, screenshots and cleanup receipt support
+independent checking. The original failure is retained even if collection or
+cleanup also fails; passwords, private disks and profiles are excluded.
+
+Three consecutive local full runs against published `v0.26.1` passed:
+
+| Run | Full workflow seconds |
+| --- | ---: |
+| Initial acceptance | 184.80 |
+| Fresh repeat 1 | 181.81 |
+| Fresh repeat 2 | 202.76 |
+
+These are development-host measurements, not a CI latency guarantee. Each run
+still boots fresh nodes and an Android emulator; first use must also download
+and build any missing dependency cache entries.
+
+To run the same published-version check on CI without publishing a new plugin:
+
+```bash
+gh workflow run browser-tests.yml --ref dev -f release_tag=v0.26.1
+```
+
+Portmap's default endpoint behavior rewrites the upstream `Host` to the declared
+target, `127.0.0.1:5173` for this Vite project. Acceptance checks that behavior
+and independently verifies the original project hostname at the gateway and in
+`x-forwarded-host`; it does not enable `preserve_host` just to fit a test assertion.
+
+##### Isolation and publication evidence
+
+
 Runtime networks are internal-only, without host networking, published host
-ports, privileged containers or a mounted runtime socket. Each run cleans only
-its own project. Desktop connection traces can inspect the exact local
+ports, privileged containers or a mounted host runtime socket. Full-node guests
+use their own Docker engines internally, not the operator's socket. Each run
+cleans only its own project. Desktop connection traces can inspect the exact local
 admission endpoint; the emulator's external-interface PCAP cannot observe
 guest-loopback attempts, and its receipt states that limit. Receiver peers and
 the fallback trap provide independent transport evidence. Credential-bearing
@@ -939,11 +1039,11 @@ Experimental distribution is separate from the historical signed channel:
 legacy `firefox-updates.json` feed. Each new latest experimental release carries
 the byte-exact historical v0.23.0 stable feed and checksum as separately
 digest-bound compatibility metadata, so existing signed installations keep
-their original version and signed-XPI URL. It does not advertise a signed
-0.25.0 build. `attach-experimental` requires a clean exact source
-commit, matching payload/tooling/harness identities, complete versioned desktop
-and Android receipts for the same XPI, real permanent-install/capability
-observations, and the required network/receiver/restart boundaries before
+their original version and signed-XPI URL. Experimental payloads are never
+advertised as signed. `attach-experimental` requires a clean exact
+source commit, matching payload/tooling/harness identities, complete versioned
+desktop and Android transport receipts plus the full-node four-path receipt
+for the same XPI and CLI, and the required capability/network/restart boundaries before
 writing immutable assets. Receipts are trusted workflow evidence, not an
 authentication mechanism for arbitrary JSON. Uncommitted local test receipts
 explicitly identify their base commit and changed source bytes and cannot
