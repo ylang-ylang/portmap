@@ -1015,6 +1015,10 @@ cleanup also fails; passwords, private disks and profiles are excluded.
 Failed network-baseline checks retain bounded structural differences, with
 addresses and MACs redacted using a fresh non-exported per-run HMAC key.
 Diagnostics never waive unchanged-host checks or preserve private runtime state.
+Successful and failed cleanup receipts also retain before/after `docker0`
+presence and IPv6 address counts, without addresses. This distinguishes a
+verified initially IPv6-free bridge from one already configured with IPv6;
+pre-existing IPv6 is allowed and the same seven unchanged-host checks still apply.
 Android ADB waits are bounded, lifecycle failure records omit command payloads,
 and repeated final cleanup neither rediscovers profiles nor replaces the first error.
 
