@@ -74,7 +74,6 @@ def exercise(browser, case):
         identity = value("connection-id")
         enter("name", "Renamed display label")
         addresses("a.portmap", "a")
-        require(not browser.driver.find_element(By.ID, "enabled").is_selected(), "Edit enabled a disabled connection")
         browser.driver.find_element(By.ID, "save").click()
         WebDriverWait(browser.driver, 10).until(lambda _driver: value("name") == "")
         browser.action("a.portmap", "edit")

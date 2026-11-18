@@ -208,3 +208,14 @@
   raw network evidence before publishing immutable experimental assets plus
   byte-exact signed v0.23.0 feed compatibility metadata and completing checked
   Brew distribution. Publication never upgrades machines or restarts workloads.
+- Hotfix v0.26.1: remove the settings editor Enable connection checkbox and its
+  obsolete form/harness consumers. Preserve existing disabled state and saved-
+  card toggles; new and QR-created entries default enabled. Four source versions
+  and README match. The hotfix was integrated and published to trusted dev first.
+  Frozen pretag gate passed 2135 tests (4 integration cases deselected); actual
+  desktop and Android each passed 72 cases, and independent source/XPI review
+  matched all 30 runtime members. Separate Android UI capture retained all 76
+  original proof files byte-for-byte. The user cleared publication; local dirty
+  development receipts remain ineligible. Require fresh clean exact-main dual-72
+  CI proofs with original raw sidecars, all immutable runtime/experimental/feed
+  assets, unchanged signed stable-feed bytes and checked formula-only Brew merge.
