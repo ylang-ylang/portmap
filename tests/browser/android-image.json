@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "base": "${BROWSER_BASE}",
+  "inputs": {
+    "tests/browser/android-setup.sh": "android-setup.sh"
+  },
+  "steps": [
+    {
+      "script": "android-setup.sh",
+      "arguments": ["tools", "runtime"]
+    }
+  ],
+  "buildArguments": {
+    "ACCEPT_ANDROID_SDK_LICENSE": "0",
+    "FIREFOX_ANDROID_CHANNEL": "release"
+  },
+  "standardArguments": {
+    "ACCEPT_ANDROID_SDK_LICENSE": "1",
+    "FIREFOX_ANDROID_CHANNEL": "nightly"
+  },
+  "environment": {
+    "ANDROID_FIREFOX_CHANNEL": "${FIREFOX_ANDROID_CHANNEL}",
+    "ANDROID_HOME": "/opt/android",
+    "ANDROID_SDK_ROOT": "/opt/android",
+    "ANDROID_AVD_HOME": "/tmp/android-avd",
+    "PATH": "/opt/android/platform-tools:/opt/android/emulator:${PATH}"
+  },
+  "user": "0:0",
+  "workdir": "/app",
+  "entrypoint": [],
+  "command": ["python", "/app/tests/browser/android.py"]
+}

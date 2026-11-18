@@ -12,6 +12,7 @@ portmap = "portmap.cli:main"
 [project.optional-dependencies]
 test = [
   "pytest>=8",
+  "selenium==4.38.0",
 ]
 
 [build-system]
